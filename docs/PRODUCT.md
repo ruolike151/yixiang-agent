@@ -1,0 +1,387 @@
+# Momo（默默）— 本地个人助手 Agent 产品文档
+
+> 版本 v0.1 · 2026-09-19 · 状态：待评审
+> 项目代号 Momo（默默，"默默帮你记着"），可改。代号下文统一用 Momo。
+
+---
+
+## 0. 文档说明与来源声明
+
+- 本文档是产品的单一事实来源（PRD + 技术设计合一），后续新功能先改本文再动手。
+- 本项目**极大程度参考** [AI-Engineer-from-scratch](https://github.com/ShenSeanChen) 课程第 12 模块的 hermes 剪枝版（waku-agent，~6000 行）：借鉴其四大支柱划分（Harness / Loop / Memory / Eval-Ops）与关键设计（检索门控、三支柱记忆、trace + 发布门禁）。
+- **核心代码（loop / memory / gateway / provider）自行实现，以"每一行都能向面试官讲清楚"为验收标准**；工具与评测借鉴其思路后重写。与参考实现的保留/差异清单见 §5.3.6。
+
+## 1. 产品概述
+
+### 1.1 一句话定位
+
+跑在本人 Windows 电脑上、通过 QQ 随时交谈的个人 Agent：有持久记忆（记得我是谁、我喜欢什么）、能管理学习计划与备忘录、基于本地影视知识库做每日推荐与闲聊，并且全程可评测、可观测。
+
+### 1.2 背景与动机
+
+- 真实需求：秋招季需要管理学习进度和备忘，同时是重度影视/动画观众，希望有一个"记得我"的助手而不是每次从零开始的聊天窗口。
+- 工程目标：以面试为导向，做一个覆盖 Agent 开发核心考点（tool calling loop、记忆架构、RAG、多端接入、主动触发、评测运维）的完整作品，且**真实日用**，沉淀使用数据与迭代故事。
+
+### 1.3 设计原则
+
+1. **无框架自研**：不依赖 LangChain / LangGraph，核心链路自己写，换取对每一层的理解与可讲述性。
+2. **本地优先**：数据全部落在本机（SQLite + Markdown 文件），密钥只进 `.env`，不上云、不外发。
+3. **同一大脑，多个入口**：Gateway 只搬文本，CLI / QQ / 定时任务共享同一个 Session 与记忆。
+4. **可评测**：改任何 prompt / 模型 / 检索参数都要能跑回归评测，不过门禁不合并。
+5. **可扩展**：新工具、新语料、新入口都走既有注册机制，不改核心链路。
+
+### 1.4 成功标准（可量化）
+
+| 维度 | 目标 |
+|---|---|
+| 功能 | QQ 上可完成：记事/查计划/影视推荐/闲聊，每天早收到一条晨报 |
+| 记忆 | 跨会话记住用户画像与偏好，"上周我说喜欢什么"能答对 |
+| 检索 | 影视 golden 集 20 条，混合检索 top-3 命中率 ≥ 60% |
+| 评测 | 确定性评测全绿 + judge 平均分 ≥ 4/5，GitHub Actions 门禁生效 |
+| 成本 | 正常日用（每天 30~50 轮 + 晨报）API 成本 ≤ 0.5 元/天 |
+| 使用 | 连续真实使用 ≥ 14 天，沉淀 trace 与成本数据 |
+
+## 2. 用户故事与核心场景
+
+**场景 1：学习计划管理**
+"帮我排一个两周的 RAG 复习计划，每天晚上两小时" → Momo 调 `create_plan` + `add_task` 生成逐日任务；"今天要学什么" → `list_today` 如实返回，不编造；"算法看完了" → `complete_task` 并记入情景记忆。
+
+**场景 2：备忘录**
+"记一下周五中午前交开题材料" → `add_memo`（截止时间由 Momo 解析相对日期）；晨报自动带出到期备忘；"那个材料交了" → `finish_memo`。
+
+**场景 3：影视知识库问答与推荐**
+"想看类似《怪物》的悬疑番" → `search_media` 混合检索（关键词 + 向量），返回带年份/类型/一句话理由的候选；"这部我看过，一般" → 记入口味画像，影响后续排序。
+
+**场景 4：每日晨报（主动式 Agent）**
+每天 8:00，调度器主动组装：今日学习任务 + 到期备忘 + 一条影视推荐（过滤已推、按口味排序），推送到 QQ。电脑睡眠错过则唤醒后补发。
+
+**场景 5：B 站视频分享（P2）**
+"找讲 KV Cache 讲得好的视频" → `bilibili_search` 返回标题/UP 主/链接卡片。
+
+## 3. 功能需求与优先级
+
+| 优先级 | 功能 | 验收标准 |
+|---|---|---|
+| P0 | Agent Loop（reason→act→observe） | 工具调用链正确，≤8 轮收敛，工具报错可重试 ≤2 次 |
+| P0 | CLI 入口 | 命令行完整对话，含 `[tools used]` 折叠记录 |
+| P0 | 三文件核心记忆 + 情景/程序性记忆 + 门控 | 跨会话记忆生效；门控"1+1"不检索、"我上周说喜欢啥"检索 |
+| P0 | 学习计划 / 备忘录工具 | CRUD 正确，相对日期解析正确 |
+| P0 | Trace + Usage | 每轮 JSONL 落盘，成本可按天汇总 |
+| P1 | QQ 接入（NapCat + OneBot v11） | 常驻在线，断线自动重连，消息幂等 |
+| P1 | RAG 影视库（混合检索） | golden 集 top-3 命中 ≥60%，检索延迟 < 1s |
+| P1 | 每日晨报 + 口味闭环 | 每天准点推送；连续 7 天推荐不重复；反馈影响排序 |
+| P1 | 确定性评测 + judge + CI 门禁 | Actions 跑离线评测，失败阻止合并 |
+| P2 | B 站搜索/分享 | 返回结构化卡片消息 |
+| P2 | Pixiv 下载分享 | 登录态可用时按 PID 下载并发图（合规灰区，仅作花活） |
+| P3+ | 见 §11 路线图 | — |
+
+## 4. 系统架构
+
+### 4.1 架构图
+
+```
+QQ (NapCat, OneBot v11 反向WS) ─┐
+CLI (终端) ─────────────────────┤→ Gateway 层 → Session(工作记忆拼装) → Agent Loop ⇄ Tool Registry
+APScheduler(晨报/巩固) ────────┘        ↑                                      │
+                                        │            ┌───────────────────────────┤
+              soul.md/user.md ──────────┤            ▼                           ▼
+              记忆门控检索(小模型) ←─────┘   Memory(SQLite: facts/episodes   Tools: plan/memo/
+                                              /skills) + memory.md 镜像      media/bilibili/…
+                                                                        │
+                                        RAG 影视库(media表 + FTS5 + sqlite-vec 混合检索)
+                                        Ops: trace.jsonl / usage.jsonl / evals / CI 门禁
+```
+
+### 4.2 模块职责
+
+| 模块 | 职责 | 对应参考实现 |
+|---|---|---|
+| `gateway/` | 只做协议转换与文本搬运：cli / qq / scheduler | `waku/gateway/`（qq 为全新实现） |
+| `loop/` | tool-calling 主循环、迭代上限、错误重试 | `waku/loop/agent.py`（重写） |
+| `providers.py` | OpenAI-compatible 抽象，按角色路由模型 | `waku/loop/models.py`（重写简化） |
+| `memory/` | 三文件核心记忆 + 三支柱 + 门控 + 巩固 | `waku/memory/`（重写，加 user.md） |
+| `rag/` | 语料入库管线 + 混合检索 | 无（全新） |
+| `tools/` | 工具注册与实现 | `waku/tools/`（重写） |
+| `ops/` | trace / usage / 评测 / 门禁 | `waku/ops/`（重写简化） |
+
+### 4.3 一次对话的完整数据流
+
+1. QQ/CLI 收到消息 → Gateway 规整为 `{session_id, source, text}` 入队
+2. Session 拼装工作记忆（每轮现拼，不缓存）：`soul.md` + `user.md` + 当前时间/模型信息 + 近 N 轮历史 + 门控检索到的记忆与相关 skill + （若涉及影视）RAG 结果
+3. Loop 调主模型 → 产生 tool_calls → 执行 → observation 回填 → 循环直至模型给出最终回复或达 8 轮
+4. 回复经 Gateway 发回；`add_exchange` 把工具活动折叠为 `[tools used: …]` 写入历史（防止下一轮重复调用）
+5. 异步落盘：chat_log、trace JSONL、usage；每 N 轮触发巩固
+
+### 4.4 每日晨报数据流（主动式）
+
+APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（近期反馈 episodes + user.md 偏好）→ `recommend_media`（混合检索 → 过滤 recommend_log 已推 → 按口味加权排序）→ 模板 + 模型润色成一条晨报 → QQ 推送 → recommend_log 落库。
+
+## 5. 核心子系统设计
+
+### 5.1 Agent Loop
+
+- 伪代码与参考一致：`while not done: resp = llm(messages, tools); if tool_calls: run → observe; else: done`
+- `max_iterations = 8`；单工具失败返回结构化错误文本（`{"error": "..."}`）交回模型，同一工具连续失败 2 次则放弃并如实告知
+- 工具调用记录折叠进 assistant 历史（`[tools used: …]`），杜绝"重复订日历"类 bug
+
+### 5.2 Provider 抽象（按角色路由）
+
+- 统一走 OpenAI-compatible 接口（`base_url` + `api_key`），DeepSeek / GLM / 本地 vLLM/Ollama 同一适配器
+- **角色路由**是本设计特色：主对话 / 检索门控 / judge / 摘要巩固可指向不同模型，配置示例：
+  ```ini
+  MOMO_MAIN_MODEL=deepseek-chat          # 主对话
+  MOMO_GATE_MODEL=deepseek-chat          # 门控（后续切本地小模型）
+  MOMO_JUDGE_MODEL=glm-4-flash           # 评测裁判（便宜）
+  MOMO_EMBED=bge-small-zh-v1.5           # 本地嵌入，零成本
+  ```
+- 升级路径：门控/judge 这类"窄决策"任务逐步切本地小模型，把 API 成本压到接近只剩主对话
+
+### 5.3 记忆系统（★项目特色）
+
+#### 5.3.1 总览：三类记忆 + 两道工序
+
+| 层 | 载体 | 生命周期 | 进工作记忆方式 |
+|---|---|---|---|
+| 核心记忆 | `soul.md` / `user.md` / `memory.md`（data/ 下） | 永久，可手改 | 每轮全量拼入 |
+| 情景记忆 | SQLite `chat_log` + `episodes` | 永久，可蒸馏 | 门控命中时检索注入 |
+| 程序性记忆 | `skills/*/SKILL.md` | 永久 | 关键词匹配注入 |
+
+两道工序：**检索门控**（写前先判断）与**巩固**（批量蒸馏）。
+
+#### 5.3.2 核心记忆三文件（对齐 hermes 风格）
+
+| 文件 | 内容 | 谁能改 | 上限 |
+|---|---|---|---|
+| `soul.md` | Momo 的人格、行为守则、工具使用纪律（如"相对日期自己解析，不要问用户现在几点"） | `update_soul` 工具**只追加** "## Learned rules"（不能自删诚实条款）；完整重写仅限人 | 8000 字符 |
+| `user.md` | 用户画像：作息、身份（秋招 agent 岗候选人）、偏好（喜欢的影视类型、口味）、约束 | `update_user` 工具追加/更新条目；人可手改 | 4000 字符 |
+| `memory.md` | 人类可读镜像：由巩固工序从 facts/episodes 定期生成"当前最重要的若干事实" | 系统生成，人可读可干预（手改会在下次巩固时保留人工标记条目） | 生成时控制在 100 行内 |
+
+设计理由：soul（我是谁）/ user（用户是谁）/ memory（我知道什么）三问分离，等价于 Letta/MemGPT 的 persona block + human block 思路，但用 Markdown 文件实现——可 diff、可 git 版本化、可手改，这是面试讲解的好素材。检索仍走 SQLite（FTS5 + 向量），memory.md 不承担检索职责，只是"给人看的镜像"。
+
+#### 5.3.3 情景记忆
+
+- `chat_log` 逐轮记录（session_id / source / user_text / reply / tools_json / created_at）
+- 巩固工序每 N=20 轮把未巩固的 chat_log 蒸馏成 `episodes(happened_at, summary)`，如"2026-09-20：用户开始两周 RAG 复习计划，偏好晚上学习"
+- episodes 参与门控检索，是口味画像的数据来源
+
+#### 5.3.4 程序性记忆（skills）
+
+- `create_skill` 工具可让 Momo 把用户教的重复流程写成 SKILL.md（前置校验：slug 合法、不覆盖已有、需用户确认）
+- 每轮按消息关键词匹配相关 skill 注入 system prompt
+
+#### 5.3.5 检索门控（Hero 设计，保留并强化）
+
+- 写在每轮检索之前：小模型只回答一个 JSON 问题——`{"retrieve": bool, "query": str, "reason": str}`
+- 动机：默认全量检索(a)慢 (b)无关记忆会带偏回答（过度解读）
+- **fail-open**：门控自身出错时选择检索——"宁可给旧记忆，不可丢记忆"
+- 成本：一次几百 token 的小模型调用；后续切本地模型归零
+
+#### 5.3.6 与参考实现的保留/差异清单
+
+| 项 | 参考（waku） | 本项目 |
+|---|---|---|
+| SOUL.md + update_soul 只追加 | ✅ | **保留** |
+| 检索门控 fail-open | ✅ | **保留**，门控模型可独立配置/本地化 |
+| manage_memory / create_skill | ✅ | **保留**（重写） |
+| MEMORY.md 镜像 | ✅ | **保留**，由巩固工序生成 |
+| user.md 用户画像 | ❌ 无 | **新增**（对齐 hermes 原版三文件） |
+| 记忆检索 | FTS5 纯关键词 | **升级**：FTS5 + sqlite-vec 混合 |
+| 巩固 | 每 N 轮蒸馏 | **保留**，同时生成 memory.md |
+| Telegram/Apple 生态 gateway | ✅ | **替换**为 QQ（NapCat/OneBot v11） |
+| RAG 影视库 | ❌ 无 | **新增**（含语料管线与口味闭环） |
+
+### 5.4 RAG 影视库
+
+#### 5.4.1 语料来源与入库管线（为持续更新而设计）
+
+- 来源：Bangumi API（番剧，免 key）为主，TMDb（电影，免费 key）为辅；首期 300~500 部
+- 管线命令化、幂等：`python -m momo.rag.ingest --source bangumi --tags 悬疑,科幻 --pages 5`
+  - 按 `bangumi_id` upsert：已存在且简介未变则跳过，新增/变更才重新嵌入（省时省钱）
+  - 元数据字段：标题 / 类型(电影·TV·番剧) / 年份 / genres / 评分 / 简介 / 封面 URL
+- **不做暴力 chunk**：结构化字段 + 简介整体作为检索单元（一部作品一条记录），嵌入文本 = 标题×2 + 类型 + genres + 简介前 500 字
+
+#### 5.4.2 混合检索
+
+1. FTS5 关键词召回（标题/简介，top 20）
+2. sqlite-vec 向量召回（bge-small-zh-v1.5，512 维，top 20）
+3. RRF（k=60）融合排序列表
+4. 元数据过滤：类型/年份硬过滤、已推（recommend_log）排除
+5. 口味加权：user.md 偏好 tags + 近期 episodes 反馈（"好看"+ / "一般"−）做软加权
+6. 返回 top-3，附"推荐理由"所需的命中字段
+
+#### 5.4.3 检索质量评测
+
+- 20 条 golden QA（"类似《怪物》的悬疑番"→ 期望含《虚构推理》类同题材作品；"轻松日常番"→ 期望集合），指标 top-3 命中率，纳入确定性评测
+
+### 5.5 Gateway 层
+
+#### 5.5.1 CLI（P0）
+
+终端 REPL，`source=cli` 打标；`/new` 开新会话、`/history` 切换会话。
+
+#### 5.5.2 QQ（P1）
+
+- 协议：NapCat（Windows 可执行）+ OneBot v11，**反向 WebSocket** 接入 Momo（无需公网 IP）
+- 可靠性：断线指数退避重连（1s→2s→…→60s 封顶）；OneBot 事件可能重复投递，按 `message_id` 幂等去重
+- 安全：`MOMO_QQ_ALLOWED` 白名单只响应本人 QQ 号；**群消息默认忽略**（防第三方注入 prompt），仅私聊
+- 富媒体：收到图片先落盘再把路径给模型；回复支持 CQ 码发图（影视封面、Pixiv 图）
+
+#### 5.5.3 Scheduler（P1）
+
+- APScheduler 常驻进程内：8:00 晨报、每晚巩固、每日 usage 汇总
+- 补发：晨报任务记录"应发日期"，启动时发现今天未发且当前时间在 8:00~12:00 则补发
+- 任务异常捕获记 trace，绝不杀主进程
+
+### 5.6 工具系统
+
+Tool 约定：`Tool(name, description, input_schema, fn)`，注册进全局 registry；错误以 `{"error": …}` 字符串返回给模型。
+
+| 工具 | 优先级 | 参数要点 | 说明 |
+|---|---|---|---|
+| `add_memo` / `list_memos` / `finish_memo` | P0 | content, due_at(ISO) | 备忘录 CRUD |
+| `create_plan` / `add_task` / `list_today` / `complete_task` | P0 | 日期、内容、est_minutes | 学习计划 |
+| `manage_memory` | P0 | action: search/update/delete | 记忆 CRUD（先查 id 再改） |
+| `update_soul` / `update_user` / `create_skill` | P0 | rule / profile 条目 / skill | 三文件与程序性记忆 |
+| `search_media` / `recommend_media` | P1 | query, filters | 混合检索 + 推荐排序 |
+| `bilibili_search` | P2 | keyword | 返回标题/UP/链接 |
+| `pixiv_download` | P2 | pid | 登录态依赖，仅花活 |
+
+**新工具扩展指南**（后续追加功能照此三步，不改核心链路）：
+1. `tools/` 下新建文件，实现函数并包成 `Tool`（schema 用 JSON Schema）
+2. 在 `tools/__init__.py` 注册
+3. 在 `evals/deterministic/` 加至少 1 条触发/参数断言用例
+
+### 5.7 运维与可观测
+
+- **trace**：`data/traces/YYYY-MM-DD.jsonl`，字段：`ts / session / source / user_text / gate{retrieve,query,reason} / tool_calls[{tool,args,ok,ms}] / tokens{in,out} / cost / model / error`
+- **usage**：`data/usage.jsonl` 按轮追加，`momo-ops usage --day` 汇总成本/轮次/工具分布
+- 错误处理策略：工具错误→交回模型重试（≤2）；门控错误→fail-open 检索；QQ 断线→退避重连；调度错误→记 trace 不中断；LLM 超时→一次重试后如实告知
+
+## 6. 评测方案
+
+### 6.1 确定性评测（pytest，离线优先）
+
+| 用例 | 断言 |
+|---|---|
+| 备忘触发 | "记一下周五中午前交材料" → 必调 `add_memo` 且 due 解析正确 |
+| 计划查询 | `list_today` 只返回今日 items，不编造 |
+| 记忆持久化 | 写入 fact → 新会话询问 → 答案正确 |
+| 门控跳过/命中 | "1+1=?"→false；"我上周说喜欢什么来着"→true |
+| 混合检索 | golden 20 条 top-3 命中率 ≥60% |
+| 推荐去重 | 连续两日推荐集无交集 |
+| QQ 幂等 | 同 message_id 二次投递只处理一次 |
+| 三文件边界 | update_soul 不可删除既有规则；user.md 超限拒绝 |
+
+### 6.2 LLM-as-judge
+
+10 条开放对话（闲聊/推荐/计划混合），judge 模型按"事实正确/工具合理/语气"1~5 打分，均值 ≥4 通过。
+
+### 6.3 发布门禁
+
+GitHub Actions：push/PR 自动跑 `pytest evals/deterministic -m "not live"` + ruff，失败阻止合并。原则：**线上修一个 bug，必补一条回归用例**。
+
+## 7. 数据模型（SQLite `data/state.db`，DDL 摘要）
+
+```sql
+CREATE TABLE facts(id INTEGER PRIMARY KEY, subject TEXT, content TEXT, updated_at TEXT);
+CREATE VIRTUAL TABLE facts_fts USING fts5(subject, content);      -- 同步维护
+CREATE VIRTUAL TABLE facts_vec USING vec0(embedding float[512]);
+
+CREATE TABLE chat_log(id INTEGER PRIMARY KEY, session_id TEXT, source TEXT,
+                      user_text TEXT, reply_text TEXT, tools_json TEXT, created_at TEXT);
+CREATE TABLE episodes(id INTEGER PRIMARY KEY, happened_at TEXT, summary TEXT, session_id TEXT);
+
+CREATE TABLE plans(id INTEGER PRIMARY KEY, title TEXT, goal TEXT,
+                   start_date TEXT, end_date TEXT, status TEXT);
+CREATE TABLE plan_items(id INTEGER PRIMARY KEY, plan_id INTEGER, date TEXT,
+                        content TEXT, est_minutes INTEGER, status TEXT);   -- todo/done/skipped
+CREATE TABLE memos(id INTEGER PRIMARY KEY, content TEXT, due_at TEXT,
+                   done INTEGER DEFAULT 0, created_at TEXT);
+
+CREATE TABLE media(id INTEGER PRIMARY KEY, source_id TEXT UNIQUE, title TEXT,
+                   mtype TEXT, year INTEGER, genres TEXT, rating REAL,
+                   synopsis TEXT, cover TEXT, embed BLOB);
+CREATE VIRTUAL TABLE media_fts USING fts5(title, synopsis);
+CREATE VIRTUAL TABLE media_vec USING vec0(embedding float[512]);
+CREATE TABLE recommend_log(id INTEGER PRIMARY KEY, media_id INTEGER,
+                           recommended_on TEXT, channel TEXT, feedback TEXT); -- good/bad/none
+
+CREATE TABLE scheduled_runs(id INTEGER PRIMARY KEY, job TEXT, run_date TEXT, status TEXT); -- 晨报补发依据
+```
+
+## 8. 目录结构
+
+```
+momo/
+  app.py  config.py  providers.py
+  loop/agent.py
+  gateway/{cli.py, qq.py, scheduler.py}
+  memory/{core_files.py, semantic.py, episodic.py, procedural.py, gate.py, consolidate.py}
+  rag/{ingest.py, retrieve.py, embed.py}
+  tools/{registry.py, memo.py, plan.py, memory_admin.py, media.py, bilibili.py}
+  ops/{trace.py, usage.py, release_gate.py}
+evals/{deterministic/, judge/}
+docs/PRODUCT.md            ← 本文档
+data/                      ← 运行时生成（gitignore）：state.db、soul.md、user.md、memory.md、skills/、traces/
+scripts/                   ← demo 种子数据等
+```
+
+## 9. 非功能需求
+
+| 项 | 要求 |
+|---|---|
+| 成本 | ≤0.5 元/天（§1.4 口径）；usage 每日汇总可查 |
+| 延迟 | 单轮端到端 <5s（无工具）/ <15s（含工具+检索） |
+| 隐私 | 数据全部本地；密钥仅 `.env`（gitignore）；QQ 白名单；群消息忽略 |
+| 平台 | Windows 优先开发（本机），代码保持 Linux 兼容（为后续迁移服务器） |
+| 依赖 | Python 3.12 + uv；sqlite-vec、httpx、apscheduler、websockets、sentence-transformers（嵌入） |
+
+## 10. 实施计划（方案二：按模块自顶向下，每周末有可演示里程碑）
+
+| 周 | 模块 | 里程碑（可演示） |
+|---|---|---|
+| 1 | 基座：仓库/config/provider 抽象/loop/工具注册 + memo、plan 工具/CLI/trace+usage | **CLI 里完整对话，能记事、排计划、看 trace** |
+| 2 | 记忆系统：三文件 + episodic + skills + 门控 + 巩固 + 记忆管理工具；确定性评测起步（≥10 条） | **跨会话记忆生效（"上周我说过啥"能答），evals 绿** |
+| 3 | QQ gateway（NapCat 接入、重连、幂等、白名单）+ RAG 全链路（ingest 管线、混合检索、media 工具） | **QQ 上聊起来；影视问答可用** |
+| 4 | 晨报闭环（调度+去重+口味加权+补发）+ judge 评测 + CI 门禁 + README/架构图/demo 脚本 + B 站工具；开始连续真实使用 | **简历可写、视频可演示，进入"用-测-改"循环** |
+
+缓冲与砍单顺序：时间超支先砍 Pixiv → B 站工具 → demo 润色；**评测与记忆永不砍**。
+
+## 11. 后续路线图（文档随功能演进）
+
+1. **更多工具**（按 §5.6 扩展指南）：日历(ICS)、RSS 订阅摘要、浏览器阅读、邮件摘要
+2. **语料库持续更新**：ingest 管线支持 `--since` 增量 + 每周自动拉新番季度表；订阅源（追更通知）
+3. **本地小模型接管**：门控/judge/嵌入逐步本地化（vLLM + Qwen 小模型），主对话保留云端
+4. **记忆可视化 dashboard**：三文件在线编辑 + trace 浏览 + 成本图表
+5. **语音入口**、**多用户隔离**（每用户独立 data 目录）
+6. 迁移部署到云服务器（Docker Compose：Momo + NapCat）
+
+## 12. 面试叙事要点
+
+**电梯稿（30s）**：我做了一个跑在本机、接 QQ 的个人 Agent：无框架自研 tool-calling loop，hermes 风格的三文件核心记忆（soul/user/memory.md）加检索门控和周期巩固，本地 SQLite 上做 FTS5+向量混合检索的影视推荐，每天主动推晨报；全程 trace 落盘、确定性评测加 LLM-as-judge 做 CI 发布门禁，连续真实使用 N 天、日均成本 X 元。
+
+**三个深挖故事**：
+1. **检索门控的取舍**——为什么不是每轮都查记忆（慢 + 过度解读）、fail-open 的理由、成本账
+2. **混合检索与推荐闭环**——为什么结构化语料不 chunk、RRF 融合、已推去重与口味加权的排序设计、golden 集命中率数字
+3. **评测驱动的迭代**——"改 prompt 必跑 evals"的工作流，举一个被 evals 拦下的真实回归
+
+**预期追问与答法**：为什么不用 LangGraph（要理解底层，且循环本身 <100 行）；记忆和 RAG 的区别（记忆是写给自己的人格/画像/情节，RAG 是对外部语料的检索）；QQ 消息的 prompt 注入防护（白名单 + 群消息忽略 + 工具白名单）；context 窗口治理（每轮现拼 + 历史窗口 + 记忆外置）；如何变成多用户（数据目录隔离 + gateway 会话映射）。
+
+## 13. 风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| QQ 协议非官方，账号风控 | 使用小号；仅私聊低频；不做群聊、不发广告 |
+| NapCat 需要偶发重新扫码 | 接受；掉线重连 + 启动自检；晨报有补发兜底 |
+| 本机不常开，晨报/在线中断 | 唤醒补发；路线图含服务器迁移 |
+| 语料质量影响推荐 | 结构化 API 数据源；golden 集监控命中率 |
+| 时间超支 | §10 砍单顺序；评测与记忆优先 |
+| "参考课程项目"同质化 | §0 来源声明 + §5.3.6 差异清单；核心自写、能白板讲解每行 |
+
+## 14. 开放问题（待讨论）
+
+1. 项目代号 Momo 是否采用？
+2. 晨报推送时间定 8:00 是否合适？
+3. 首期语料 300~500 部（Bangumi 番剧为主 + TMDb 电影）规模是否合适？
+4. QQ 小号与 NapCat 是否已可准备（决定第 3 周排期）？
+5. dashboard 放路线图不做（P0~P2 无 Web UI），demo 靠终端录屏 + QQ 录屏，是否接受？

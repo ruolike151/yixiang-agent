@@ -1,7 +1,8 @@
 # Momo（默默）— 本地个人助手 Agent 产品文档
 
-> 版本 v0.1 · 2026-09-19 · 状态：待评审
+> 版本 v0.2 · 2026-09-19 · 状态：待评审
 > 项目代号 Momo（默默，"默默帮你记着"），可改。代号下文统一用 Momo。
+> 变更记录：v0.2 新增记忆治理设计——memory.md 人工可编辑与 id 双向同步、"记住"直达指令、对话式记忆管理（§5.3.6）。
 
 ---
 
@@ -36,6 +37,7 @@
 |---|---|
 | 功能 | QQ 上可完成：记事/查计划/影视推荐/闲聊，每天早收到一条晨报 |
 | 记忆 | 跨会话记住用户画像与偏好，"上周我说喜欢什么"能答对 |
+| 记忆治理 | "记住"指令在评测中 100% 触发写入；memory.md 人工删/改后同步生效；对话中可指导 Momo 修改/删除记忆 |
 | 检索 | 影视 golden 集 20 条，混合检索 top-3 命中率 ≥ 60% |
 | 评测 | 确定性评测全绿 + judge 平均分 ≥ 4/5，GitHub Actions 门禁生效 |
 | 成本 | 正常日用（每天 30~50 轮 + 晨报）API 成本 ≤ 0.5 元/天 |
@@ -58,6 +60,14 @@
 **场景 5：B 站视频分享（P2）**
 "找讲 KV Cache 讲得好的视频" → `bilibili_search` 返回标题/UP 主/链接卡片。
 
+**场景 6："记住"直达指令**
+"记住我周末喜欢睡到十点""别忘了我不吃香菜" → 会话层识别指令并打标 → Momo 必须先把事实去重后写入长期记忆（已存在相近记忆则更新），并复述"已记住：……"确认。
+
+**场景 7：记忆治理（人工 + 对话式）**
+两条路：
+- 人工直改：用户直接编辑 `data/memory.md`，删掉不重要的行、修改过时的描述、甚至手写新记忆——下次同步即生效，删除的记忆不再被注入和检索。
+- 对话式："你记得哪些关于我的事？" → Momo 列出带编号的记忆 → "第 2 条不对，我喜欢的是科幻不是恐怖" / "把第 3 条删了" → Momo 按指定修改/删除并复述变更。
+
 ## 3. 功能需求与优先级
 
 | 优先级 | 功能 | 验收标准 |
@@ -65,6 +75,8 @@
 | P0 | Agent Loop（reason→act→observe） | 工具调用链正确，≤8 轮收敛，工具报错可重试 ≤2 次 |
 | P0 | CLI 入口 | 命令行完整对话，含 `[tools used]` 折叠记录 |
 | P0 | 三文件核心记忆 + 情景/程序性记忆 + 门控 | 跨会话记忆生效；门控"1+1"不检索、"我上周说喜欢啥"检索 |
+| P0 | "记住"指令直达写入 | 触发后必调 save_memory（先去重，相近则更新）；未写入时兜底重试并如实报告 |
+| P0 | 记忆治理（人工 + 对话式） | memory.md 人工删/改/增同步生效；对话中可让 Momo 列出/修改/删除记忆 |
 | P0 | 学习计划 / 备忘录工具 | CRUD 正确，相对日期解析正确 |
 | P0 | Trace + Usage | 每轮 JSONL 落盘，成本可按天汇总 |
 | P1 | QQ 接入（NapCat + OneBot v11） | 常驻在线，断线自动重连，消息幂等 |
@@ -86,7 +98,7 @@ APScheduler(晨报/巩固) ────────┘        ↑               
                                         │            ┌───────────────────────────┤
               soul.md/user.md ──────────┤            ▼                           ▼
               记忆门控检索(小模型) ←─────┘   Memory(SQLite: facts/episodes   Tools: plan/memo/
-                                              /skills) + memory.md 镜像      media/bilibili/…
+                                              /skills) + 核心区(memory.md 同步)   media/bilibili/…
                                                                         │
                                         RAG 影视库(media表 + FTS5 + sqlite-vec 混合检索)
                                         Ops: trace.jsonl / usage.jsonl / evals / CI 门禁
@@ -107,7 +119,7 @@ APScheduler(晨报/巩固) ────────┘        ↑               
 ### 4.3 一次对话的完整数据流
 
 1. QQ/CLI 收到消息 → Gateway 规整为 `{session_id, source, text}` 入队
-2. Session 拼装工作记忆（每轮现拼，不缓存）：`soul.md` + `user.md` + 当前时间/模型信息 + 近 N 轮历史 + 门控检索到的记忆与相关 skill + （若涉及影视）RAG 结果
+2. Session 拼装工作记忆（每轮现拼，不缓存）：`soul.md` + `user.md` + `memory.md`（核心区三文件）+ 当前时间/模型信息 + 近 N 轮历史 + 门控检索到的记忆与相关 skill + （若涉及影视）RAG 结果
 3. Loop 调主模型 → 产生 tool_calls → 执行 → observation 回填 → 循环直至模型给出最终回复或达 8 轮
 4. 回复经 Gateway 发回；`add_exchange` 把工具活动折叠为 `[tools used: …]` 写入历史（防止下一轮重复调用）
 5. 异步落盘：chat_log、trace JSONL、usage；每 N 轮触发巩固
@@ -146,7 +158,7 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
 | 情景记忆 | SQLite `chat_log` + `episodes` | 永久，可蒸馏 | 门控命中时检索注入 |
 | 程序性记忆 | `skills/*/SKILL.md` | 永久 | 关键词匹配注入 |
 
-两道工序：**检索门控**（写前先判断）与**巩固**（批量蒸馏）。
+两级结构：**核心区**（三个 Markdown 文件，每轮全量注入，人机共治）与**检索区**（SQLite 长尾记忆，经门控命中才注入）。两道工序：**检索门控**（查前先判断）与**巩固**（批量蒸馏、向核心区提案）。
 
 #### 5.3.2 核心记忆三文件（对齐 hermes 风格）
 
@@ -154,14 +166,14 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
 |---|---|---|---|
 | `soul.md` | Momo 的人格、行为守则、工具使用纪律（如"相对日期自己解析，不要问用户现在几点"） | `update_soul` 工具**只追加** "## Learned rules"（不能自删诚实条款）；完整重写仅限人 | 8000 字符 |
 | `user.md` | 用户画像：作息、身份（秋招 agent 岗候选人）、偏好（喜欢的影视类型、口味）、约束 | `update_user` 工具追加/更新条目；人可手改 | 4000 字符 |
-| `memory.md` | 人类可读镜像：由巩固工序从 facts/episodes 定期生成"当前最重要的若干事实" | 系统生成，人可读可干预（手改会在下次巩固时保留人工标记条目） | 生成时控制在 100 行内 |
+| `memory.md` | 精选事实区（人机共治）：当前最重要的持久事实，每条带 id 标注；既是每轮注入的核心记忆，也是人直接编辑记忆的入口 | 人：直接编辑文件（删/改/增）；Momo：`save_memory` / `manage_memory` 工具（原子地同时更新 DB 与文件）；巩固：追加候选条目，不覆盖人工内容 | 150 行内 |
 
-设计理由：soul（我是谁）/ user（用户是谁）/ memory（我知道什么）三问分离，等价于 Letta/MemGPT 的 persona block + human block 思路，但用 Markdown 文件实现——可 diff、可 git 版本化、可手改，这是面试讲解的好素材。检索仍走 SQLite（FTS5 + 向量），memory.md 不承担检索职责，只是"给人看的镜像"。
+设计理由：soul（我是谁）/ user（用户是谁）/ memory（我知道什么）三问分离，等价于 Letta/MemGPT 的 persona block + human block 思路，但用 Markdown 文件实现——可 diff、可 git 版本化、可手改，这是面试讲解的好素材。memory.md（核心区）与 facts 表（检索区，FTS5 + 向量）按条目级 id 双向同步：文件是人机共治的接口，DB 是长尾与检索的载体，`- [12] 内容` 中的 id 即 facts 主键，保证同步无损（机制见 §5.3.6）。
 
 #### 5.3.3 情景记忆
 
 - `chat_log` 逐轮记录（session_id / source / user_text / reply / tools_json / created_at）
-- 巩固工序每 N=20 轮把未巩固的 chat_log 蒸馏成 `episodes(happened_at, summary)`，如"2026-09-20：用户开始两周 RAG 复习计划，偏好晚上学习"
+- 巩固工序每 N=20 轮把未巩固的 chat_log 蒸馏成 `episodes(happened_at, summary)`，如"2026-09-20：用户开始两周 RAG 复习计划，偏好晚上学习"；同时向 memory.md **追加**候选条目（不覆盖人工内容，治理机制见 §5.3.6）
 - episodes 参与门控检索，是口味画像的数据来源
 
 #### 5.3.4 程序性记忆（skills）
@@ -176,14 +188,48 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
 - **fail-open**：门控自身出错时选择检索——"宁可给旧记忆，不可丢记忆"
 - 成本：一次几百 token 的小模型调用；后续切本地模型归零
 
-#### 5.3.6 与参考实现的保留/差异清单
+#### 5.3.6 记忆写入与治理（"记住"指令 · 人工编辑 · 对话式管理）
+
+**写入路径（三条）：**
+
+| 路径 | 触发 | 行为 |
+|---|---|---|
+| "记住"指令 | 消息以"记住 / 帮我记住 / 别忘了"开头，或明确表达记住意图 | 会话前置处理打标 → system prompt 注入硬性契约：先 `manage_memory(action=search)` 去重，存在相近记忆则 update，否则 `save_memory` 新增；回复必须复述"已记住：……"。**后验兜底**：已打标但本轮未调用写入工具 → 强提示重试 1 次，仍失败则如实报告"没记住"，绝不假装记住 |
+| 对话中自主判断 | 用户说出持久事实（偏好/人物/项目），soul.md 使用纪律要求落库 | 调 `save_memory` |
+| 巩固提案 | 每 N=20 轮 | 从未巩固 chat_log 蒸馏候选，**追加**到 memory.md（带 new 标记），不覆盖人工内容；人可随时删 |
+
+与备忘录的边界（写入 soul.md 纪律并用评测固化）："记一下周五交材料"（有截止、一次性）→ `add_memo`；"记住我喜欢悬疑番"（持久事实）→ `save_memory`。
+
+**memory.md 人工编辑与同步（人的裁决权最高）：**
+
+```markdown
+# Memory — Momo 记得的事（人工可直接编辑，删除行即删除该记忆）
+## 用户
+- [12] 2026 届本科，秋招目标 Agent 开发岗
+## 偏好
+- [7] 喜欢悬疑/科幻题材；日常番轻度观众
+- [15] 晚上学习效率高，计划排在 20:00–22:00
+```
+
+同步规则（启动时 + 每次巩固前执行 `memory/sync.py`，**以文件为准**）：
+- 删除某行 → 对应 fact 软删（不再注入、不再被检索；回收站表可恢复）
+- 修改行内文字 → 更新对应 fact 内容
+- 新增无 id 的行 → 导入为新 fact（人也可以手写记忆）
+- 无法解析的行 → 原样保留为手写笔记并记日志，不报错不丢内容
+- Momo 侧的一切修改必须走工具，工具原子地同时更新 DB 与文件，保证两侧一致
+
+**对话式记忆管理：**
+"你记得哪些关于我的事？" → `manage_memory(action=search)` 返回带 id 的编号列表 → "第 2 条不对，改成……" / "把第 3 条删了" → 按 id update/delete（同样双写 DB 与文件）并复述变更。
+
+#### 5.3.7 与参考实现的保留/差异清单
 
 | 项 | 参考（waku） | 本项目 |
 |---|---|---|
 | SOUL.md + update_soul 只追加 | ✅ | **保留** |
 | 检索门控 fail-open | ✅ | **保留**，门控模型可独立配置/本地化 |
 | manage_memory / create_skill | ✅ | **保留**（重写） |
-| MEMORY.md 镜像 | ✅ | **保留**，由巩固工序生成 |
+| MEMORY.md 镜像 | ✅ | **升级**：从只读镜像升级为人机共治的精选事实区，带 id 双向同步（§5.3.6） |
+| "记住"直达指令 | ❌（仅靠 prompt 自觉） | **新增**：触发词打标 + 硬性工具契约 + 后验兜底（§5.3.6） |
 | user.md 用户画像 | ❌ 无 | **新增**（对齐 hermes 原版三文件） |
 | 记忆检索 | FTS5 纯关键词 | **升级**：FTS5 + sqlite-vec 混合 |
 | 巩固 | 每 N 轮蒸馏 | **保留**，同时生成 memory.md |
@@ -240,7 +286,8 @@ Tool 约定：`Tool(name, description, input_schema, fn)`，注册进全局 regi
 |---|---|---|---|
 | `add_memo` / `list_memos` / `finish_memo` | P0 | content, due_at(ISO) | 备忘录 CRUD |
 | `create_plan` / `add_task` / `list_today` / `complete_task` | P0 | 日期、内容、est_minutes | 学习计划 |
-| `manage_memory` | P0 | action: search/update/delete | 记忆 CRUD（先查 id 再改） |
+| `save_memory` | P0 | subject, content | 写入持久事实（"记住"指令与对话中自主判断统一走此工具；写入前先去重） |
+| `manage_memory` | P0 | action: search/update/delete | 记忆治理：列出（带 id）→ 在用户指导下修改/删除；先查 id 再改 |
 | `update_soul` / `update_user` / `create_skill` | P0 | rule / profile 条目 / skill | 三文件与程序性记忆 |
 | `search_media` / `recommend_media` | P1 | query, filters | 混合检索 + 推荐排序 |
 | `bilibili_search` | P2 | keyword | 返回标题/UP/链接 |
@@ -266,6 +313,10 @@ Tool 约定：`Tool(name, description, input_schema, fn)`，注册进全局 regi
 | 备忘触发 | "记一下周五中午前交材料" → 必调 `add_memo` 且 due 解析正确 |
 | 计划查询 | `list_today` 只返回今日 items，不编造 |
 | 记忆持久化 | 写入 fact → 新会话询问 → 答案正确 |
+| "记住"指令 | "记住我周末喜欢睡到十点" → 必调 save_memory；已有相近记忆时走 update 不重复新增 |
+| 记忆/备忘边界 | "记一下周五交材料" → add_memo 而非 save_memory |
+| memory.md 人工同步 | 删除文件中某 id 行并重启 → 该 fact 软删、不再注入/检索；新增无 id 行 → 导入为新 fact |
+| 对话式治理 | "列出记忆 → 改第 2 条 → 删第 3 条"全链路断言（DB 与文件两侧一致） |
 | 门控跳过/命中 | "1+1=?"→false；"我上周说喜欢什么来着"→true |
 | 混合检索 | golden 20 条 top-3 命中率 ≥60% |
 | 推荐去重 | 连续两日推荐集无交集 |
@@ -283,7 +334,8 @@ GitHub Actions：push/PR 自动跑 `pytest evals/deterministic -m "not live"` + 
 ## 7. 数据模型（SQLite `data/state.db`，DDL 摘要）
 
 ```sql
-CREATE TABLE facts(id INTEGER PRIMARY KEY, subject TEXT, content TEXT, updated_at TEXT);
+CREATE TABLE facts(id INTEGER PRIMARY KEY, subject TEXT, content TEXT,
+                   deleted INTEGER DEFAULT 0, updated_at TEXT);  -- deleted=1 为软删（memory.md 删行同步所致），注入与检索均排除，回收站可恢复
 CREATE VIRTUAL TABLE facts_fts USING fts5(subject, content);      -- 同步维护
 CREATE VIRTUAL TABLE facts_vec USING vec0(embedding float[512]);
 
@@ -316,7 +368,7 @@ momo/
   app.py  config.py  providers.py
   loop/agent.py
   gateway/{cli.py, qq.py, scheduler.py}
-  memory/{core_files.py, semantic.py, episodic.py, procedural.py, gate.py, consolidate.py}
+  memory/{core_files.py, semantic.py, episodic.py, procedural.py, gate.py, consolidate.py, sync.py}
   rag/{ingest.py, retrieve.py, embed.py}
   tools/{registry.py, memo.py, plan.py, memory_admin.py, media.py, bilibili.py}
   ops/{trace.py, usage.py, release_gate.py}
@@ -364,6 +416,7 @@ scripts/                   ← demo 种子数据等
 1. **检索门控的取舍**——为什么不是每轮都查记忆（慢 + 过度解读）、fail-open 的理由、成本账
 2. **混合检索与推荐闭环**——为什么结构化语料不 chunk、RRF 融合、已推去重与口味加权的排序设计、golden 集命中率数字
 3. **评测驱动的迭代**——"改 prompt 必跑 evals"的工作流，举一个被 evals 拦下的真实回归
+4. **记忆治理 human-in-the-loop**——两级记忆（核心区三文件全量注入 / 检索区门控注入）；memory.md 作为人机共治接口、条目级 id 双向同步、"人删即软删"；"记住"指令的硬性契约与后验兜底。核心论点：个人助手的记忆，最终裁决权必须在人
 
 **预期追问与答法**：为什么不用 LangGraph（要理解底层，且循环本身 <100 行）；记忆和 RAG 的区别（记忆是写给自己的人格/画像/情节，RAG 是对外部语料的检索）；QQ 消息的 prompt 注入防护（白名单 + 群消息忽略 + 工具白名单）；context 窗口治理（每轮现拼 + 历史窗口 + 记忆外置）；如何变成多用户（数据目录隔离 + gateway 会话映射）。
 

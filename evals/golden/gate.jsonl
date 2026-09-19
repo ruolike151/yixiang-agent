@@ -1,0 +1,40 @@
+{"message": "你好", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "在吗", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "谢谢", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "嗯嗯", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "好的", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "哈哈", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "晚安", "should_retrieve": false, "note": "寒暄：规则白名单直接跳过"}
+{"message": "好的谢谢", "should_retrieve": false, "note": "寒暄：短消息 + 白名单命中，走规则"}
+{"message": "1+1=?", "should_retrieve": false, "note": "数学：通用知识，无需记忆"}
+{"message": "帮我写个 Python 快排", "should_retrieve": false, "note": "自包含的编码请求"}
+{"message": "计算 23 乘 47 等于多少", "should_retrieve": false, "note": "数学：通用知识"}
+{"message": "什么是 RRF 融合", "should_retrieve": false, "note": "通用知识问答"}
+{"message": "翻译一下这句话：Hello world", "should_retrieve": false, "note": "自包含翻译请求"}
+{"message": "今天北京天气怎么样", "should_retrieve": false, "note": "外部实时信息，不靠记忆"}
+{"message": "帮我解释 TCP 三次握手", "should_retrieve": false, "note": "通用知识问答"}
+{"message": "写一首关于春天的五言绝句", "should_retrieve": false, "note": "创作类请求，不依赖历史"}
+{"message": "Python 里怎么读 CSV 文件", "should_retrieve": false, "note": "自包含编码问题"}
+{"message": "总结一下这封邮件", "should_retrieve": false, "note": "自包含的文本处理"}
+{"message": "推荐几本科幻小说", "should_retrieve": false, "note": "通用推荐，不是个人画像"}
+{"message": "把这段话改成英文", "should_retrieve": false, "note": "自包含的文本处理"}
+{"message": "我上周说喜欢什么来着", "should_retrieve": true, "note": "追问历史偏好：规则命中『上周』"}
+{"message": "你还记得我上次说的那个电视剧吗", "should_retrieve": true, "note": "指代历史：规则命中『你还记得』"}
+{"message": "帮我记住我周末喜欢睡到十点", "should_retrieve": true, "note": "写入型记忆：规则命中『帮我记住』"}
+{"message": "别忘了下周三要交材料", "should_retrieve": true, "note": "备忘提醒：规则命中『别忘了』"}
+{"message": "我说过我喜欢喝美式", "should_retrieve": true, "note": "自述历史：规则命中『我说过』"}
+{"message": "我的偏好你记着点", "should_retrieve": true, "note": "偏好：规则命中『我的偏好』"}
+{"message": "记住我 3 月要去成都出差", "should_retrieve": true, "note": "写入型记忆：规则命中『记住』"}
+{"message": "我上次跟你提过的那个项目现在怎么样了", "should_retrieve": true, "note": "指代历史：需要翻记忆"}
+{"message": "我之前是不是说过讨厌香菜", "should_retrieve": true, "note": "时间指代 + 自我指涉"}
+{"message": "我生日是哪天来着", "should_retrieve": true, "note": "个人事实，只有记忆里有"}
+{"message": "我平时几点起床比较合适", "should_retrieve": true, "note": "个人习惯，需要画像"}
+{"message": "我们聊过的那个旅行计划还记得吗", "should_retrieve": true, "note": "多轮指代：需要翻情景记忆"}
+{"message": "我对什么过敏来着", "should_retrieve": true, "note": "个人健康事实，必须查记忆"}
+{"message": "我住在哪个城市", "should_retrieve": true, "note": "个人事实"}
+{"message": "我工作的那个公司叫什么", "should_retrieve": true, "note": "个人事实"}
+{"message": "我之前推荐给你的书是什么", "should_retrieve": true, "note": "指代历史"}
+{"message": "我妈生日快到了帮我准备礼物", "should_retrieve": true, "note": "个人关系 + 计划"}
+{"message": "上次那个 bug 我们是怎么修的", "should_retrieve": true, "note": "项目往事：情景记忆"}
+{"message": "你喜欢科比吗", "should_retrieve": true, "note": "边界：偏好陈述，倾向记录（宁可多检索）"}
+{"message": "我今天有点累", "should_retrieve": true, "note": "边界：情绪自述，倾向看历史再决定怎么接话"}

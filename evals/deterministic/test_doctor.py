@@ -77,3 +77,17 @@ def test_doctor_fails_when_qq_is_enabled_without_allowlist(tmp_path, repo_root):
     assert checks[0].status == doctor.FAIL
     assert "YIXIANG_QQ_ALLOWED" in checks[0].detail
     assert doctor.main(settings) == 1
+
+
+def test_doctor_check_six_fails_when_a_core_file_is_over_the_limit(tmp_path, repo_root):
+    """PART-2 §1：doctor 要证明三文件"上限内"，不是只证明"存在"。"""
+    settings = no_key_settings(tmp_path, repo_root)
+    doctor.run_checks(settings)  # 先让检查 6 把 templates/ 复制到 data/
+    soul = settings.data_dir / "soul.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "x" * 9000, encoding="utf-8")
+
+    check = doctor.run_checks(settings)[-1]
+
+    assert check.status == doctor.FAIL
+    assert "soul.md" in check.detail and "超过上限" in check.detail
+    assert doctor.main(settings) == 1

@@ -28,6 +28,8 @@ HELP = """斜杠命令：
   /trace [n]     不带参数=上一轮详情；带 n=最近 n 轮列表
   /cost [month]  今日（或本月）token 与成本
   /exit          退出（Ctrl+C 同效）
+
+记忆 / 技能运维在聊天外做：yixiang memory {list,show,sync,verify,restore} · yixiang skills validate
 """
 
 

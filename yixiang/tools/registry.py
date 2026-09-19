@@ -253,7 +253,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
     """把 P0 工具装进注册表（§9.2）。新工具在这里加一行——不改核心链路。"""
     from functools import partial
 
-    from yixiang.tools import memo, plan
+    from yixiang.tools import memo, memory_admin, plan
 
     conn = deps.conn
     now = deps.clock.now
@@ -393,6 +393,138 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 "required": ["item_id"],
             },
             fn=partial(plan.complete_task, conn, now),
+        )
+    )
+    # ── PART 2 记忆工具（§9.2）──
+    registry.register(
+        Tool(
+            name="save_memory",
+            description=(
+                "把一条关于用户的持久事实写入长期记忆。"
+                "用于：偏好、习惯、身份、长期项目、重要人物关系。"
+                "不要用于：一次性待办（用 add_memo）、临时情绪、当天发生的事（会自动进情景记忆）。"
+                "调用前若不确定是否已有相近记忆，先调 manage_memory(action='search')。"
+                "返回：{\"id\": ..., \"action\": \"insert|update|maybe\"}。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "enum": ["用户", "偏好", "项目", "其他"],
+                        "description": "这条事实属于谁/哪一类",
+                    },
+                    "content": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "一句完整、自洽的事实陈述，不要用代词",
+                    },
+                },
+                "required": ["subject", "content"],
+            },
+            fn=memory_admin.save_memory,
+        )
+    )
+    registry.register(
+        Tool(
+            name="manage_memory",
+            description=(
+                "管理长期记忆：search 找（返回带 id 的列表）/ update 改 / delete 删 / restore 恢复。"
+                "update 与 delete 需要先用 search 拿 id，只给 id 不要猜。"
+                "不要用于：查看待办（list_memos）、看今天安排（list_today）。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["search", "update", "delete", "restore"],
+                        "description": "要做的动作",
+                    },
+                    "id": {
+                        "type": "integer",
+                        "description": "update / delete / restore 的目标 id（来自 search 结果）",
+                    },
+                    "query": {"type": "string", "description": "search 的关键词；留空表示最近若干条"},
+                    "content": {"type": "string", "description": "update 时给出更新后的完整表述"},
+                    "subject": {"type": "string", "description": "update 时可选的新分类"},
+                },
+                "required": ["action"],
+            },
+            fn=memory_admin.manage_memory,
+        )
+    )
+    registry.register(
+        Tool(
+            name="update_soul",
+            description=(
+                "把一条用户明确说过的新规则追加到 soul.md 的 '## Learned rules'。"
+                "用于：用户纠正你的行为、要求你以后换一种做法。"
+                "只追加，永远不修改或删除已有条款；超 8000 字符时整条拒绝。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule": {
+                        "type": "string",
+                        "description": "一条祈使句规则，例如'不要用 emoji 收尾'",
+                    }
+                },
+                "required": ["rule"],
+            },
+            fn=memory_admin.update_soul,
+        )
+    )
+    registry.register(
+        Tool(
+            name="update_user",
+            description=(
+                "往 user.md 的某个分区追加一行（分区不存在则新建）。"
+                "用于：用户档案类信息（身份、作息、约束、沟通方式）。"
+                "不要用于：分区已有同类内容时先看一眼原文，避免重复追加。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "分区名，例如 身份 / 作息 / 偏好 / 约束 / 沟通方式",
+                    },
+                    "content": {"type": "string", "description": "要追加的一行内容"},
+                },
+                "required": ["section", "content"],
+            },
+            fn=memory_admin.update_user,
+        )
+    )
+    registry.register(
+        Tool(
+            name="create_skill",
+            description=(
+                "把一个可复用的工作流写成技能（data/skills/<slug>/SKILL.md）。"
+                "用于：用户教你一套固定流程，且以后同类请求要照做。"
+                "必须 confirm=true 才真正写盘；已存在的 slug 不覆盖。"
+                "不要用于：一次性偏好（那是 save_memory）。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "小写字母/数字/连字符，3-40 字"},
+                    "name": {"type": "string", "description": "技能名"},
+                    "description": {"type": "string", "description": "一句话说明这个技能做什么"},
+                    "triggers": {
+                        "type": "array",
+                        "description": "触发关键词列表，命中任一即注入",
+                    },
+                    "body": {"type": "string", "description": "技能正文（步骤），超 1500 字截断"},
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "必须显式传 true 才写盘（防误写）",
+                    },
+                },
+                "required": ["slug", "name", "description", "triggers", "body"],
+            },
+            fn=memory_admin.create_skill,
         )
     )
     return registry

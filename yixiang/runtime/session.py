@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import traceback
+from typing import Any
 
+from yixiang import memory
 from yixiang.config import Settings
+from yixiang.memory import core_files, procedural
+from yixiang.memory.core_files import SOUL_LEARNED_MARKER
 from yixiang.runtime.models import (
     Clock,
     Message,
@@ -27,10 +32,45 @@ from yixiang.runtime.models import (
 # 单轮上下文软上限（字符）：超出时从最旧的一轮开始丢（§15.1 的粗略口径）。
 CONTEXT_BUDGET_CHARS = 24_000
 
-SOUL_LEARNED_MARKER = "## Learned rules"
 CORE_FILES = ("soul.md", "user.md", "memory.md")
 
 WEEKDAY_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+# S6 检索上限（§6.1）
+RETRIEVAL_TOP_K = 5
+RETRIEVAL_EP_K = 3
+
+# ── §7.9.1 阶段 1：纯规则打标（不花一次 LLM 调用）──
+REMEMBER_PREFIXES = ("记住", "帮我记住", "别忘了", "记一下我")
+MEMO_WORDS = ("截止", "之前", "提醒", "周五", "明天")
+TURN_CONTRACT_REMEMBER = (
+    "【本轮硬性要求】用户明确要求记住一条信息。\n"
+    "你必须先调用 manage_memory(action=\"search\", query=\"<要记住的内容核心词>\") 检查是否已有相近记忆：\n"
+    "  - 已有相近记忆 → 调 manage_memory(action=\"update\", id=<该条 id>, content=\"<更新后的完整表述>\")\n"
+    "  - 没有 → 调 save_memory(subject=\"<用户|偏好|项目|其他>\", content=\"<简洁的事实陈述>\")\n"
+    "在工具成功返回前，不得结束本轮。回复中必须复述\"已记住：<内容>\"。\n"
+    "如果写入失败，必须如实说明失败，禁止声称已记住。"
+)
+
+# §7.9 阶段 3：后验校验没过时追加的系统提醒（纠错重试 1 次）
+MEMORY_RETRY_NOTICE = (
+    "【提醒】上一轮你没有把用户要求记住的信息写进长期记忆。"
+    "现在必须先调用 manage_memory(action=\"search\") 或 save_memory 完成写入，再回复用户。"
+)
+
+
+def detect_intent(message: str) -> str:
+    """打标：显式的"记住"指令 → ``"REMEMBER"``，其余返回 ``""``（§7.9.1）。
+
+    含时间意图的待办（"记一下周五交材料"）归 memo 路径，不打标——这是
+    "记住我喜欢悬疑"与"记一下周五交材料"的分界线，靠规则而不是模型判断。
+    """
+    text = (message or "").strip()
+    if not any(text.startswith(prefix) for prefix in REMEMBER_PREFIXES):
+        return ""
+    if any(word in text for word in MEMO_WORDS):
+        return ""
+    return "REMEMBER"
 
 
 def read_core_file(settings: Settings, name: str) -> str:
@@ -74,8 +114,16 @@ class SessionManager:
         self.budget_chars = budget_chars
         self.turn_id = ""
         self.pending_user = ""
+        self.turn_intent = ""
+        self.extra_contract = ""
         self.history: list[Message] = []
         self._last_working_memory: dict[str, object] = {}
+        self._skill_loader: Any = None
+        self._retrieval: Any = None
+        self._retrieval_query = ""
+        self._retrieval_allowed = False
+        self._retrieval_done = False
+        self._retrieval_error = ""
         self.load_history()
 
     # ------------------------------------------------------------------ 会话
@@ -154,6 +202,9 @@ class SessionManager:
         self.pending_user = user_text
         if turn_id:
             self.turn_id = turn_id
+        self.turn_intent = detect_intent(user_text)
+        self.extra_contract = ""
+        self.prime_retrieval("", allowed=False)  # App 门控后会覆盖
         return self.turn_id
 
     def add_exchange(self, user: str, reply: str, tools: list[object] | None = None) -> None:
@@ -191,7 +242,7 @@ class SessionManager:
             s1,
             s2,
             read_core_file(self.settings, "user.md"),
-            read_core_file(self.settings, "memory.md"),
+            core_files.core_memory_text(read_core_file(self.settings, "memory.md")),
             self.skills_block(),
             self.retrieved_block(),
             self.environment_block(),
@@ -200,12 +251,50 @@ class SessionManager:
         return blocks
 
     def skills_block(self) -> str:
-        """S5 相关技能（关键词匹配 ``data/skills/*/SKILL.md``）——PART 2 接入。"""
-        return ""
+        """S5 相关技能（关键词匹配 ``data/skills/*/SKILL.md``，≤1500 字）。"""
+        loader = self.skill_loader()
+        if loader is None:
+            return ""
+        try:
+            matched = loader.match(self.pending_user, max_skills=procedural.MATCH_LIMIT)
+        except Exception:  # 技能坏了不该炸掉整轮对话
+            return ""
+        return procedural.render_block(matched)
+
+    def skill_loader(self):
+        """按 ``settings.skills_dir`` 建一次 ``SkillLoader``（mtime 变了会自己重读）。"""
+        if self._skill_loader is None:
+            self._skill_loader = procedural.SkillLoader([self.settings.skills_dir])
+        return self._skill_loader
 
     def retrieved_block(self) -> str:
-        """S6 检索到的记忆（gate 命中后的 facts + episodes）——PART 2 接入。"""
-        return ""
+        """S6 检索到的记忆（gate 命中后的 facts + episodes）。
+
+        ``system_blocks()`` 每次迭代都被调，所以真正的检索**一轮只做一次**：
+        结果缓存在 ``self._retrieval``，下一轮 ``begin_turn()`` 清掉。
+        """
+        if not self._retrieval_allowed or not memory.is_configured():
+            return ""
+        if not self._retrieval_done:
+            self._retrieval_done = True
+            try:
+                self._retrieval = memory.retrieve_memory(
+                    self._retrieval_query or self.pending_user,
+                    top_k=RETRIEVAL_TOP_K,
+                    ep_k=RETRIEVAL_EP_K,
+                )
+            except Exception:  # 嵌入不可用/未装配：降级成"没有检索结果"
+                self._retrieval = None
+                self._retrieval_error = traceback.format_exc(limit=1).strip().splitlines()[-1]
+        return self._retrieval.render() if self._retrieval else ""
+
+    def prime_retrieval(self, query: str = "", *, allowed: bool = True) -> None:
+        """门控结果进来（App 在 ``run_loop`` 之前调）：本轮要不要检索、检索什么。"""
+        self._retrieval_allowed = allowed
+        self._retrieval_query = query
+        self._retrieval_done = False
+        self._retrieval = None
+        self._retrieval_error = ""
 
     def environment_block(self) -> str:
         """S7 环境信息：精确到分钟，放 system 末尾（§4.5）。"""
@@ -215,8 +304,13 @@ class SessionManager:
         return f"当前时间：{now:%Y-%m-%d %H:%M}（{WEEKDAY_ZH[now.weekday()]}，{zone}）"
 
     def turn_contract_block(self) -> str:
-        """S8 本轮契约（"记住"指令的硬性要求等）——PART 2 接入。"""
-        return ""
+        """S8 本轮契约：``intent = REMEMBER`` 或纠错重试提醒（≤300 字）。"""
+        parts: list[str] = []
+        if self.turn_intent == "REMEMBER":
+            parts.append(TURN_CONTRACT_REMEMBER)
+        if self.extra_contract:
+            parts.append(self.extra_contract)
+        return "\n".join(parts)
 
     def window(self) -> list[Message]:
         """历史窗口：最近 ``history_turns`` 轮（user+assistant 成对）。"""
@@ -253,7 +347,12 @@ class SessionManager:
             "s3": len(blocks[2]),
             "s4": len(blocks[3]),
             "s5": len(blocks[4]),
-            "s6": {"facts": 0, "episodes": 0, "chars": len(blocks[5])},
+            "s6": {
+                "facts": len(self._retrieval.facts) if self._retrieval else 0,
+                "episodes": len(self._retrieval.episodes) if self._retrieval else 0,
+                "chars": len(blocks[5]),
+                **({"error": self._retrieval_error} if self._retrieval_error else {}),
+            },
             "s7": len(blocks[6]),
             "s8": len(blocks[7]),
             "history_turns": len(history) // 2,

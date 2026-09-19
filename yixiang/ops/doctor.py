@@ -122,7 +122,9 @@ def _check_model(settings: Settings) -> Check:
 
 
 def _check_core_files(settings: Settings) -> Check:
-    """把 templates/ 的三文件复制到 data/（§1.2 检查项 6）。"""
+    """把 templates/ 的三文件复制到 data/，并校验上限（§1.2 检查项 6、PART-2 §1）。"""
+    from yixiang.memory import core_files
+
     if not settings.templates_dir.is_dir():
         return Check("三文件就位", FAIL, f"找不到模板目录 {settings.templates_dir}")
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +140,32 @@ def _check_core_files(settings: Settings) -> Check:
         target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         copied.append(name)
     detail = f"{settings.data_dir}｜新建 {', '.join(copied) or '无'}｜保留 {', '.join(kept) or '无'}"
+
+    problems = _core_file_limit_problems(settings, core_files)
+    if problems:
+        return Check("三文件就位", FAIL, "；".join(problems))
+    memory_lines = core_files.active_line_count(
+        (settings.data_dir / "memory.md").read_text(encoding="utf-8")
+    )
+    detail += (
+        f"｜上限内（soul {core_files.SOUL_MAX} / user {core_files.USER_MAX} 字 ·"
+        f" memory 活跃 {memory_lines}/{core_files.MEMORY_MAX_LINES} 行）"
+    )
     return Check("三文件就位", OK, detail)
+
+
+def _core_file_limit_problems(settings: Settings, core_files) -> list[str]:
+    """硬上限 + 格式硬错误：超了必须让 doctor 失败，而不是等下一轮对话炸掉。"""
+    problems: list[str] = []
+    for name, limit in core_files.CHAR_LIMITS.items():
+        text = (settings.data_dir / name).read_text(encoding="utf-8")
+        if len(text) > limit:
+            problems.append(f"{name} {len(text)} 字超过上限 {limit} 字")
+    memory_text = (settings.data_dir / "memory.md").read_text(encoding="utf-8")
+    problems.extend(
+        item for item in core_files.validate_memory_md(memory_text) if item.startswith("error:")
+    )
+    return problems
 
 
 def render(checks: list[Check], *, header: str = "yixiang doctor") -> str:

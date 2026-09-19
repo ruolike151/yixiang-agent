@@ -61,7 +61,7 @@ PART 1（基座与 Agent Loop）已交付：CLI 流式对话、memo/plan 工具�
 
 PART 2（记忆系统）已交付：
 
-- **三文件核心记忆**：`soul.md` / `user.md` / `memory.md` 原子写 + 上限校验（8000 / 4000 / 活跃区 150 行）；
+- **三文件核心记忆**：`soul.md` / `user.md` / `memory.md` 原子写 + 上限校验（3000 / 4000 / 活跃区 150 行）；
 - **三支柱检索**：`facts`（FTS5 + 向量，RRF 融合）、`episodes`（只用向量）、`skills`（关键词匹配，≤1500 字截断）；
 - **检索门控**：规则预过滤 + 小模型判定（fail-open），注入 S6 段（top5 facts + top3 episodes）；
 - **人机共治**：手改 `memory.md` 重启即生效（`yixiang memory sync` 文件为准，无 id 的行走导入并分配 id，删行即软删）；

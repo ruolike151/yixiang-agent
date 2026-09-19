@@ -13,7 +13,7 @@ from fake_provider import FakeProvider, text_reply, tool_round
 
 from yixiang import memory
 from yixiang.app import App
-from yixiang.memory import consolidate, memory_admin, semantic
+from yixiang.memory import consolidate, core_files, memory_admin, semantic
 from yixiang.runtime.session import detect_intent
 
 
@@ -192,3 +192,17 @@ def test_d15_update_user_rejects_when_over_limit(settings, conn, clock, mem):
 
     assert out.startswith("Error") and "4000" in out
     assert user.read_text(encoding="utf-8") == before
+
+
+def test_n2_soul_limit_is_narrowed_to_3000(settings, conn, clock, mem):
+    """N-2 已决策：soul.md 上限 3000 字符，写不下时整条拒绝且文件不动。"""
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    soul = settings.data_dir / "soul.md"
+    soul.write_text("# Soul\n\n## Learned rules\n" + "- 填充行\n" * 900, encoding="utf-8")
+    before = soul.read_text(encoding="utf-8")
+
+    out = memory_admin.update_soul("再加一条")
+
+    assert core_files.SOUL_MAX == 3000
+    assert out.startswith("Error") and "3000" in out
+    assert soul.read_text(encoding="utf-8") == before

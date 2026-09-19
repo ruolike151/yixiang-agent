@@ -253,6 +253,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
     """把 P0 工具装进注册表（§9.2）。新工具在这里加一行——不改核心链路。"""
     from functools import partial
 
+    from yixiang.memory.core_files import SOUL_MAX
     from yixiang.tools import memo, memory_admin, plan
 
     conn = deps.conn
@@ -460,7 +461,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
             description=(
                 "把一条用户明确说过的新规则追加到 soul.md 的 '## Learned rules'。"
                 "用于：用户纠正你的行为、要求你以后换一种做法。"
-                "只追加，永远不修改或删除已有条款；超 8000 字符时整条拒绝。"
+                f"只追加，永远不修改或删除已有条款；超 {SOUL_MAX} 字符时整条拒绝。"
             ),
             input_schema={
                 "type": "object",

@@ -95,7 +95,7 @@ uv run yixiang eval consolidation
 
 1. **记忆分三层但不是三个库**：`facts`（FTS5 + 向量混合，RRF 融合）、`episodes`（只用向量）、
    `skills`（关键词匹配，单条 ≤1500 字）。三支柱都写在同一张 SQLite 里，靠 `source` 和表分开。
-2. **上限是硬的**：`soul.md` 8000 / `user.md` 4000 字符，`memory.md` 活跃区 150 行，
+2. **上限是硬的**：`soul.md` 3000 / `user.md` 4000 字符，`memory.md` 活跃区 150 行，
    超了先淘汰最久没用过的（置顶 `*` 的不动），归档区只提示不硬删。
 3. **门禁是量化的**：门控 golden 集 40 条标注，要求**漏检率 = 0**、误检率 ≤30%、规则跳过率 ≥15%，
    跑 `uv run yixiang eval gate`。
@@ -117,7 +117,7 @@ uv run yixiang eval consolidation
 ```bash
 uv run yixiang doctor                  # 4 项通过 + 2 项告警（配置未填 key / 模型探活跳过）
 uv run yixiang memory sync             # 文件 → DB，纯本地
-uv run yixiang eval                    # 107 条确定性用例全绿，离线零成本、3 秒
+uv run yixiang eval                    # 108 条确定性用例全绿，离线零成本、3 秒
 uv run yixiang eval gate               # 只跑门控门禁那一组（16 条）
 ```
 

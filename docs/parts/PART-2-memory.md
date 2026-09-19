@@ -87,7 +87,7 @@ def preprocess_for_fts(text: str) -> str: ...                        # jieba 分
 | 巩固输出 | 严格 JSON：`{episode:{summary}, candidates:[{section,content,confidence}]}` |
 | 三档阈值 | ≥0.9 进正文；0.6~0.9 进 `## 待确认`；<0.6 丢弃（**已拍板，先用**，按 `dedup.jsonl` 实测再调） |
 | 水印 | `meta.last_consolidated_chat_id`，**只在整个批次成功后推进** |
-| 文件上限 | `soul.md` 8000 字符 / `user.md` 4000 字符 / `memory.md` 150 行 |
+| 文件上限 | `soul.md` 3000 字符 / `user.md` 4000 字符 / `memory.md` 150 行 |
 
 ## 5. 关键设计点（硬约束）
 
@@ -139,7 +139,7 @@ def preprocess_for_fts(text: str) -> str: ...                        # jieba 分
 | **双向同步丢数据**（最大风险） | 条目级 id + 单独一个测试文件专门覆盖；D-06/D-07/D-08 三条用例是硬门禁 |
 | 记忆污染（巩固写入噪声） | 三档阈值 + `## 待确认` 缓冲区 + "不重复率 ≥95%" 门禁；**宁可先保守（少写）**——记忆缺失下次再说一次就行，污染会让助手"记错你" |
 | 门控漏检 | 阈值不对称 + `gate.jsonl` 40 条标注 + 漏检率 = 0 的硬门禁 |
-| `soul.md` 写满占 token | 上限校验 + 容量淘汰；8000 字符是否收窄见 TECH §17.3 N-2（**待你决策**） |
+| `soul.md` 写满占 token | 上限校验 + 容量淘汰；N-2 已决策收窄到 3000 字符（TECH §17.3） |
 | 时间超支 | 砍 skills（程序性记忆）的自动 installer，只保留手写 `SKILL.md` 加载；`update_soul` 的"只追加"校验不可砍 |
 
 **不可砍**：三文件 + 人机共治同步、检索门控、`"记住"` 硬契约。

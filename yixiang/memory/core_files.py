@@ -18,8 +18,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# ── 上限（TECH §6.1、§7.3；N-2 待决策项只改这一个常量）──
-SOUL_MAX = 8000
+# ── 上限（TECH §6.1、§7.3；N-2 已决策：soul 收窄到 3000，只改这一个常量）──
+SOUL_MAX = 3000
 USER_MAX = 4000
 MEMORY_MAX_LINES = 150
 MEMORY_ARCHIVE_MAX_LINES = 300

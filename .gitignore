@@ -1,0 +1,25 @@
+# 运行时数据：记忆本体、数据库、trace、用量、备份——全部不进公开仓库（§14.2 T-9）
+data/
+
+# 密钥
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

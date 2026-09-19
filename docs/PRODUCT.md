@@ -271,7 +271,7 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
 
 终端 REPL，`source=cli` 打标；`/new` 开新会话、`/history` 切换会话。
 
-#### 5.5.2 QQ（P1）
+#### 5.5.2 QQ（P2，已延后）
 
 - 协议：NapCat（Windows 可执行）+ OneBot v11，**反向 WebSocket** 接入 yixiang（无需公网 IP）
 - 可靠性：断线指数退避重连（1s→2s→…→60s 封顶）；OneBot 事件可能重复投递，按 `message_id` 幂等去重

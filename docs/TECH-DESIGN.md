@@ -140,7 +140,7 @@ yixiang/                     # 包名 = CLI 命令 = 日志前缀 = env 前缀
     cli.py             # REPL + 斜杠命令 + 流式渲染（P0，唯一入口）
     sinks.py           # 投递通道：cli / 文件 / 本地通知 / qq（可插拔，晨报用）
     scheduler.py       # 晨报、巩固、每日汇总、补发（本地投递先上）
-    qq.py              # OneBot v11 反向 WS、幂等、白名单、CQ 码（P1，延后）
+    qq.py              # OneBot v11 反向 WS、幂等、白名单、CQ 码（P2，延后）
   ops/
     tracing.py         # trace.jsonl 写入 + turn_id
     usage.py           # usage.jsonl + 汇总命令
@@ -506,7 +506,7 @@ assistant: 我已经帮你排好了。 [tools used: create_plan(3 项), add_task
 | 落盘一致性 | 流式增量只进内存缓冲，**整轮结束后一次性写 `chat_log`**，避免半截回复进入历史 |
 | 失败降级 | 连接异常且尚未吐出文本 → 自动改用非流式重试一次；已吐出部分文本 → 立即收尾，把已输出内容作为最终回复落盘并记 `E_LLM_TIMEOUT` |
 | 评测 | 确定性用例走非流式（FakeProvider 不产生增量）；另加一组"假流"用例单独校验分片组装（`test_provider.py`） |
-| QQ（P1） | 按长度分段发送，避免超长消息被截断；与 CLI 共用同一个 observer |
+| QQ（P2） | 按长度分段发送，避免超长消息被截断；与 CLI 共用同一个 observer |
 
 > 面试可讲点：流式的复杂度不在"逐字打印"，而在**边界**——工具调用轮不流式、半截失败如何收尾、增量与落盘的一致性。能主动说出这三条，比说"我用了 `stream=True`"有说服力得多。
 

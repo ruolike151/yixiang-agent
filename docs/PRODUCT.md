@@ -1,8 +1,8 @@
 # yixiang — 本地个人助手 Agent 产品文档
 
-> 版本 v0.3 · 2026-09-19 · 状态：待评审
-> 项目代号 **yixiang**（原 Momo；中文名待定，见 TECH-DESIGN §17.2-10）。下游命名（包名 / CLI / env 前缀）统一见 TECH-DESIGN §0.1。
-> 变更记录：v0.3 —— 代号改 yixiang；交付顺序改为**本地可运行优先**（QQ 从 P1 降为 P2 路线图）；流式输出列为 P0 体验项；明确 soul/user/memory.md 属 data/ 运行时数据。v0.2 —— 新增记忆治理设计（memory.md 人工可编辑与 id 双向同步、"记住"直达指令、对话式记忆管理，§5.3.6）。
+> 版本 v0.4 · 2026-09-19 · 状态：**关键项已定，可进入实现**
+> 项目代号 **yixiang**，中文名 **以湘**（原 Momo）。下游命名（包名 / CLI / env 前缀）统一见 TECH-DESIGN §0.1。
+> 变更记录：v0.4 —— 中文名定为**以湘**；**晨报改为按需形态**（用户想要时由 agent 组装并发出，定时推送降为 P2 路线图）；嵌入后端定为 **fastembed**；judge 在 P0 先用与主模型同一模型（同源自偏好记为已知局限）；`data/` 建私有 Git 备份仓；首期语料定为 500 部。v0.3 —— 代号改 yixiang；交付顺序改为**本地可运行优先**（QQ 从 P1 降为 P2 路线图）；流式输出列为 P0 体验项；明确 soul/user/memory.md 属 data/ 运行时数据。v0.2 —— 新增记忆治理设计（memory.md 人工可编辑与 id 双向同步、"记住"直达指令、对话式记忆管理，§5.3.6）。
 
 ---
 
@@ -16,7 +16,7 @@
 
 ### 1.1 一句话定位
 
-跑在本人 Windows 电脑上、**先在本地 CLI 里跑通**的个人 Agent：有持久记忆（记得我是谁、我喜欢什么）、能管理学习计划与备忘录、基于本地影视知识库做每日推荐与闲聊（晨报在本地投递），并且全程可评测、可观测。QQ 入口是 P2 可选扩展（§11 路线图 #7）。
+跑在本人 Windows 电脑上、**先在本地 CLI 里跑通**的个人 Agent：有持久记忆（记得我是谁、我喜欢什么）、能管理学习计划与备忘录、基于本地影视知识库做**按需推荐**与闲聊（问"今天有什么安排"就得到一份任务+备忘+推荐的汇总），并且全程可评测、可观测。QQ 入口与定时晨报推送都是 P2 可选扩展（§11 路线图 #7、#8）。
 
 ### 1.2 背景与动机
 
@@ -35,12 +35,12 @@
 
 | 维度 | 目标 |
 |---|---|
-| 功能 | QQ 上可完成：记事/查计划/影视推荐/闲聊，每天早收到一条晨报 |
+| 功能 | CLI 上可完成：记事/查计划/影视推荐/闲聊，说"今天有什么安排"能得到一份任务+备忘+推荐（定时晨报送达是 P2 加分项） |
 | 记忆 | 跨会话记住用户画像与偏好，"上周我说喜欢什么"能答对 |
 | 记忆治理 | "记住"指令在评测中 100% 触发写入；memory.md 人工删/改后同步生效；对话中可指导 yixiang 修改/删除记忆 |
 | 检索 | 影视 golden 集 20 条，混合检索 top-3 命中率 ≥ 60% |
 | 评测 | 确定性评测全绿 + judge 平均分 ≥ 4/5，GitHub Actions 门禁生效 |
-| 成本 | 正常日用（每天 30~50 轮 + 晨报）API 成本 ≤ 0.5 元/天 |
+| 成本 | 正常日用（每天 30~50 轮 + 1 次按需推荐）API 成本 ≤ 0.5 元/天 |
 | 使用 | 连续真实使用 ≥ 14 天，沉淀 trace 与成本数据 |
 
 ## 2. 用户故事与核心场景
@@ -49,13 +49,13 @@
 "帮我排一个两周的 RAG 复习计划，每天晚上两小时" → yixiang 调 `create_plan` + `add_task` 生成逐日任务；"今天要学什么" → `list_today` 如实返回，不编造；"算法看完了" → `complete_task` 并记入情景记忆。
 
 **场景 2：备忘录**
-"记一下周五中午前交开题材料" → `add_memo`（截止时间由 yixiang 解析相对日期）；晨报自动带出到期备忘；"那个材料交了" → `finish_memo`。
+"记一下周五中午前交开题材料" → `add_memo`（截止时间由 yixiang 解析相对日期）；推荐汇总里自动带出到期备忘；"那个材料交了" → `finish_memo`。
 
 **场景 3：影视知识库问答与推荐**
 "想看类似《怪物》的悬疑番" → `search_media` 混合检索（关键词 + 向量），返回带年份/类型/一句话理由的候选；"这部我看过，一般" → 记入口味画像，影响后续排序。
 
-**场景 4：每日晨报（主动式 Agent）**
-每天 8:00，调度器主动组装：今日学习任务 + 到期备忘 + 一条影视推荐（过滤已推、按口味排序），推送到 QQ。电脑睡眠错过则唤醒后补发。
+**场景 4：按需推荐汇总（Agent 组装 + 发出）**
+"今天有什么安排？"或"来一条推荐" → yixiang 当场组装：今日学习任务 + 到期备忘 + 一条影视推荐（过滤已推、按口味排序），直接流式回复给用户，并写 `data/briefs/YYYY-MM-DD.md` 便于回看。定时 8:00 主动推送 + 睡眠补发是 P2 路线图 #8（同一个组装逻辑，只换触发源）。
 
 **场景 5：B 站视频分享（P2）**
 "找讲 KV Cache 讲得好的视频" → `bilibili_search` 返回标题/UP 主/链接卡片。
@@ -82,7 +82,8 @@
 | P0 | Trace + Usage | 每轮 JSONL 落盘，成本可按天汇总 |
 | P2 | QQ 接入（NapCat + OneBot v11，**已延后**） | 见 §11 路线图 #7；不参与 P0/P1 验收门禁 |
 | P1 | RAG 影视库（混合检索） | golden 集 top-3 命中 ≥60%，检索延迟 < 1s |
-| P1 | 每日晨报 + 口味闭环 | 每天准点推送；连续 7 天推荐不重复；反馈影响排序 |
+| P1 | 按需推荐汇总 + 口味闭环（`daily_brief`） | 说"今天有什么安排"即得到 任务+备忘+1 条推荐；多次推荐不重复；反馈影响排序 |
+| P2 | 定时晨报推送（延后，路线图 #8） | 8:00 准点送达 + 睡眠补发；复用 P1 的组装逻辑，只换触发源 |
 | P1 | 确定性评测 + judge + CI 门禁 | Actions 跑离线评测，失败阻止合并 |
 | P2 | B 站搜索/分享 | 返回结构化卡片消息 |
 | P2 | Pixiv 下载分享 | 登录态可用时按 PID 下载并发图（合规灰区，仅作花活） |
@@ -98,7 +99,7 @@
 ```
 QQ (NapCat, OneBot v11 反向WS) ─┐
 CLI (终端) ─────────────────────┤→ Gateway 层 → Session(工作记忆拼装) → Agent Loop ⇄ Tool Registry
-APScheduler(晨报/巩固) ────────┘        ↑                                      │
+APScheduler(巩固/汇总；P2 加晨报) ┘     ↑                                      │
                                         │            ┌───────────────────────────┤
               soul.md/user.md ──────────┤            ▼                           ▼
               记忆门控检索(小模型) ←─────┘   Memory(SQLite: facts/episodes   Tools: plan/memo/
@@ -128,9 +129,11 @@ APScheduler(晨报/巩固) ────────┘        ↑               
 4. 回复经 Gateway 发回；`add_exchange` 把工具活动折叠为 `[tools used: …]` 写入历史（防止下一轮重复调用）
 5. 异步落盘：chat_log、trace JSONL、usage；每 N 轮触发巩固
 
-### 4.4 每日晨报数据流（主动式）
+### 4.4 按需推荐汇总数据流（P1）＋ 定时推送（P2）
 
-APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（近期反馈 episodes + user.md 偏好）→ `recommend_media`（混合检索 → 过滤 recommend_log 已推 → 按口味加权排序）→ 模板 + 模型润色成一条晨报 → QQ 推送 → recommend_log 落库。
+**按需（P1，先做）**：用户说"今天有什么安排"（或跑 `yixiang brief`）→ `daily_brief` 工具读今日 plan_items + 到期 memos + 口味画像（近期反馈 episodes + user.md 偏好）→ `recommend_media`（混合检索 → 过滤 recommend_log 已推 → 按口味加权排序）→ 模板 + 模型润色 → **流式回复给用户** → 写 `data/briefs/YYYY-MM-DD.md` + recommend_log 落库。
+
+**定时（P2，路线图 #8）**：把上面前半段装进 APScheduler cron(8:00)，末尾的"流式回复"换成 sink 投递（CLI 启动打印 / 写文件 / Windows 通知 / QQ），睡眠错过则唤醒补发。**组装逻辑完全复用，只换触发源与出口。**
 
 ## 5. 核心子系统设计
 
@@ -147,8 +150,9 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
   ```ini
   YIXIANG_MAIN_MODEL=deepseek-chat          # 主对话
   YIXIANG_GATE_MODEL=deepseek-chat          # 门控（后续切本地小模型）
-  YIXIANG_JUDGE_MODEL=glm-4-flash           # 评测裁判（便宜）
-  YIXIANG_EMBED=bge-small-zh-v1.5           # 本地嵌入，零成本
+  YIXIANG_JUDGE_MODEL=deepseek-chat         # 评测裁判（P0 先用同 main，见 TECH-DESIGN §13.4）
+  YIXIANG_EMBED_BACKEND=fastembed           # 本地嵌入后端（onnx，约 100MB）
+  YIXIANG_EMBED_MODEL=BAAI/bge-small-zh-v1.5  # 512 维，零成本
   ```
 - 升级路径：门控/judge 这类"窄决策"任务逐步切本地小模型，把 API 成本压到接近只剩主对话
 
@@ -246,7 +250,7 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
 
 #### 5.4.1 语料来源与入库管线（为持续更新而设计）
 
-- 来源：Bangumi API（番剧，免 key）为主，TMDb（电影，免费 key）为辅；首期 300~500 部
+- 来源：Bangumi API（番剧，免 key）为主，TMDb（电影，免费 key）为辅；**首期 500 部**（Bangumi 番剧约 400 + TMDb 电影约 100，已拍板）
 - 管线命令化、幂等：`python -m yixiang.rag.ingest --source bangumi --tags 悬疑,科幻 --pages 5`
   - 按 `bangumi_id` upsert：已存在且简介未变则跳过，新增/变更才重新嵌入（省时省钱）
   - 元数据字段：标题 / 类型(电影·TV·番剧) / 年份 / genres / 评分 / 简介 / 封面 URL
@@ -278,11 +282,14 @@ APScheduler cron(8:00) → 读今日 plan_items + 到期 memos + 口味画像（
 - 安全：`YIXIANG_QQ_ALLOWED` 白名单只响应本人 QQ 号；**群消息默认忽略**（防第三方注入 prompt），仅私聊
 - 富媒体：收到图片先落盘再把路径给模型；回复支持 CQ 码发图（影视封面、Pixiv 图）
 
-#### 5.5.3 Scheduler（P1）
+#### 5.5.3 Scheduler
 
-- APScheduler 常驻进程内：8:00 晨报、每晚巩固、每日 usage 汇总
-- 补发：晨报任务记录"应发日期"，启动时发现今天未发且当前时间在 8:00~12:00 则补发
+**P1 只跑三个后台 job**（`yixiang serve`，`YIXIANG_SCHEDULER_ENABLED=1` 时启用）：
+
+- 每 N=20 轮触发巩固 + 每晚 23:30 兜底；每日 23:50 usage 汇总；每周日 22:00 记忆巡检
 - 任务异常捕获记 trace，绝不杀主进程
+
+**P2 才加晨报 job**（路线图 #8）：APScheduler cron(8:00) + "应发日期"记录，启动时发现今天未发且当前时间在 8:00~12:00 则补发（标注"（补发）"）。P0/P1 阶段 `YIXIANG_SCHEDULER_ENABLED` 默认关，推荐走 §4.4 的按需路径。
 
 ### 5.6 工具系统
 
@@ -296,6 +303,7 @@ Tool 约定：`Tool(name, description, input_schema, fn)`，注册进全局 regi
 | `manage_memory` | P0 | action: search/update/delete | 记忆治理：列出（带 id）→ 在用户指导下修改/删除；先查 id 再改 |
 | `update_soul` / `update_user` / `create_skill` | P0 | rule / profile 条目 / skill | 三文件与程序性记忆 |
 | `search_media` / `recommend_media` | P1 | query, filters | 混合检索 + 推荐排序 |
+| `daily_brief` | P1 | scope?(today/tomorrow) | 按需组装：今日任务 + 到期备忘 + 1 条推荐，并写 `data/briefs/` |
 | `bilibili_search` | P2 | keyword | 返回标题/UP/链接 |
 | `pixiv_download` | P2 | pid | 登录态依赖，仅花活 |
 
@@ -325,8 +333,10 @@ Tool 约定：`Tool(name, description, input_schema, fn)`，注册进全局 regi
 | 对话式治理 | "列出记忆 → 改第 2 条 → 删第 3 条"全链路断言（DB 与文件两侧一致） |
 | 门控跳过/命中 | "1+1=?"→false；"我上周说喜欢什么来着"→true |
 | 混合检索 | golden 20 条 top-3 命中率 ≥60% |
-| 推荐去重 | 连续两日推荐集无交集 |
+| 按需推荐组装 | "今天有什么安排" → 必调 `daily_brief`；返回含今日任务 + 到期备忘 + 1 条推荐；写 `data/briefs/` 与 recommend_log |
+| 推荐去重 | 连续两次推荐集无交集 |
 | QQ 幂等（P2 生效，P0/P1 skip） | 同 message_id 二次投递只处理一次 |
+| 定时补发（P2 生效，P0/P1 skip） | 模拟 8:00 未运行、9:30 启动 → 补发一次且标注"（补发）"，二次启动不重发 |
 | 三文件边界 | update_soul 不可删除既有规则；user.md 超限拒绝 |
 
 ### 6.2 LLM-as-judge
@@ -364,7 +374,7 @@ CREATE VIRTUAL TABLE media_vec USING vec0(embedding float[512]);
 CREATE TABLE recommend_log(id INTEGER PRIMARY KEY, media_id INTEGER,
                            recommended_on TEXT, channel TEXT, feedback TEXT); -- good/bad/none
 
-CREATE TABLE scheduled_runs(id INTEGER PRIMARY KEY, job TEXT, run_date TEXT, status TEXT); -- 晨报补发依据
+CREATE TABLE scheduled_runs(id INTEGER PRIMARY KEY, job TEXT, run_date TEXT, status TEXT); -- 定时任务幂等/补发依据（P2 晨报用）
 ```
 
 ## 8. 目录结构
@@ -396,7 +406,7 @@ scripts/                       # demo 种子数据等
 | 延迟 | 单轮端到端 <5s（无工具）/ <15s（含工具+检索） |
 | 隐私 | 数据全部本地；密钥仅 `.env`（gitignore）；QQ 白名单；群消息忽略 |
 | 平台 | Windows 优先开发（本机），代码保持 Linux 兼容（为后续迁移服务器） |
-| 依赖 | Python 3.12 + uv；sqlite-vec、httpx、apscheduler、websockets、sentence-transformers（嵌入） |
+| 依赖 | Python 3.12 + uv；sqlite-vec、httpx、apscheduler、websockets、**fastembed**（嵌入，onnx 约 100MB）；默认**不装 torch** |
 
 ## 10. 实施计划（方案二：按模块自顶向下，每周末有可演示里程碑）
 
@@ -404,12 +414,12 @@ scripts/                       # demo 种子数据等
 |---|---|---|
 | 1 | 基座：仓库/config/provider 抽象/loop/工具注册 + memo、plan 工具/CLI/trace+usage | **CLI 里完整对话，能记事、排计划、看 trace** |
 | 2 | 记忆系统：三文件 + episodic + skills + 门控 + 巩固 + 记忆管理工具；确定性评测起步（≥10 条） | **跨会话记忆生效（"上周我说过啥"能答），evals 绿** |
-| 3 | RAG 全链路（ingest 管线、混合检索、media 工具）+ 晨报与本地投递（调度、去重、补发、`gateway/sinks.py`） | **影视问答可用；晨报在本地真的被送到** |
+| 3 | RAG 全链路（ingest 管线、混合检索、media 工具）+ 按需推荐（`daily_brief` 组装、去重、写 `data/briefs/`） | **影视问答可用；说"今天有什么安排"能得到完整推荐** |
 | 4 | 口味加权推荐 + judge 评测 + CI 门禁 + README/架构图/demo 脚本 + B 站工具；开始连续真实使用 | **简历可写、视频可演示，进入"用-测-改"循环** |
 
 缓冲与砍单顺序：时间超支先砍 Pixiv → B 站工具 → demo 润色；**评测与记忆永不砍**。
 
-> **QQ 已移出四周计划**：它是 P2 可选扩展（§11 路线图 #7），不影响任何里程碑。先把"本地能跑、连续在用"做出来，再考虑换入口。
+> **QQ 与定时晨报推送都已移出四周计划**：它们是 P2 可选扩展（§11 路线图 #7、#8），不影响任何里程碑。推荐在 P1 走按需形态——组装逻辑一次写完，P2 接上 cron 与 sink 就能变成主动推送。先把"本地能跑、连续在用"做出来，再考虑什么时候推、推到哪。
 
 ## 11. 后续路线图（文档随功能演进）
 
@@ -420,10 +430,13 @@ scripts/                       # demo 种子数据等
 5. **语音入口**、**多用户隔离**（每用户独立 data 目录）
 6. 迁移部署到云服务器（Docker Compose：yixiang + NapCat）
 7. **QQ 入口（P2）**：NapCat + OneBot v11 反向 WS 接入，复用同一个 loop 与流式输出；白名单 + 群消息忽略（§13）
+8. **定时晨报推送（P2）**：把 P1 的 `daily_brief` 装进 APScheduler cron(8:00) + 唤醒补发，出口换成 `gateway/sinks.py`（CLI 打印 / 写文件 / Windows 通知 / QQ）——**内容层不变，只加触发与投递层**
 
 ## 12. 面试叙事要点
 
-**电梯稿（30s）**：我做了一个跑在本机、持续在用的个人 Agent（QQ 入口为 P2 扩展）：无框架自研 tool-calling loop，hermes 风格的三文件核心记忆（soul/user/memory.md）加检索门控和周期巩固，本地 SQLite 上做 FTS5+向量混合检索的影视推荐，每天主动推晨报；全程 trace 落盘、确定性评测加 LLM-as-judge 做 CI 发布门禁，连续真实使用 N 天、日均成本 X 元。
+**电梯稿（30s）**：我做了一个跑在本机、持续在用的个人 Agent（QQ 入口与定时推送为 P2 扩展）：无框架自研 tool-calling loop，hermes 风格的三文件核心记忆（soul/user/memory.md）加检索门控和周期巩固，本地 SQLite 上做 FTS5+向量混合检索的影视推荐，问一句"今天有什么安排"就现场组装出任务+备忘+推荐；全程 trace 落盘、确定性评测加 LLM-as-judge 做 CI 发布门禁，连续真实使用 N 天、日均成本 X 元。
+
+**拆分讲法（被追问"主动式呢"时）**：推荐做成**内容层 / 触发层分离**——`daily_brief` 负责组装（内容层，P1 就完整做完），cron + sink 只负责"什么时候、往哪发"（触发层，P2）。所以它不是"没做主动推送"，而是"先把内容质量做对，再决定推送时机"。这套分层本身也是被追问时的答案。
 
 **三个深挖故事**：
 1. **检索门控的取舍**——为什么不是每轮都查记忆（慢 + 过度解读）、fail-open 的理由、成本账
@@ -438,19 +451,37 @@ scripts/                       # demo 种子数据等
 | 风险 | 对策 |
 |---|---|
 | QQ 协议非官方，账号风控（P2 生效） | 使用小号；仅私聊低频；不做群聊、不发广告；QQ 未接入时该风险为 0 |
-| NapCat 需要偶发重新扫码 | 接受；掉线重连 + 启动自检；晨报有补发兜底 |
-| 本机不常开，晨报/在线中断 | 唤醒补发；路线图含服务器迁移 |
+| NapCat 需要偶发重新扫码 | 接受；掉线重连 + 启动自检；定时晨报有补发兜底（P2） |
+| 本机不常开，定时推送/在线中断 | P1 用按需形态天然规避（用户在场才触发）；P2 定时推送有唤醒补发；路线图含服务器迁移 |
+| judge 与主模型同源，分数偏高 | P0 已知局限：分数只作趋势观测、可客观判断项下沉为确定性断言；拿到基线后换一家厂商并重跑校准（TECH-DESIGN §13.4、§17.2-1） |
 | 语料质量影响推荐 | 结构化 API 数据源；golden 集监控命中率 |
 | 时间超支 | §10 砍单顺序；评测与记忆优先 |
 | "参考课程项目"同质化 | §0 来源声明 + §5.3.6 差异清单；核心自写、能白板讲解每行 |
 
-## 14. 开放问题（待讨论）
+## 14. 已定与待定
 
-1. **已定**：项目代号 `yixiang`（原 Momo；包名 / CLI / env 前缀统一，见 TECH-DESIGN §0.1）。
-2. 中文名怎么写——`yixiang` =「亦想」/「忆箱」/ 不取中文名？（TECH-DESIGN §17.2-10）
-3. 晨报推送时间定 8:00 是否合适？（TECH-DESIGN §17.2-5）
-4. 晨报本地投递走哪几个通道：CLI 启动打印 / 写 `data/briefs/*.md` / Windows 通知？（TECH-DESIGN §17.2-6）
-5. 首期语料 300~500 部（Bangumi 番剧为主 + TMDb 电影）规模是否合适？
-6. dashboard 放路线图不做（P0~P2 无 Web UI），demo 靠终端录屏，是否接受？
-7. **已定**：QQ 入口延后到 P2（§11 路线图 #7），先交付本地可运行版本。
-8. **已定**：流式输出列为 P0（TECH-DESIGN §5.4）。
+### 14.1 已定（本轮拍板，不再讨论）
+
+| 事项 | 结论 |
+|---|---|
+| 项目命名 | 代号 `yixiang`（原 Momo），中文名 **以湘**；包名 / CLI / env 前缀统一（TECH-DESIGN §0.1） |
+| 交付顺序 | 本地可运行优先：QQ 延后到 P2（路线图 #7），先交付 CLI 版本 |
+| 流式输出 | 列为 P0（TECH-DESIGN §5.4） |
+| 晨报形态 | **改按需触发**（用户想要时 agent 组装并发出）；定时推送 + 补发 + sink 投递降为 P2（路线图 #8） |
+| 嵌入后端 | **fastembed**（onnx 约 100MB），默认不装 torch |
+| 首期语料 | **500 部**（Bangumi 番剧约 400 + TMDb 电影约 100） |
+| `data/` 版本化 | **建私有 Git 备份仓**（只版本化三文件 / skills / briefs，TECH-DESIGN §12.4） |
+| 巩固阈值 | 先用 **0.9 / 0.6**，按实测调（TECH-DESIGN §7.7.2） |
+| judge 模型 | P0 **先用与主模型同一模型**，分数只作趋势观测；后续换一家厂商再定型（TECH-DESIGN §13.4） |
+
+### 14.2 待定（都有默认建议，不阻塞开工）
+
+完整表见 `TECH-DESIGN` §17.2 / §17.3。摘要：
+
+1. judge 换一家与主模型不同源的厂商（建议换，最晚 W4 D24；先用同源拿基线）。
+2. live 用例是否进 PR 门禁（建议不进，改为 nightly + 发版前手动跑）。
+3. P0~P2 不做 Web dashboard，demo 用终端录屏（建议接受）。
+4. `soul.md` 的 8000 字符上限是否收窄到 3000（TECH-DESIGN N-2）。
+5. 是否接受"每周一次文档回填"（TECH-DESIGN N-3）。
+6. judge 用例是否公开在仓库里（建议公开 rubric、隐藏 3 条压测用例，TECH-DESIGN N-4）。
+7. QQ 是否保留 P2 席位（建议保留骨架与设计，但不列交付物，TECH-DESIGN N-5）。

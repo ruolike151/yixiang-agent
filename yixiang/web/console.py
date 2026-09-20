@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import re
 from collections.abc import Callable, Iterable
@@ -443,9 +442,9 @@ class ConsoleAPI:
                 return
 
         try:
-            result = asyncio.run(
-                self.app.handle_message(message, observer=observer, stream=True)
-            )
+            # 走 App.ask（本线程常驻 loop）：每轮新建再关掉 loop 会让 provider 缓存的
+            # 连接池在第二轮报 Event loop is closed
+            result = self.app.ask(message, observer=observer, stream=True)
         except Exception as exc:  # noqa: BLE001 - 如实回错，不让 500 页面吞掉原因
             raise ConsoleError(f"这一轮没能跑完：{exc}", status=500, code="turn_failed") from exc
         payload = {

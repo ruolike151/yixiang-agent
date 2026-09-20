@@ -101,6 +101,14 @@ flowchart TB
 
 上传件落在 `data/uploads/`（同名不覆盖、`../` 被收敛成文件名），模型通过第 16 个工具 `read_file` 读它——否则"能上传"就只是往磁盘扔东西。
 
+### 1.2 三个入口共用一条常驻事件循环
+
+`App` 是长命对象，provider 里缓存的 `httpx.AsyncClient` 连接池绑在**创建它的那条 loop** 上。所以入口统一走 `runtime/eventloop.py`：一条线程一条常驻 loop（`run()` 在它上面 `run_until_complete`），loop 与线程同寿，也与它上面缓存的异步资源（连接池、锁、将来的后台任务）共生死。
+
+为什么这条要写成规矩，而不是"随手 `asyncio.run`"：`asyncio.run` 每轮新建并关闭一条 loop，第二轮拿旧连接池发请求就是 `RuntimeError: Event loop is closed`——现场表现是**"第一句正常、第二句整轮失败"**，而第一句已经真实计费（`ops/usage.jsonl` 里记得清清楚楚）。CLI（`App.ask()`）与 Web（`ConsoleAPI.chat()`）现在共用这一条路，端到端只剩一处 loop 生命周期；谁建谁关——Web 的工作线程收工时关掉自己的 loop。
+
+在事件循环里再调 `run()` 会被拦住并说明"这里该直接 `await`"：套娃两层 loop 的真病因是调用姿势错了，`asyncio` 自己的报错（`another loop is running`）指不到那一点。
+
 ## 2. 一轮对话的时序
 
 ```mermaid
@@ -176,7 +184,7 @@ sequenceDiagram
 
 同一条纪律的另一面，是**假 Provider 是整个体系的地基**：它让"Agent 的行为"第一次变成可测对象——全量 L1+L2 跑完 ≤30 秒、零成本、零抖动，还能稳定复现真模型难复现的失败路径（超时、`finish_reason=length`、工具参数是坏 JSON）。
 
-当前实测（2026-09-20）：`162 passed, 2 skipped`（2 条属 P2 的 D-13 / D-27，标 `skip`），全量 **4.5 秒**；`-m "not live"` 离线、零成本。原始数据见 [`NUMBERS.md`](./NUMBERS.md)。
+当前实测（2026-09-20）：`185 passed, 2 skipped`（2 条属 P2 的 D-13 / D-27，标 `skip`），全量 **6.5 秒**；`-m "not live"` 离线、零成本。原始数据见 [`NUMBERS.md`](./NUMBERS.md)。
 
 ## 6. 数据落盘地图
 

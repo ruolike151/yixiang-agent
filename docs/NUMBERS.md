@@ -144,19 +144,19 @@ top-3 命中率：90.0%（18/20，目标 ≥60%） · MRR 0.792 → 通过
 
 ```text
 $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-162 passed, 2 skipped, 1 deselected in 4.51s
+185 passed, 2 skipped, 1 deselected in 6.51s
 ```
 
 | 维度 | 数字 | 说明 |
 |---|---|---|
-| 收集总数 | **165** | 含 1 条 `-m live`（真模型用例） |
-| `-m "not live"` 选中 | **164** | 每次 PR + CI 跑的就是这一档 |
-| 通过 | **162** | 通过率 100%（门禁硬指标） |
+| 收集总数 | **188** | 含 1 条 `-m live`（真模型用例） |
+| `-m "not live"` 选中 | **187** | 每次 PR + CI 跑的就是这一档 |
+| 通过 | **185** | 通过率 100%（门禁硬指标） |
 | 跳过 | **2** | D-13 QQ 幂等、D-27 定时补发，都属 P2，按设计 `skip` |
 | 排除 | **1** | 标了 `-m live`，nightly / 发版前才跑 |
-| 全量耗时 | **4.51 s** | 离线、零成本、零抖动 |
+| 全量耗时 | **6.51 s** | 离线、零成本、零抖动 |
 
-逐文件分布（`-m "not live"` 收集数，合计 164）：
+逐文件分布（`-m "not live"` 收集数，合计 187）：
 
 | 文件 | 条数 | 覆盖 |
 |---|---|---|
@@ -164,9 +164,11 @@ $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
 | `test_provider.py` | 19 | 流式解析、超时、`finish_reason=length`、坏 JSON、用量记账 |
 | `test_tools_memo.py` | 17 | 备忘的幂等键 / 到期 / 去重 |
 | `test_gate.py` | 16 | 门控规则层、模型层、fail-open、标注集指标 |
+| `test_web.py` | 15 | 六栏控制台：配置/人设/记忆读写、multipart 上传、`read_file` 越界、SSE 分帧 |
 | `test_scheduler.py` | 14 | 三个 job 的幂等、异常隔离、假时钟、P2 skip |
 | `test_security.py` | 13 | 路径逃逸、注入包裹、超长截断、D-13 skip |
 | `test_memory_write.py` | 9 | "记住"硬契约、纠错重试、失败可见 |
+| `test_event_loop.py` | 8 | 一条线程一条常驻 loop：两轮同 loop、收尾关闭、keep-alive 复用 |
 | `test_memory_sync.py` | 7 | 三方对账、手改生效、漂移检测 |
 | `test_cli_gateway.py` | 5 | 斜杠命令、会话切换、流式渲染 |
 | `test_doctor.py` | 5 | 六项自检、离线嵌入后端白名单 |

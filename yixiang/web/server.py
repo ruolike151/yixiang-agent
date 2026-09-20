@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from yixiang.config import Settings
+from yixiang.runtime import eventloop
 from yixiang.web.console import MAX_UPLOAD_BYTES, ConsoleAPI, ConsoleError
 
 # 前端文件（手写、无构建）：server.py 只负责按路径读出来
@@ -100,16 +101,20 @@ class _SerialRunner:
         self._thread.join(timeout=5)
 
     def _loop(self) -> None:
-        while True:
-            job = self._queue.get()
-            if job is None:
-                return
-            try:
-                job.value = job.fn(*job.args, **job.kwargs)
-            except Exception as exc:  # noqa: BLE001 - 异常要带回请求线程，不能吞
-                job.error = exc
-            finally:
-                job.done.set()
+        try:
+            while True:
+                job = self._queue.get()
+                if job is None:
+                    return
+                try:
+                    job.value = job.fn(*job.args, **job.kwargs)
+                except Exception as exc:  # noqa: BLE001 - 异常要带回请求线程，不能吞
+                    job.error = exc
+                finally:
+                    job.done.set()
+        finally:
+            # 这条线程走了，它那条常驻事件循环也归它关（runtime/eventloop.py）
+            eventloop.shutdown()
 
 
 # --------------------------------------------------------------------- 请求处理

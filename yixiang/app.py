@@ -24,6 +24,7 @@ from yixiang.rag import clear_warnings as clear_rag_warnings
 from yixiang.rag import configure as configure_rag
 from yixiang.rag import reset as reset_rag
 from yixiang.rag import trace_info as rag_trace_info
+from yixiang.runtime import eventloop
 from yixiang.runtime.models import (
     Clock,
     Observer,
@@ -275,19 +276,20 @@ class App:
             )
 
     def ask(self, text: str, **kwargs: Any) -> TurnResult:
-        """同步入口（脚本 / 演示用）：内部起一个事件循环跑完一轮。"""
-        import asyncio
+        """同步入口（终端会话 / 脚本 / 演示）：跑在**本线程常驻的 loop** 上。
 
-        return asyncio.run(self.handle_message(text, **kwargs))
+        不要退回 ``asyncio.run``：它每轮新建并关掉一条 loop，provider 缓存的连接池
+        会在第二轮报 ``Event loop is closed``（见 ``runtime/eventloop.py``）。
+        """
+        return eventloop.run(self.handle_message(text, **kwargs))
 
     # ------------------------------------------------------------------ 收尾
     def close(self) -> None:
         closer = getattr(self.provider, "aclose", None)
         if closer is not None:
-            import asyncio
-
             with contextlib.suppress(RuntimeError):  # 已在事件循环里：交给调用方自己关
-                asyncio.run(closer())
+                # 与对话同一条 loop：换个 loop 关不掉 provider 的连接池
+                eventloop.run(closer())
         if self.conn is not None:
             self.conn.close()
             self.conn = None

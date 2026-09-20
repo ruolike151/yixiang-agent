@@ -26,7 +26,9 @@ from fake_provider import (
     stream_body,
 )
 
+from yixiang.config import Settings
 from yixiang.errors import E_LLM_AUTH, E_LLM_BAD_REQUEST, E_LLM_TIMEOUT, ProviderError
+from yixiang.ops.pricing import PRICES
 from yixiang.ops.usage import CollectingUsageSink, JsonlUsageSink, iter_lines
 from yixiang.providers import OpenAICompatibleProvider
 from yixiang.runtime.models import (
@@ -66,6 +68,7 @@ def request_for(settings, *, role: str = "main") -> ProviderRequest:
 
 # ------------------------------------------------------------------ 角色路由
 def test_role_routing_table_falls_back_to_the_main_model(settings):
+    # 故意写一个 ≠ 默认值（deepseek-flash）的名字：这样"路由读的是设置、不是默认值"才被证明
     settings.main_model = "deepseek-chat"
     settings.gate_model = ""
     settings.judge_model = ""
@@ -82,6 +85,16 @@ def test_role_routing_table_falls_back_to_the_main_model(settings):
     assert settings.model_for("utility") == "deepseek-reasoner"  # 窄角色留空 → 回落
     with pytest.raises(ValueError):
         settings.model_for("nope")
+
+
+def test_default_main_model_is_the_model_we_actually_use():
+    # 只使用 deepseek-flash：默认值必须就是它，否则 .env 漏配时会悄悄换成别的模型
+    assert Settings().main_model == "deepseek-flash"
+
+
+def test_default_main_model_has_its_own_price_row():
+    # 默认模型在价目表里有名有姓，成本才不会静默按兜底价计（偏乐观）
+    assert Settings().main_model in PRICES
 
 
 def test_role_routing_picks_the_model_and_writes_one_usage_line(settings):

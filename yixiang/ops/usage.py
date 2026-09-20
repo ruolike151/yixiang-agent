@@ -3,7 +3,7 @@
 行格式（字段名冻结）::
 
     {"ts":"2026-09-19T08:12:33+08:00","turn_id":"t_20260919_081233_ab12",
-     "role":"main","model":"deepseek-chat","input":5821,"cached_input":5012,
+     "role":"main","model":"deepseek-flash","input":5821,"cached_input":5012,
      "output":287,"latency_ms":4210,"cost_cny":0.0043}
 
 写入口是 ``UsageSink``（Provider 注入），所以"谁记账"只有一个答案：Provider。

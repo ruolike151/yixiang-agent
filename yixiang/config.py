@@ -68,7 +68,7 @@ class Settings:
     """运行期配置。字段顺序 = .env.example 的顺序，便于对照维护。"""
 
     # ── 模型（角色路由）──
-    main_model: str = "deepseek-chat"
+    main_model: str = "deepseek-flash"
     gate_model: str = ""
     judge_model: str = ""
     utility_model: str = ""

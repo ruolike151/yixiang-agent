@@ -1,21 +1,26 @@
 """价目表与成本计算（TECH-DESIGN §4.4）。
 
-**价格以官网为准**：下表查询日期 2026-09-19，单位「元 / 百万 token」。
+**价格以官网为准**：下表查询日期 2026-09-20，单位「元 / 百万 token」。
 价格变动时只改这里，``usage.jsonl`` 里的历史行不会被重算（成本是当时的事实）。
+
+只收「我们真的会路由到」的模型：调用过的模型必须在表里有自己的一行，否则成本会静默
+按兜底价计（偏乐观），账就自证不了——这条纪律由 ``evals/deterministic/test_pricing.py`` 钉住。
 """
 
 from __future__ import annotations
 
 from yixiang.runtime.models import Usage
 
-# 查询日期：2026-09-19。三元组 = (缓存未命中输入, 缓存命中输入, 输出)
+# 查询日期：2026-09-20。三元组 = (缓存未命中输入, 缓存命中输入, 输出)
+# deepseek-flash 官网分「高峰 / 空闲」两档（空闲 = 高峰的一半），这里取**高峰**价：宁可高估。
 PRICES: dict[str, tuple[float, float, float]] = {
-    "deepseek-chat": (2.0, 0.5, 8.0),
+    "deepseek-flash": (2.0, 0.04, 8.0),  # 当前唯一在用的模型（main / gate / judge / utility）
     "deepseek-reasoner": (4.0, 1.0, 16.0),
     "glm-4-flash": (0.0, 0.0, 0.0),  # 免费额度，但仍记账 token
 }
 
-DEFAULT_PRICE: tuple[float, float, float] = (2.0, 0.5, 8.0)
+# 未知模型的兜底价 = 表里最贵的一档：宁可高估，不掩盖成本。
+DEFAULT_PRICE: tuple[float, float, float] = max(PRICES.values())
 
 
 def price_for(model: str) -> tuple[float, float, float]:

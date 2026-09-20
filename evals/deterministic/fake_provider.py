@@ -127,7 +127,7 @@ class FakeProvider:
             raise item
         item.latency_ms = self.latency_ms
         if not item.model:
-            item.model = "deepseek-chat"
+            item.model = "deepseek-flash"
         return item
 
     def _stream_events(self, reply: ModelReply) -> list[LoopEvent]:
@@ -258,7 +258,7 @@ def scripted_transport(*steps: Any) -> tuple[httpx.MockTransport, list[dict[str,
 def completion_body(
     text: str = "好的",
     *,
-    model: str = "deepseek-chat",
+    model: str = "deepseek-flash",
     usage_raw: dict[str, Any] | None = None,
     finish_reason: str = "stop",
     tool_calls: list[dict[str, Any]] | None = None,

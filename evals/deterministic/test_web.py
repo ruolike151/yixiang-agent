@@ -121,8 +121,8 @@ def test_state_shows_models_counters_and_masks_the_key(settings, clock):
 
     assert state["counters"]["tools"] == 16
     assert state["counters"]["skills"] == 0  # tmp 里还没有 skills/
-    assert state["models"]["main"] == "deepseek-chat"
-    assert state["models"]["gate"] == "deepseek-chat"  # 留空 → 回落主模型
+    assert state["models"]["main"] == "deepseek-flash"
+    assert state["models"]["gate"] == "deepseek-flash"  # 留空 → 回落主模型
     assert state["session"] == {"id": "web:default", "source": "web", "turns": 0}
     assert state["ready"]["api_key"] is True
     assert state["errors"] == []  # 配置齐全：启动自检没有红灯
@@ -230,7 +230,7 @@ def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock
     assert snapshot["fields"]["api_key"] == ""  # 明文永不出站：要改就填新的
     assert snapshot["secret_mask"]["api_key"] == mask_secret(settings.api_key)
     assert snapshot["env_file_exists"] is True
-    assert snapshot["choices"]["model_suggestions"][0] == "deepseek-chat"
+    assert snapshot["choices"]["model_suggestions"][0] == "deepseek-flash"
 
     result = api.save_config({"main_model": "deepseek-reasoner", "api_key": ""})
     assert result["ok"] is True
@@ -360,7 +360,7 @@ def test_chat_streams_events_and_reports_the_turn(settings, clock):
     assert "".join(e.get("text", "") for e in events if e["kind"] == "text_delta") == REPLY
     assert result["reply"] == REPLY
     assert result["finish_reason"] == "stop"
-    assert result["model"] == "deepseek-chat"
+    assert result["model"] == "deepseek-flash"
     assert result["tools"] == []
     assert set(result["usage"]) == {"in", "cached_in", "out"}
 

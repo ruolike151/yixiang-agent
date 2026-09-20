@@ -62,7 +62,7 @@ def _chat_completion(text: str) -> bytes:
         {
             "id": "chatcmpl-1",
             "object": "chat.completion",
-            "model": "deepseek-chat",
+            "model": "deepseek-flash",
             "choices": [
                 {
                     "index": 0,
@@ -81,14 +81,14 @@ def _chat_completion_stream(text: str) -> bytes:
     chunks = [
         {
             "id": "chatcmpl-1",
-            "model": "deepseek-chat",
+            "model": "deepseek-flash",
             "choices": [
                 {"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}
             ],
         },
         {
             "id": "chatcmpl-1",
-            "model": "deepseek-chat",
+            "model": "deepseek-flash",
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
         },

@@ -74,8 +74,9 @@ QQ_FIELDS = ("qq_enabled", "qq_listen", "qq_token", "qq_allowed", "qq_group_enab
 # 密钥类字段：空串 = "这次不改"（前端拿到的是掩码，回填空串才不会被写成空值）
 SECRET_FIELDS = ("api_key", "qq_token")
 
-# 下拉候选。模型名**不是白名单**（vLLM / Ollama 可以填任意名字），只作为建议值
-MODEL_SUGGESTIONS = ("deepseek-chat", "deepseek-reasoner")
+# 下拉候选。模型名**不是白名单**（vLLM / Ollama 可以填任意名字），只作为建议值；
+# 候选要能在 ``ops/pricing.py`` 里查到价，否则成本会静默按兜底价计（偏乐观）
+MODEL_SUGGESTIONS = ("deepseek-flash", "deepseek-reasoner")
 EMBED_CHOICES = ("fastembed", "sentence-transformers", "api", "hash")
 LOG_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 

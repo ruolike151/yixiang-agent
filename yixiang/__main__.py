@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1）")
     web.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
     sub.add_parser("serve", help="启动网关（QQ 属 P2，本阶段未实现）")
-    sub.add_parser("doctor", help="六项启动自检")
+    sub.add_parser("doctor", help="七项启动自检")
     sub.add_parser("migrate", help="应用数据库迁移")
     # rag（ingest / reindex / eval）与 brief 的命令实现在 ops/rag_cmd.py，保持这里瘦
     rag_cmd.add_parsers(sub)
@@ -321,6 +321,14 @@ def cmd_backup(settings: Settings, args: argparse.Namespace) -> int:
     path = backup.backup_now(settings.data_dir)
     size_kb = path.stat().st_size / 1024 if path.is_file() else 0.0
     print(f"快照：{path}（{size_kb:.1f} KB）")
+    # 密钥副本跟数据库是两件不同的事：库没了能重建，key 没了只能重新申请。
+    # 没有 .env 不是错误（干净的 clone 就没有），所以这里只打印、不报错。
+    secrets_path = backup.backup_secrets(settings.data_dir, settings.env_file)
+    print(
+        f"密钥副本：{secrets_path}"
+        if secrets_path is not None
+        else "密钥副本：没有 .env，跳过（干净的 clone 是合法状态）"
+    )
     print(backup.private_repo_summary(settings.data_dir))
     return 0
 

@@ -1,4 +1,4 @@
-"""``yixiang doctor``：六项启动自检（TECH §1.2、PART-1 §1）。
+"""``yixiang doctor``：七项启动自检（TECH §1.2、PART-1 §1）。
 
 口径（有意为之，写在代码里免得以后自己都记不清）：
 
@@ -7,6 +7,9 @@
   * 检查 5「模型探活」在没有 key 时**跳过并告警**，不算失败；
   * 检查 6 会把 ``templates/`` 的三文件复制到 ``data/``（已存在则不覆盖），
     这样 clone 下来第一次跑 doctor 就能得到可用的记忆文件。
+  * 检查 7 判的是 ``.env`` **有没有一份落在 ``data/`` 里的副本**，不是"key 填没填"：
+    副本就是可恢复性的全部证据，丢了密钥不会让程序起不来（所以只告警），
+    但会让历史 ``usage.jsonl`` 的账不可复算（所以值一条黄灯）。
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ class Check:
 
 
 def run_checks(settings: Settings) -> list[Check]:
-    """跑完六项自检。任何一项 ``fail`` 都让 doctor 退非零。"""
+    """跑完七项自检。任何一项 ``fail`` 都让 doctor 退非零。"""
     checks = [_check_config(settings)]
     conn = None
     try:
@@ -48,6 +51,7 @@ def run_checks(settings: Settings) -> list[Check]:
             conn.close()
     checks.append(_check_model(settings))
     checks.append(_check_core_files(settings))
+    checks.append(_check_secrets_recovery(settings))
     return checks
 
 
@@ -166,6 +170,28 @@ def _core_file_limit_problems(settings: Settings, core_files) -> list[str]:
         item for item in core_files.validate_memory_md(memory_text) if item.startswith("error:")
     )
     return problems
+
+
+def _check_secrets_recovery(settings: Settings) -> Check:
+    """第 7 项：``.env`` 有没有一份落在 ``data/backups/secrets/`` 的可恢复副本。
+
+    判据是**副本在不在**（先看证据），不是"key 配没配"：没有副本时才分两种说法——
+    没配 key 就是"没什么可丢的"（跟检查 5 一个口径，告警跳过），配了 key 才是
+    真正该修的那条黄灯。
+    """
+    from yixiang.ops import backup
+
+    directory = settings.data_dir / backup.BACKUP_DIRNAME / backup.SECRETS_DIRNAME
+    copies = sorted(directory.glob(".env.*")) if directory.is_dir() else []
+    if copies:
+        return Check("密钥可恢复性", OK, f"最近一份 {copies[-1].name}")
+    if not settings.api_key:
+        return Check("密钥可恢复性", WARN, "未配置密钥，已跳过（也没有副本可丢）")
+    return Check(
+        "密钥可恢复性",
+        WARN,
+        f"还没有 .env 备份：跑 `python -m yixiang backup` 或手动复制到 {directory}",
+    )
 
 
 def render(checks: list[Check], *, header: str = "yixiang doctor") -> str:

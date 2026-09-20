@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import sqlite3
 import subprocess
@@ -26,6 +27,8 @@ from pathlib import Path
 from yixiang.runtime.models import Clock, SystemClock
 
 BACKUP_DIRNAME = "backups"
+# 密钥副本的落点：在 ``data/`` 之内，所以 ``.gitignore`` 的 ``data/`` 一并挡住它
+SECRETS_DIRNAME = "secrets"
 SNAPSHOT_PREFIX = "state-"
 SNAPSHOT_SUFFIX = ".db"
 DEFAULT_KEEP_DAYS = 30
@@ -90,6 +93,31 @@ def backup_now(
 
     if commit:
         _commit_private_repo(data_dir, day)
+    return target
+
+
+def backup_secrets(
+    data_dir: Path | str,
+    env_file: Path | str | None,
+    *,
+    clock: Clock | None = None,
+) -> Path | None:
+    """把 ``.env`` 复制到 ``data/backups/secrets/.env.YYYY-MM-DD``。
+
+    同一个日期覆盖写（一天一份）：多留几份密钥副本只会扩大泄露面。
+    ``.env`` 不存在时返回 ``None``——干净的 clone 没有它，那不是错误。
+    """
+    if env_file is None:
+        return None
+    source = Path(env_file)
+    if not source.is_file():
+        return None
+    day = (clock or SystemClock()).now().astimezone().date().isoformat()
+    target = Path(data_dir) / BACKUP_DIRNAME / SECRETS_DIRNAME / f".env.{day}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    with contextlib.suppress(OSError):  # Windows 上 chmod 语义有限，尽力而为
+        target.chmod(0o600)
     return target
 
 
@@ -200,7 +228,9 @@ __all__ = [
     "BACKUP_DIRNAME",
     "DEFAULT_KEEP_DAYS",
     "PRIVATE_GITIGNORE",
+    "SECRETS_DIRNAME",
     "backup_now",
+    "backup_secrets",
     "gc_backups",
     "private_repo_summary",
     "snapshot_path",

@@ -1,9 +1,10 @@
-"""doctor 六项自检（PART-1 §1 "自检通过"、TECH §1.2）。
+"""doctor 七项自检（PART-1 §1 "自检通过"、TECH §1.2）。
 
 口径有意分成两半，用例把这两半都钉住：
   * **没配 key 时不该失败**——检查 1 判"配置能否加载并校验"，检查 5 跳过并告警；
     本地 clone 下来不填 key 也能把 doctor 跑到"0 失败"，否则连 /tools 都试不了。
   * **检查 6 真的会复制**——``templates/`` 的三文件落到 ``data/``，且第二次跑只保留不覆盖。
+  * **检查 7 只看副本存不存在**——没配 key 不适用（告警），备份过就转 OK。
 """
 
 from __future__ import annotations
@@ -21,7 +22,13 @@ LABELS = (
     "sqlite-vec 扩展",
     "模型探活",
     "三文件就位",
+    "密钥可恢复性",
 )
+
+
+def check_by_label(checks, label: str):
+    """按标签取项：第 7 项一加，``[-1]`` 就不再是"三文件就位"了。"""
+    return next(check for check in checks if check.label == label)
 
 
 def no_key_settings(tmp_path: Path, repo_root: Path, **overrides) -> Settings:
@@ -35,7 +42,7 @@ def no_key_settings(tmp_path: Path, repo_root: Path, **overrides) -> Settings:
     return Settings.load(env_file=None, environ={}, project_root=repo_root, **values)
 
 
-def test_doctor_runs_six_checks_and_warns_but_never_fails_without_api_key(tmp_path, repo_root):
+def test_doctor_runs_seven_checks_and_warns_but_never_fails_without_api_key(tmp_path, repo_root):
     checks = doctor.run_checks(no_key_settings(tmp_path, repo_root))
 
     assert [check.label for check in checks] == list(LABELS)
@@ -43,9 +50,10 @@ def test_doctor_runs_six_checks_and_warns_but_never_fails_without_api_key(tmp_pa
     assert [check.label for check in checks if check.status == doctor.WARN] == [
         "配置加载与校验",
         "模型探活",
+        "密钥可恢复性",  # 还没备份过 → 告警，不阻塞
     ]
     assert doctor.main(no_key_settings(tmp_path, repo_root)) == 0
-    assert "4 项通过，2 项告警" in doctor.render(checks)
+    assert "4 项通过，3 项告警" in doctor.render(checks)
 
 
 def test_doctor_copies_templates_into_data_dir_and_keeps_them(tmp_path, repo_root):
@@ -53,7 +61,7 @@ def test_doctor_copies_templates_into_data_dir_and_keeps_them(tmp_path, repo_roo
     soul_path = settings.data_dir / "soul.md"
     assert not soul_path.exists()  # 起点：data/ 里什么都没有
 
-    first = doctor.run_checks(settings)[-1]
+    first = check_by_label(doctor.run_checks(settings), "三文件就位")
 
     assert first.status == doctor.OK
     for name in ("soul.md", "user.md", "memory.md"):
@@ -63,7 +71,7 @@ def test_doctor_copies_templates_into_data_dir_and_keeps_them(tmp_path, repo_roo
         assert copied.read_text(encoding="utf-8") == template
     assert "新建 soul.md, user.md, memory.md" in first.detail
 
-    second = doctor.run_checks(settings)[-1]
+    second = check_by_label(doctor.run_checks(settings), "三文件就位")
 
     assert "新建 无" in second.detail  # 第二次跑不覆盖已有的记忆文件
     assert "保留 soul.md, user.md, memory.md" in second.detail
@@ -100,11 +108,30 @@ def test_doctor_check_six_fails_when_a_core_file_is_over_the_limit(tmp_path, rep
     soul = settings.data_dir / "soul.md"
     soul.write_text(soul.read_text(encoding="utf-8") + "x" * 9000, encoding="utf-8")
 
-    check = doctor.run_checks(settings)[-1]
+    check = check_by_label(doctor.run_checks(settings), "三文件就位")
 
     assert check.status == doctor.FAIL
     assert "soul.md" in check.detail and "超过上限" in check.detail
     assert doctor.main(settings) == 1
+
+
+def test_doctor_check_seven_turns_ok_after_a_secrets_backup(tmp_path, repo_root):
+    """第 7 项要能真的翻绿：备份一份 ``.env`` 之后，详细行报出最近那份副本。
+
+    这里**不能**填真 key——检查 5 会拿着它去连模型，确定性用例一条网络请求都不许发。
+    所以第 7 项的判据是"副本在不在"，不是"key 配没配"：副本就是可恢复性的全部证据。
+    """
+    from yixiang.ops import backup
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("YIXIANG_API_KEY=sk-test-not-real\n", encoding="utf-8")
+    settings = no_key_settings(tmp_path, repo_root)
+    backup.backup_secrets(settings.data_dir, env_file)
+
+    check = check_by_label(doctor.run_checks(settings), "密钥可恢复性")
+
+    assert check.status == doctor.OK
+    assert ".env." in check.detail
 
 
 def test_validate_rejects_a_main_model_that_cannot_call_tools(tmp_path, repo_root):

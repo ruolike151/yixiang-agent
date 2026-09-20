@@ -43,12 +43,12 @@ uv run python -m yixiang.ops.release_gate
 
 ```text
 All checks passed!                                                    ← ① ruff
-162 passed, 2 skipped, 1 deselected in 4.51s                          ← ② 确定性用例
+185 passed, 2 skipped, 1 deselected in 6.51s                          ← ② 确定性用例（耗时随负载浮动，约 6~9 秒）
 校验通过：…\data\skills 下 0 个技能可用                                 ← ③ skills validate
 
 发布门禁：硬门禁 4/4 通过                                              ← ④ release_gate
   ✓ 确定性用例通过率                   100.0% / 阈值 100.0%     [硬门禁]
-      162 passed / 0 failed（pytest 退出码 0）
+      185 passed / 0 failed（pytest 退出码 0）
   ✓ judge 均分                     4.80 / 阈值 4.00       [硬门禁]
       10 条 · 均分 4.80 / 通过线 4.0（offline） · 最低：J-05=4；J-09=4
   ✓ 门控漏检率                        0.0% / 阈值 0.0%       [硬门禁]
@@ -56,8 +56,8 @@ All checks passed!                                                    ← ① ru
   ✓ 检索 top-3 命中率                90.0% / 阈值 60.0%      [硬门禁]
       18/20 命中 · MRR 0.792 · 语料 31 部 · 嵌入 ok · 口味关（T3 口径）
 告警项（不阻止合并）：
-  ✓ 单轮成本上限                    ¥0.0000 / 阈值 ¥0.7500    [只告警]
-      今天 0 轮 · 合计 ¥0.0000（预算 ¥0.50/天）· 最贵一轮上界 ¥0.0000
+  ✓ 单轮成本上限                    ¥0.0150 / 阈值 ¥0.7500    [只告警]
+      今天 2 轮 · 合计 ¥0.0236（预算 ¥0.50/天）· 最贵一轮上界 ¥0.0150
 结论：全过，可以合并
 ```
 
@@ -197,9 +197,10 @@ uv run python scripts/restore_drill.py   # 演练：把快照当唯一库源启�
 
 1. **退步会被拦住**：CI 四步 + `release_gate` 五项（确定性 100% / judge ≥4.0 / 门控漏检 0 /
    top-3 ≥60% / 成本告警），判定逻辑只有一份，退出码就是结论；
-2. **每条数字都能指到源头**：完整实测 4.51 秒、零成本；命中率 90.0% / MRR 0.792（holdout 100%）；
+2. **每条数字都能指到源头**：完整实测 6.5 秒（随负载浮动）、零成本；命中率 90.0% / MRR 0.792（holdout 100%）；
    judge 4.80；成本口径与算法在 `docs/NUMBERS.md`——不是截图，是复算命令；
-3. **收口这一周没加功能**：四个子系统各自冻结，P2（定时推送 / QQ 入口）只留接口、不进任何门禁。
+3. **收口这一周没加功能**：四个子系统各自冻结，P2（定时推送 / QQ 入口）只留接口、不进任何门禁；
+   收口之后补的 Web 控制台只是**范围外的入口层**（第 10 节加演，不进任何门禁）。
    这个项目不是"调通了 API 的聊天机器人"，是**有记忆、有评测、有成本账、连续在用的个人 Agent**。
 
 ## 8. 会被问到的问题（答案在仓库里）
@@ -224,7 +225,7 @@ uv run python scripts/restore_drill.py   # 演练：把快照当唯一库源启�
 ```powershell
 $env:YIXIANG_EMBED_BACKEND='hash'; $env:PYTHONUTF8='1'
 uv run ruff check .
-uv run pytest evals/deterministic -m "not live" -rs        # 162 passed, 2 skipped
+uv run pytest evals/deterministic -m "not live" -rs        # 185 passed, 2 skipped
 uv run yixiang eval judge                                  # 4.80（offline）
 uv run yixiang rag eval                                    # 90.0% / MRR 0.792
 uv run python -m yixiang.ops.release_gate                  # 硬门禁 4/4
@@ -237,3 +238,32 @@ uv run python scripts/restore_drill.py                     # 恢复演练通过
 
 现场翻车时的动作顺序：① `uv run yixiang doctor` 看六项自检；② `uv run yixiang ops tail` 看今天有没有 trace；
 ③ 实在不行，切到第 9 步的离线五条命令——**它们和在线路径共用同一份代码**，只是把真模型换成假时钟与假 Provider。
+
+## 10. 加演：Web 控制台（可选，**不计入 3 分钟**）
+
+这是 W4 收口**之后**补的**范围外入口**（`parts/PART-4-eval-ops.md` §2 已回填说明）。它的定位要说在前面：
+**不是交付物、不参与 `release_gate`、不进 CI 门禁**；存在的意义是让"人设 / 记忆 / 配置"这些平时只躺在文件里的
+东西能当场点开——**远程共享屏幕时的加分项**。
+
+```powershell
+uv run yixiang web            # 只绑 127.0.0.1:8765；标准库实现，无前端构建步骤
+```
+
+打开 `http://127.0.0.1:8765/`，六栏从左到右，每栏一句话就能讲完：
+
+| 栏 | 现场动作 | 想证明什么 |
+|---|---|---|
+| 对话 | **连着发两句**（第二句必须也正常） | `4b2883d` 修的 bug 现场：入口共用一条常驻事件循环，第二句不会再 `Event loop is closed` |
+| 历史对话 | 切到上一个会话，从旧到新翻一遍 | 会话不是"聊完就扔"，`chat_log` 真的落了盘 |
+| 人设与记忆 | 改一行 `soul.md` 保存 → 看容量条 | 上限校验（`soul` 3000 / `user` 4000 字符、memory 活跃区 150 行）；超限**一个字节都不落盘**，不是静默截断 |
+| 模型配置 | 看 key 只出掩码；改一个非密配置 | 密钥永不回前端（T-4），改完写回 `.env` 且保留原有注释 |
+| 提示词 | 看 system 段的拼装顺序 | 静态在前、动态在后（TECH §4.5）——前缀缓存能不能命中就看它 |
+| QQ 设置 | 开 QQ、白名单留空 → 保存被拒 | 安全默认值：空白名单 = 拒绝一切外部消息（TECH §3.1） |
+
+> 讲点（一句话）："前端是**手写的、没有构建步骤**的，它只是把已经存在的适配层（`web/console.py`）
+> 接到 HTTP + SSE 上；要讲的东西（门控 / 检索 / 记忆 / 成本）还是终端里那套代码，没有为演示写第二遍逻辑。"
+
+> 上传那条路径也可以顺手演：拖一个 `.md` 进去 → 它走的是 `read_file` 工具的同一份白名单与路径校验，
+> 文件名会被消毒、同名不覆盖（`evals/deterministic/test_web.py` 15 条用例盯着这些边界）。
+
+> 录屏取舍：3 分钟正片用终端就够；加演这一段建议只在**远程面试**、或者对方主动问"有没有界面"时展开。

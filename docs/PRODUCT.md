@@ -481,7 +481,7 @@ scripts/                       # demo 种子数据等
 
 1. judge 换一家与主模型不同源的厂商（建议换，最晚 W4 D24；先用同源拿基线）。
 2. live 用例是否进 PR 门禁（建议不进，改为 nightly + 发版前手动跑）。
-3. P0~P2 不做 Web dashboard，demo 用终端录屏（建议接受）。
+3. ~~P0~P2 不做 Web dashboard~~ → **已偏离**：收口后补了本机 Web 控制台 `yixiang web`（范围外加分项，不进任何门禁）；主线 demo 仍用终端录屏。
 4. ~~`soul.md` 的 8000 字符上限是否收窄到 3000（TECH-DESIGN N-2）~~ → **已决策：收窄到 3000（W2）**。
 5. 是否接受"每周一次文档回填"（TECH-DESIGN N-3）。
 6. judge 用例是否公开在仓库里（建议公开 rubric、隐藏 3 条压测用例，TECH-DESIGN N-4）。

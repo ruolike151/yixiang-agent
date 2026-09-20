@@ -42,7 +42,7 @@
 │                                                                             │
 │  Gateway 层                                                                  │
 │  ├── CLI REPL（主线程 stdin 阻塞读，交给 loop 执行）                          │
-│  ├── QQ Gateway（websockets 服务端，监听 127.0.0.1:8765/onebot/v11/ws）       │
+│  ├── QQ Gateway（websockets 服务端，监听 127.0.0.1:8766/onebot/v11/ws）       │
 │  └── Scheduler（APScheduler AsyncIOScheduler，进程内 job）                    │
 │                          │                                                   │
 │                          ▼  统一入口：handle_message(session_id, source, text) │
@@ -79,7 +79,7 @@ Windows 本机（P0/P1：只有 yixiang 一个进程）
 
 P2 追加（可选，不进交付门禁）
 ├── 定时晨报推送              uv run yixiang serve --scheduler  8:00 主动推送 + 唤醒补发（§10.3）
-└── NapCat（独立 exe）        扫码登录 QQ，配置反向 WS → ws://127.0.0.1:8765/onebot/v11/ws
+└── NapCat（独立 exe）        扫码登录 QQ，配置反向 WS → ws://127.0.0.1:8766/onebot/v11/ws
 ```
 
 启动自检 `yixiang doctor`，逐项检查并在失败时给出可操作提示：
@@ -249,7 +249,7 @@ data/                  # 运行时生成、gitignore：state.db、soul.md、user
 | `YIXIANG_EMBED_MODEL` | `BAAI/bge-small-zh-v1.5` | | 512 维 |
 | `YIXIANG_DATA_DIR` | `./data` | | 运行时可写目录 |
 | `YIXIANG_QQ_ENABLED` | `0` | | 是否启动 OneBot 反向 WS |
-| `YIXIANG_QQ_LISTEN` | `127.0.0.1:8765` | | 反向 WS 监听地址 |
+| `YIXIANG_QQ_LISTEN` | `127.0.0.1:8766` | | 反向 WS 监听地址（8765 留给 Web 控制台，**不要**改回同号） |
 | `YIXIANG_QQ_TOKEN` | 空 | | OneBot access_token（若 NapCat 侧配置了） |
 | `YIXIANG_QQ_ALLOWED` | 空 | | 允许的 QQ 号白名单，逗号分隔；**空值 = 拒绝所有**（安全默认） |
 | `YIXIANG_QQ_GROUP_ENABLED` | `0` | | 群消息默认忽略 |
@@ -1262,8 +1262,12 @@ yixiang > 我给你排好了，每天 2 小时：...
 NapCat（独立进程，登录 QQ 小号）
         │  反向 WS（NapCat 作为客户端主动连过来，因此本机无需公网 IP）
         ▼
-yixiang QQ Gateway（websockets.serve，监听 127.0.0.1:8765/onebot/v11/ws）
+yixiang QQ Gateway（websockets.serve，监听 127.0.0.1:8766/onebot/v11/ws）
 ```
+
+端口口径：**8765 是 Web 控制台**（`yixiang/web/server.py` 的 `DEFAULT_PORT`），QQ 用 **8766**。
+两者都是 `127.0.0.1` 的 loopback 监听，同号会撞——撞了之后的报错是"端口被占用"，
+看不出是 QQ，所以默认值由 `test_doctor.py` 钉住。
 
 握手校验：
 

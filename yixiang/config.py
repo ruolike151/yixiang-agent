@@ -97,7 +97,10 @@ class Settings:
 
     # ── QQ（P2）──
     qq_enabled: bool = False
-    qq_listen: str = "127.0.0.1:8765"
+    # 8766 而不是 8765：8765 是 Web 控制台（``web.server.DEFAULT_PORT``）的默认端口。
+    # 两个监听撞一起时，报错指向的是"端口被占用"而不是"你配重了"——排查成本极高
+    # （表现是"Web 起不来"或"QQ 收不到消息"，跟端口无关的报错）。
+    qq_listen: str = "127.0.0.1:8766"
     qq_token: str = ""
     qq_allowed: str = ""
     qq_group_enabled: bool = False

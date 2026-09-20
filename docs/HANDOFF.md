@@ -144,8 +144,10 @@ main 长期难以本地化。
 | — | **QQ 网关** | `yixiang/gateway/qq.py` **不存在**；`yixiang serve` 只打印"还没实现"退非零；`processed_messages` 表已建好但没人写 | NapCat + OneBot v11 反向 WS、白名单、CQ 码、幂等、重连；D-13 用例现在 `skip` | ~2 天 |
 | — | **B 站 / Pixiv 工具** | 只在 TECH §9.2 表里出现（`bilibili_search` / `pixiv_download`） | 未实现，可选 | — |
 
-> ⚠️ QQ 接进来之前有个必改项：`.env.example` 与 `.env` 里 `YIXIANG_QQ_LISTEN=127.0.0.1:8765`
-> 与 Web 控制台默认端口 **8765 撞车**。P2 落地时必须把两边挪开。
+> ✅ QQ 监听与 Web 端口的撞车**已修掉**：`YIXIANG_QQ_LISTEN` 默认改为 `127.0.0.1:8766`
+> （`config.py` / `.env.example` / 本机 `.env` 三处一致），**8765 留给 Web 控制台**（`web.server.DEFAULT_PORT`）。
+> 这条撞车只在"网关与控制台同时开"时发作，报错却指向"端口被占用"，所以由 `test_doctor.py` 的
+> `test_the_qq_listen_default_does_not_collide_with_the_web_default_port` 钉住默认值。
 
 ### 2.2 形态完整、但一次都没跑过的真实路径
 

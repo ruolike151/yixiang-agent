@@ -346,7 +346,10 @@ class ConsoleAPI:
             "allowed_list": allowed,
             "allowed_count": len(allowed),
             "status": _qq_status(settings.qq_enabled, allowed),
-            "note": "P2 才接网关：这里的配置会写进 .env，QQ 入口落地后直接生效。",
+            "note": (
+                "P2 才接网关：这里的配置会写进 .env，QQ 入口落地后直接生效。"
+                "默认监听 127.0.0.1:8766——8765 留给 Web 控制台，两个都开时不会撞端口。"
+            ),
         }
 
     def save_qq(self, payload: dict[str, Any]) -> dict[str, Any]:

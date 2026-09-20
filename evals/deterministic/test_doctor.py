@@ -187,3 +187,26 @@ def test_doctor_fails_when_the_main_model_cannot_call_tools(tmp_path, repo_root)
     assert checks[0].status == doctor.FAIL
     assert "MAIN_MODEL" in checks[0].detail
     assert doctor.main(settings) == 1
+
+
+def test_the_qq_listen_default_does_not_collide_with_the_web_default_port(tmp_path, repo_root):
+    """P2 一开网关，两个监听不能撞同一个端口。
+
+    撞了以后报错指向的是"端口被占用"，跟 QQ 一点关系都没有——排查成本远高于现在
+    改一个默认值。所以这条钉的是**默认值**，不是文档措辞。
+    """
+    from yixiang.web.server import DEFAULT_HOST, DEFAULT_PORT
+
+    default = Settings.load(
+        env_file=None, environ={}, project_root=repo_root, data_dir=tmp_path / "data"
+    )
+
+    assert f"{DEFAULT_HOST}:{DEFAULT_PORT}" != default.qq_listen
+    assert default.qq_listen.partition(":")[2] != str(DEFAULT_PORT)
+
+
+def test_env_example_ships_the_decoupled_qq_port(repo_root):
+    """示例文件是别人抄配置的来源，它得跟代码默认值一致，否则抄的人第一脚就踩雷。"""
+    text = (repo_root / ".env.example").read_text(encoding="utf-8")
+
+    assert "YIXIANG_QQ_LISTEN=127.0.0.1:8766" in text

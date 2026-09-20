@@ -1376,6 +1376,7 @@ async function renderQQ() {
   group.checked = Boolean(qq.fields.qq_group_enabled);
   const listen = h("input", { type: "text", id: "qq-listen", spellcheck: "false" });
   listen.value = qq.fields.qq_listen || "";
+  listen.placeholder = "127.0.0.1:8766";
   const token = h("input", { type: "password", id: "qq-token", autocomplete: "off" });
   token.placeholder = qq.secret_mask.qq_token || "还没有配置";
   const allowed = h("textarea", { id: "qq-allowed", rows: "4", spellcheck: "false" });
@@ -1443,7 +1444,11 @@ async function renderQQ() {
           group,
           h("label", { for: "qq-group", text: "允许群聊（默认只接私聊）" })
         ),
-        field("监听地址", listen, "例如 127.0.0.1:8080（P2 接网关时生效）"),
+        field(
+          "监听地址",
+          listen,
+          "默认 127.0.0.1:8766：8765 留给 Web 控制台，两个监听不撞（P2 接网关时生效）"
+        ),
         field("访问令牌", token, "留空 = 不改（只显示掩码）")
       ),
       h(

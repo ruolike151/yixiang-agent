@@ -91,6 +91,7 @@ def build_turn_record(
     clock: Clock | None = None,
     gate: dict[str, Any] | None = None,
     intent: dict[str, Any] | None = None,
+    rag: dict[str, Any] | None = None,
     latency_ms: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     now = (clock or SystemClock()).now()
@@ -102,6 +103,8 @@ def build_turn_record(
         "user_text": user_text,
         "intent": intent or {"remember": False},
         "gate": gate,
+        # 检索降级状态（D-24）：``embed != "ok"`` 时这一轮的召回是纯 FTS5 的
+        "rag": rag,
         "working_memory": result.working_memory,
         "iterations": result.iterations,
         "tool_calls": [event.as_trace() for event in result.tool_calls],

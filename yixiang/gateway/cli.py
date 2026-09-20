@@ -152,7 +152,13 @@ class ChatCLI:
                 self._trace(argument)
             case "/cost":
                 period = "month" if argument.startswith("month") else "day"
-                summary = summarize(self.settings.usage_path, period=period)
+                # 口径必须跟 App 用同一个时钟：不然跨零点后 "/cost 今日" 会报 0
+                # （记账与查询用了两个日期源，历史数据看起来凭空消失）
+                summary = summarize(
+                    self.settings.usage_path,
+                    period=period,
+                    ref=self.app.clock.now().date(),
+                )
                 self._write(
                     summary_text(summary, budget_cny_per_day=self.settings.budget_cny_per_day)
                     + "\n"

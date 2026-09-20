@@ -45,6 +45,10 @@ def render_turn_box(record: dict[str, Any]) -> str:
     lines.append(
         f"cost: ¥{float(record.get('cost_cny') or 0):.4f} · latency: {total_ms / 1000:.1f}s"
     )
+    rag = record.get("rag") or {}
+    if rag.get("embed") == "unavailable":
+        # 降级是产品要求（D-24），但必须可观测：一行带过，不当错误报
+        lines.append("rag: 已降级（纯 FTS5）")
     if record.get("error"):
         detail = record.get("error_detail") or ""
         lines.append(f"error: {record['error']}{(' · ' + str(detail)[:60]) if detail else ''}")

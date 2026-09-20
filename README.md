@@ -20,6 +20,10 @@ uv run yixiang doctor       # 启动自检：配置 / 数据库 / 向量扩展 /
 ```bash
 uv run yixiang chat                # 交互式对话（流式输出）
 uv run yixiang migrate             # 应用数据库迁移
+uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 入库 31 部（离线）
+uv run yixiang rag eval            # golden 集：top-3 命中率 + MRR
+uv run yixiang ops explain-search "讲时间循环的"   # 五段中间结果（FTS / 向量 / RRF / 过滤 / 加权）
+uv run yixiang brief               # 按需日报：今日安排 + 1 条影视推荐
 uv run yixiang ops cost            # 今日 token 与成本
 uv run yixiang ops tail            # 实时跟随 trace
 uv run yixiang --help              # chat / serve / doctor / rag / ops / eval / migrate
@@ -69,4 +73,17 @@ PART 2（记忆系统）已交付：
 - **"记住"硬契约**：`save_memory` 必调，相近记忆走 update 不重复新增，回复带"已记住：…"；
 - **运维入口**：`yixiang memory {list,show,sync,verify,restore}`、`yixiang skills validate`。
 
-后续：PART 3 语料与按需推荐 → PART 4 评测与交付。
+PART 3（语料与按需推荐）已交付：
+
+- **语料入库**：`rag ingest` 抓 Bangumi / TMDb（单线程 + `sleep(1.0)` + 退避重试 3 次 + 原始 JSON 缓存 `data/raw/`），`source_id` 幂等 upsert——已存在且简介没变就**跳过且不重嵌入**，`--resume` 从 `meta.ingest_cursor_<source>` 续跑，`--dry-run` 一个字节不落库；
+- **中文混合检索**：FTS5 必须 **jieba 预分词**（`unicode61` 把连续 CJK 当一个 token，`MATCH '悬疑'` 静默命中 0 条）+ `LIKE` 兜底；向量与关键词两路走 **RRF**（只看名次，对 BM25 / 余弦的量纲免疫）+ 硬过滤 + 口味软加权；
+- **口味软加权不硬过滤**：`final = rrf_score × (1 + taste_score)`，`taste_score ∈ [-0.5, +0.5]`；冷启动前 7 天为 0；画像来自 `user.md` 的 `喜欢：/不喜欢：` 约定写法；
+- **推荐去重**：`recommend_log` 近 7 天已推的 id 一律硬过滤，对话推荐与日报共用同一个窗口；
+- **三个工具**：`search_media`（top-3 带可核对理由，只读）/ `recommend_media`（默认 1 条、写日志）/ `daily_brief`（今日任务 + 到期备忘 + 1 条推荐，落 `data/briefs/YYYY-MM-DD.md`，同日重跑**覆盖**）；
+- **可解释与评测**：`yixiang ops explain-search` 打印五段中间结果（FTS / 向量 / RRF / 过滤 / 加权）；`yixiang rag eval` 跑 golden 集（20 条 + 10 条 holdout，top-3 命中率 + MRR）。评测口径**关口味**（`use_taste=False`，只测相关性），排序数字才不随 `user.md` 漂移，PART 4 的 L3 回归拿它当门禁；带口味的排序出现在解释与日报里；
+- **降级可用**：嵌入后端或向量扩展不可用 → 退纯 FTS5 仍返回结果，trace 记 `E_EMBED_UNAVAILABLE`，用户无感；
+- **外部内容一律包裹**：影视简介是不可信文本，进 prompt 前必包 `<external_content source="media_db">`（D-23）。
+
+边界（写在明面上）：**cron 定时推送 / 唤醒补发属 P2**，本部分只做内容层——`daily_brief` 的组装逻辑被对话、`yixiang brief`、未来的定时任务三种触发源复用。语料入库的**真实抓取**与**真实嵌入模型**（bge-small-zh-v1.5）需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json`。
+
+后续：PART 4 评测与交付（judge 评测、L3 回归、CI 门禁）。

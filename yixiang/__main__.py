@@ -1,9 +1,9 @@
-"""命令分发：``yixiang <command>``（TECH §10.1、§11.1、PART-1 §1）。
+"""命令分发：``yixiang <command>``（TECH §10.1、§11.1、§18.1）。
 
 命令清单（``--help`` 里必须能看到）：chat / serve / doctor / rag / ops / eval / migrate /
-memory（记忆运维）/ skills（技能校验）。
-其中 ``serve``（QQ，P2）与 ``rag``（PART 3）在这个阶段只打印"还没实现"并退非零——
-**如实告知**比假装成功重要，这条在评测脚本里也会被沿用。
+memory（记忆运维）/ skills（技能校验）/ brief（按需日报）。
+其中 ``serve``（QQ + 定时推送，P2）在这个阶段只打印"还没实现"并退非零——**如实告知**
+比假装成功重要，这条在评测脚本里也会被沿用。
 """
 
 from __future__ import annotations
@@ -16,14 +16,25 @@ from pathlib import Path
 
 from yixiang import db
 from yixiang.config import Settings
-from yixiang.ops import doctor
+from yixiang.ops import doctor, rag_cmd
 from yixiang.ops.pricing import price_table_text
 from yixiang.ops.show_trace import render_trace_detail
 from yixiang.ops.tracing import find_trace
 from yixiang.ops.usage import summarize, summary_text
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-COMMANDS = ("chat", "serve", "doctor", "rag", "ops", "eval", "migrate", "memory", "skills")
+COMMANDS = (
+    "chat",
+    "serve",
+    "doctor",
+    "rag",
+    "brief",
+    "ops",
+    "eval",
+    "migrate",
+    "memory",
+    "skills",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,10 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("serve", help="启动网关（QQ 属 P2，本阶段未实现）")
     sub.add_parser("doctor", help="六项启动自检")
     sub.add_parser("migrate", help="应用数据库迁移")
-    sub.add_parser("rag", help="语料与推荐（PART 3 交付）")
+    # rag（ingest / reindex / eval）与 brief 的命令实现在 ops/rag_cmd.py，保持这里瘦
+    rag_cmd.add_parsers(sub)
 
     ops = sub.add_parser("ops", help="可观测：trace / 成本 / 价目表")
-    ops_sub = ops.add_subparsers(dest="ops_command", metavar="{tail,cost,usage,show-trace,prices}")
+    ops_sub = ops.add_subparsers(
+        dest="ops_command", metavar="{tail,cost,usage,show-trace,explain-search,prices}"
+    )
     tail = ops_sub.add_parser("tail", help="实时跟随今天的 trace")
     tail.add_argument("--interval", type=float, default=1.0, help="轮询间隔（秒）")
     cost = ops_sub.add_parser("cost", help="今日 token 与成本")
@@ -54,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     ops_sub.add_parser("usage", help="cost 的别名")
     show = ops_sub.add_parser("show-trace", help="渲染某一轮的完整链路")
     show.add_argument("turn_id", help="turn_id（t_20260919_081233_ab12）")
+    explain = ops_sub.add_parser("explain-search", help="打印检索的五个阶段（检索不是黑盒）")
+    explain.add_argument("query", help="检索串，例如 '讲时间循环的'")
+    explain.add_argument("--top-k", type=int, default=3, help="交付几条（默认 3）")
     ops_sub.add_parser("prices", help="打印价目表与查询日期")
 
     evaluation = sub.add_parser("eval", help="跑评测（默认确定性用例）")
@@ -119,7 +136,9 @@ def main(argv: list[str] | None = None) -> int:
         case "skills":
             return cmd_skills(settings, args)
         case "rag":
-            return _not_yet("rag", "PART 3（语料与按需推荐）")
+            return rag_cmd.cmd_rag(settings, args)
+        case "brief":
+            return rag_cmd.cmd_brief(settings, args)
         case "serve":
             return _not_yet("serve", "P2（QQ 网关）")
         case _:  # pragma: no cover - argparse 已挡住未知命令
@@ -163,6 +182,10 @@ def cmd_ops(settings: Settings, args: argparse.Namespace) -> int:
     if command == "prices":
         print(price_table_text())
         return 0
+    if command == "explain-search":
+        from yixiang.ops import explain_search
+
+        return explain_search.run(settings, args.query, top_k=max(int(args.top_k), 1))
     period = "month" if getattr(args, "month", False) else "day"
     summary = summarize(settings.usage_path, period=period)
     print(summary_text(summary, budget_cny_per_day=settings.budget_cny_per_day))

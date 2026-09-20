@@ -20,6 +20,10 @@ from yixiang.memory import consolidate, core_files, gate, sync
 from yixiang.ops.tracing import append_trace, build_turn_record, new_turn_id
 from yixiang.ops.usage import JsonlUsageSink, UsageSink
 from yixiang.providers import ChatModel, OpenAICompatibleProvider
+from yixiang.rag import clear_warnings as clear_rag_warnings
+from yixiang.rag import configure as configure_rag
+from yixiang.rag import reset as reset_rag
+from yixiang.rag import trace_info as rag_trace_info
 from yixiang.runtime.models import (
     Clock,
     Observer,
@@ -55,7 +59,10 @@ class App:
     gate_provider: ChatModel | None = None
     # 嵌入后端（默认按 settings.embed_backend 选；测试注入 HashEmbedder 走离线路径）
     embedder: Any = None
+    # 语料检索的嵌入后端与记忆分开：两套协议不同（记忆 name/embed，语料 model/dim/encode）
+    rag_embedder: Any = None
     memory_ready: bool = False
+    rag_ready: bool = False
     startup_report: Any = None
 
     def __post_init__(self) -> None:
@@ -70,6 +77,7 @@ class App:
             self.settings, usage_sink=self.usage_sink, clock=self.clock
         )
         self._configure_memory()
+        self._configure_rag()
         self.registry = self.registry or build_registry(self.settings, self.deps())
         self.session = self.session or self.new_session_manager()
 
@@ -91,6 +99,33 @@ class App:
         except Exception as exc:  # 记忆坏了也要能聊天（降级：三文件照读，检索缺席）
             self.memory_ready = False
             self.startup_report = f"记忆子系统装配失败：{exc}"
+
+    def _configure_rag(self) -> None:
+        """装配语料检索（PART 3 §4）。嵌入拿不到也不报错——降级纯 FTS5（D-24）。
+
+        与 ``_configure_memory`` 相同的一条纪律：子系统的任何一步失败都不该让
+        App 起不来。"宁可检索质量降级，不能让功能不可用"。
+        """
+        embedder = self.rag_embedder
+        if embedder is None:
+            try:
+                from yixiang.rag.embed import build_embedder
+
+                embedder = build_embedder(self.settings)
+            except Exception:  # 后端没实现 / 依赖缺失：后面 configure 会退成无嵌入
+                embedder = None
+        try:
+            configure_rag(
+                self.conn,
+                data_dir=self.settings.data_dir,
+                clock=self.clock,
+                settings=self.settings,
+                embedder=embedder,
+            )
+            self.rag_ready = True
+        except Exception:  # 装配本身失败：不留下半装配的全局上下文
+            self.rag_ready = False
+            reset_rag()
 
     # ------------------------------------------------------------------ 装配
     @classmethod
@@ -143,6 +178,8 @@ class App:
         active.begin_turn(text, turn_id=turn_id)
         started = time.perf_counter()
 
+        # 降级标记只反映"这一轮"：上一轮的 E_EMBED_UNAVAILABLE 不能一直挂着（D-24）
+        clear_rag_warnings()
         decision = await self._gate(text, active)
         result = await run_loop(
             active, self.registry, self.provider, observer, stream=stream, tools=tools
@@ -165,6 +202,7 @@ class App:
             clock=self.clock,
             gate=result.gate,
             intent=result.intent,
+            rag=rag_trace_info(),
         )
         append_trace(self.settings.traces_dir, record)
         self.last_record = record

@@ -13,13 +13,16 @@ from yixiang.runtime.models import Usage
 
 # 查询日期：2026-09-20。三元组 = (缓存未命中输入, 缓存命中输入, 输出)
 # deepseek-flash 官网分「高峰 / 空闲」两档（空闲 = 高峰的一半），这里取**高峰**价：宁可高估。
+# 只收官网上架的名字：deepseek-chat / deepseek-reasoner 已下架（实测仍能调用，但服务端把
+# model 换成 deepseek-flash），它们的行留在表里等于拿一个我们并不在付的价记账。
 PRICES: dict[str, tuple[float, float, float]] = {
     "deepseek-flash": (2.0, 0.04, 8.0),  # 当前唯一在用的模型（main / gate / judge / utility）
-    "deepseek-reasoner": (4.0, 1.0, 16.0),
     "glm-4-flash": (0.0, 0.0, 0.0),  # 免费额度，但仍记账 token
 }
 
 # 未知模型的兜底价 = 表里最贵的一档：宁可高估，不掩盖成本。
+# 注意这是"表内最贵"，不是"市面最贵"：真要用更贵的模型（比如 deepseek-v4-pro），
+# 得先给它补一行，否则会按 deepseek-flash 的价记（偏乐观）。
 DEFAULT_PRICE: tuple[float, float, float] = max(PRICES.values())
 
 

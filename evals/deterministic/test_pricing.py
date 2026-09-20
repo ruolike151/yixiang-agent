@@ -18,13 +18,13 @@ from yixiang.runtime.models import Usage
 def test_every_model_we_actually_call_has_its_own_price_row():
     # data/usage.jsonl 实测：真实调用过的是 deepseek-flash
     assert "deepseek-flash" in pricing.PRICES
-    assert pricing.price_for("deepseek-flash") != pricing.DEFAULT_PRICE
 
 
-def test_the_retired_model_is_not_quoted_any_more():
-    # 只使用 deepseek-flash：旧模型名留在表里 = 成本可能按一个不存在的价算
-    assert "deepseek-chat" not in pricing.PRICES
-    assert "deepseek-chat" not in pricing.price_table_text()
+def test_the_retired_models_are_not_quoted_any_more():
+    """下架的名字留在表里 = 拿一个我们并不在付的价去记账（reasoner 那行就曾写着 4/1/16）。"""
+    for name in ("deepseek-chat", "deepseek-reasoner"):
+        assert name not in pricing.PRICES
+        assert name not in pricing.price_table_text()
 
 
 def test_unknown_model_still_falls_back_to_the_default_price():

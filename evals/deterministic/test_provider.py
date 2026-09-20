@@ -68,21 +68,22 @@ def request_for(settings, *, role: str = "main") -> ProviderRequest:
 
 # ------------------------------------------------------------------ 角色路由
 def test_role_routing_table_falls_back_to_the_main_model(settings):
-    # 故意写一个 ≠ 默认值（deepseek-flash）的名字：这样"路由读的是设置、不是默认值"才被证明
-    settings.main_model = "deepseek-chat"
+    # 故意写一个 ≠ 默认值（deepseek-flash）的名字：这样"路由读的是设置、不是默认值"才被证明。
+    # 用 deepseek-v4-pro：官网在售、不是退役别名（退役名字已经有守门用例盯着了）
+    settings.main_model = "deepseek-v4-pro"
     settings.gate_model = ""
     settings.judge_model = ""
     settings.utility_model = ""
-    assert settings.model_for("main") == "deepseek-chat"
-    assert settings.model_for("gate") == "deepseek-chat"
-    assert settings.model_for("judge") == "deepseek-chat"
-    assert settings.model_for("utility") == "deepseek-chat"
+    assert settings.model_for("main") == "deepseek-v4-pro"
+    assert settings.model_for("gate") == "deepseek-v4-pro"
+    assert settings.model_for("judge") == "deepseek-v4-pro"
+    assert settings.model_for("utility") == "deepseek-v4-pro"
     assert settings.model_for("embed") == settings.embed_model
 
     settings.gate_model = "glm-4-flash"
-    settings.judge_model = "deepseek-reasoner"
+    settings.judge_model = "deepseek-v4-pro"
     assert settings.model_for("gate") == "glm-4-flash"
-    assert settings.model_for("utility") == "deepseek-reasoner"  # 窄角色留空 → 回落
+    assert settings.model_for("utility") == "deepseek-v4-pro"  # 窄角色留空 → 回落
     with pytest.raises(ValueError):
         settings.model_for("nope")
 
@@ -98,11 +99,11 @@ def test_default_main_model_has_its_own_price_row():
 
 
 def test_role_routing_picks_the_model_and_writes_one_usage_line(settings):
-    settings.gate_model = "deepseek-reasoner"
+    settings.gate_model = "glm-4-flash"
     sink = CollectingUsageSink()
     body = completion_body(
         "pong",
-        model="deepseek-reasoner",
+        model="glm-4-flash",
         usage_raw={
             "prompt_tokens": 1000,
             "completion_tokens": 500,
@@ -113,7 +114,7 @@ def test_role_routing_picks_the_model_and_writes_one_usage_line(settings):
     reply = run_complete(provider, request_for(settings, role="gate"))
 
     # ① 请求侧：出站体是 OpenAI 兼容格式，模型由角色路由决定
-    assert bodies[0]["model"] == "deepseek-reasoner"
+    assert bodies[0]["model"] == "glm-4-flash"
     assert bodies[0]["stream"] is False
     assert bodies[0]["messages"][0] == {
         "role": "system",
@@ -129,9 +130,12 @@ def test_role_routing_picks_the_model_and_writes_one_usage_line(settings):
     assert reply.usage.cached_input_tokens == 200
     assert reply.usage.output_tokens == 500
     line = sink.lines[-1]
-    assert (line.role, line.model, line.turn_id) == ("gate", "deepseek-reasoner", TURN_ID)
-    # 价目按**实际路由到的模型**取值：deepseek-reasoner = (4, 1, 16) 元/百万
-    expected = (800 * 4.0 + 200 * 1.0 + 500 * 16.0) / 1e6
+    assert (line.role, line.model, line.turn_id) == ("gate", "glm-4-flash", TURN_ID)
+    # 价目按**实际路由到的模型**取值：glm-4-flash = (0, 0, 0) 元/百万 → 这行必须是 0 元。
+    # 这个 0 是有判别力的：若哪天写死成默认价 / 兜底价（deepseek-flash 的 2 / 0.04 / 8），
+    # 同样这批 token（1000 进 / 500 出）就不会是 0。
+    assert line.cost_cny == 0.0
+    expected = (800 * 0.0 + 200 * 0.0 + 500 * 0.0) / 1e6
     assert line.cost_cny == pytest.approx(expected)
 
 

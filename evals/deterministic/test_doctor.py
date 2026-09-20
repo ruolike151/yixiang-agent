@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from yixiang import config
 from yixiang.config import Settings
 from yixiang.ops import doctor
 
@@ -118,18 +119,63 @@ def test_validate_rejects_a_main_model_that_cannot_call_tools(tmp_path, repo_roo
     assert [item for item in good.validate() if "MAIN_MODEL" in item] == []
 
 
-def test_validate_guards_only_the_main_role_not_the_narrow_roles(tmp_path, repo_root):
-    """守门是**按角色**的：gate / judge / utility 不调工具，用便宜的 chat 档没问题。"""
+def test_the_capability_guard_bans_only_the_main_role(tmp_path, repo_root, monkeypatch):
+    """能力那档是**按角色**的：gate / judge / utility 不调工具，配"不会调工具的模型"也没问题。
+
+    这里用一个假想的名字并临时改 ``NO_TOOL_MODELS``：真实能举的例子（``deepseek-reasoner``）
+    同时踩在退役口径上，两条错误混在一起，就分不清是哪一档在拦了。
+    """
+    monkeypatch.setattr(config, "NO_TOOL_MODELS", ("no-tool-model-x",))
     settings = no_key_settings(
         tmp_path,
         repo_root,
         main_model="deepseek-flash",
-        gate_model="deepseek-reasoner",
-        judge_model="deepseek-reasoner",
-        utility_model="deepseek-reasoner",
+        gate_model="no-tool-model-x",
+        judge_model="no-tool-model-x",
+        utility_model="no-tool-model-x",
     )
 
-    assert [item for item in settings.validate() if "MAIN_MODEL" in item] == []
+    assert [item for item in settings.validate() if "不支持工具调用" in item] == []
+
+    settings.main_model = "no-tool-model-x"
+    problems = [item for item in settings.validate() if "不支持工具调用" in item]
+    assert problems and "MAIN_MODEL" in problems[0]  # 同一个名字当主模型才被拦
+
+
+def test_validate_rejects_a_retired_model_in_any_role(tmp_path, repo_root):
+    """在售口径是**另一个格子**：下架的名字配到哪个角色都不该放行。
+
+    2026-09-20 实测：官网在售只有 ``deepseek-flash`` / ``deepseek-v4-pro``；``deepseek-chat`` 与
+    ``deepseek-reasoner`` 调用仍返回 200，但响应里的 model 被换成 ``deepseek-flash``。
+    """
+    settings = no_key_settings(
+        tmp_path,
+        repo_root,
+        main_model="deepseek-chat",
+        gate_model="deepseek-chat",
+        judge_model="deepseek-chat",
+        utility_model="deepseek-chat",
+    )
+
+    joined = "；".join(settings.validate())
+
+    for role in ("MAIN", "GATE", "JUDGE", "UTILITY"):
+        assert f"YIXIANG_{role}_MODEL" in joined, f"{role} 的退役名字没被拦下"
+    assert "已下架" in joined
+
+
+def test_capability_guard_and_retired_guard_are_two_separate_checks(tmp_path, repo_root):
+    """两档守门各管一件事，别合并成一条：能力（不会调工具） vs 在售口径（名字已下架）。
+
+    ``deepseek-reasoner`` 两头都占（R1 系不支持 function calling，且已下架），所以两条都要出现；
+    只写一条的话，下一个人分不清是哪一类问题，也就不知道该换模型还是该换判断依据。
+    """
+    settings = no_key_settings(tmp_path, repo_root, main_model="deepseek-reasoner")
+
+    problems = [item for item in settings.validate() if "MAIN_MODEL" in item]
+
+    assert any("不支持工具调用" in item for item in problems)
+    assert any("已下架" in item for item in problems)
 
 
 def test_doctor_fails_when_the_main_model_cannot_call_tools(tmp_path, repo_root):

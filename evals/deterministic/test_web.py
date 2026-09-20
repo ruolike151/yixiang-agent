@@ -27,6 +27,7 @@ import pytest
 from fake_provider import FakeProvider, text_reply
 
 from yixiang.app import App
+from yixiang.config import Settings
 from yixiang.memory.core_files import CHAR_LIMITS, MEMORY_MAX_LINES
 from yixiang.ops.usage import JsonlUsageSink
 from yixiang.web import ConsoleAPI, ConsoleError, build_server
@@ -221,7 +222,7 @@ def test_memory_round_trip_parses_entries_and_syncs(settings, clock):
 def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock):
     env_text = (
         "# 我的配置\n"
-        "YIXIANG_MAIN_MODEL=deepseek-chat  # 主模型（老文件里的值，保存后换掉）\n"
+        "YIXIANG_MAIN_MODEL=deepseek-flash  # 主模型\n"
         "YIXIANG_API_KEY=sk-test-placeholder-key\n"
     )
     api = make_api(settings, clock, env_text=env_text)
@@ -232,18 +233,18 @@ def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock
     assert snapshot["env_file_exists"] is True
     assert snapshot["choices"]["model_suggestions"][0] == "deepseek-flash"
 
-    result = api.save_config({"main_model": "deepseek-flash", "api_key": ""})
+    result = api.save_config({"main_model": "deepseek-v4-pro", "api_key": ""})
     assert result["ok"] is True
     assert result["ignored"] == []
     assert result["written"] == ["YIXIANG_MAIN_MODEL"]
-    assert result["config"]["fields"]["main_model"] == "deepseek-flash"
+    assert result["config"]["fields"]["main_model"] == "deepseek-v4-pro"
     assert result["restart_required"] is False  # data_dir 没动：不用重启
 
     written = api.env_file.read_text(encoding="utf-8")
     assert "# 我的配置" in written  # 注释原样保留
-    assert "YIXIANG_MAIN_MODEL=deepseek-flash  # 主模型" in written  # 原地替换 + 对齐不变
+    assert "YIXIANG_MAIN_MODEL=deepseek-v4-pro  # 主模型" in written  # 原地替换 + 对齐不变
     assert "YIXIANG_API_KEY=sk-test-placeholder-key" in written  # 密钥留空 = 不改
-    assert api.settings.main_model == "deepseek-flash"  # 热更新：下一轮就生效
+    assert api.settings.main_model == "deepseek-v4-pro"  # 热更新：下一轮就生效
 
     # 新键追加（原来没有的键落在文末）
     assert api.save_config({"history_turns": 4})["ok"] is True
@@ -265,7 +266,14 @@ def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock
     assert exc.value.code == "invalid_config"
     assert "不支持工具调用" in exc.value.payload["errors"][0]
     assert api.env_file.read_text(encoding="utf-8") == before
-    assert api.settings.main_model == "deepseek-flash"  # 拦下 = 热配置没被改坏
+    assert api.settings.main_model == "deepseek-v4-pro"  # 拦下 = 热配置没被改坏
+
+    # 已下架的名字同样被拦，且原因说得清是哪一类问题（在售口径 ≠ 能力）
+    with pytest.raises(ConsoleError) as exc:
+        api.save_config({"main_model": "deepseek-chat"})
+    assert exc.value.code == "invalid_config"
+    assert any("已下架" in item for item in exc.value.payload["errors"])
+    assert api.env_file.read_text(encoding="utf-8") == before
 
     # 白名单外的字段被忽略；全都被忽略 = 没什么可存
     with pytest.raises(ConsoleError) as exc:
@@ -288,6 +296,31 @@ def test_render_env_keeps_comments_and_appends_new_keys():
     assert "YIXIANG_MAIN_MODEL=b  # 主模型" in rendered  # 换值不动原来的注释与对齐
     assert 'YIXIANG_API_BASE="https://x/v1"' in rendered  # 没命中的行原样留着
     assert rendered.endswith("YIXIANG_LOG_LEVEL=DEBUG\n")
+
+
+def test_save_config_still_saves_other_keys_when_env_has_a_retired_model(settings, clock):
+    """老 ``.env`` 里躺着退役模型名时，改**别的**键仍然要能存。
+
+    试算的基线是"当前 Settings"，所以已经存在的问题只照实回给前端（``errors`` 里看得见），
+    不能把每一次保存都拦死——否则用户会被一个自己没在改的字段困住，连修它的机会都没有。
+    """
+    env_file = Path(settings.data_dir).parent / ".env"
+    env_file.write_text("YIXIANG_MAIN_MODEL=deepseek-chat\n", encoding="utf-8")
+    live = Settings.load(
+        env_file=env_file,
+        environ={},
+        project_root=settings.project_root,
+        api_key=settings.api_key,
+        data_dir=settings.data_dir,
+    )
+    api = make_api(live, clock)
+
+    result = api.save_config({"history_turns": 5})
+
+    assert result["ok"] is True
+    assert "YIXIANG_HISTORY_TURNS=5" in env_file.read_text(encoding="utf-8")
+    assert any("已下架" in item for item in result["errors"])  # 红灯照实回给前端
+    assert api.settings.main_model == "deepseek-chat"  # 但没被顺手改掉
 
 
 # --------------------------------------------------------------------- QQ
@@ -438,7 +471,7 @@ def test_uploaded_file_is_readable_and_escapes_are_refused(settings, clock):
 # --------------------------------------------------------------------- HTTP
 def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
     api = make_api(
-        settings, clock, text_reply(REPLY), env_text="YIXIANG_MAIN_MODEL=deepseek-chat\n"
+        settings, clock, text_reply(REPLY), env_text="YIXIANG_MAIN_MODEL=deepseek-flash\n"
     )
     server = build_server(settings, port=0, api=api, quiet=True)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})

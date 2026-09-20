@@ -75,8 +75,10 @@ QQ_FIELDS = ("qq_enabled", "qq_listen", "qq_token", "qq_allowed", "qq_group_enab
 SECRET_FIELDS = ("api_key", "qq_token")
 
 # 下拉候选。模型名**不是白名单**（vLLM / Ollama 可以填任意名字），只作为建议值；
-# 候选要能在 ``ops/pricing.py`` 里查到价，否则成本会静默按兜底价计（偏乐观）
-MODEL_SUGGESTIONS = ("deepseek-flash", "deepseek-reasoner")
+# 候选必须同时满足两条：能在 ``ops/pricing.py`` 里查到价（否则成本静默按兜底价计，偏乐观）、
+# 名字还在官网上架（deepseek-chat / deepseek-reasoner 已下架，见 ``config.RETIRED_MODELS``）。
+# 官网在售的另一个是 deepseek-v4-pro，但它没进价目表，所以不摆进候选。
+MODEL_SUGGESTIONS = ("deepseek-flash",)
 EMBED_CHOICES = ("fastembed", "sentence-transformers", "api", "hash")
 LOG_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 

@@ -20,11 +20,18 @@ ENV_PREFIX = "YIXIANG_"
 # 角色名（§4.2）：main / gate / utility / judge / embed
 ROLES = ("main", "gate", "utility", "judge", "embed")
 
-# 已知不支持 function calling 的模型：**main 角色不能用它们**。
+# 已知不支持 function calling 的模型名：**main 角色不能用它们**。
 # main 是唯一必须能调工具的角色（查记忆、写备忘、读文件都靠它），配错了整条 agent loop
 # 会静默退化成"只会聊天的聊天机器人"，而且不报错——所以要在启动前拦住。
 # 其他角色（gate / judge / utility）不调工具，用便宜的 chat 档没问题，不在这条禁令里。
+# 这一条只判"能力"；"名字还在不在售"由下面的 RETIRED_MODELS 管（两件事，两档）。
 NO_TOOL_MODELS = ("deepseek-reasoner",)
+
+# 已从官网下架的模型名：任何角色都不该再用它们。
+# 证据（2026-09-20 实测）：``/v1/models`` 只返回 deepseek-flash / deepseek-v4-pro；
+# 用下架的名字调用仍返回 200，但响应里的 model 是 deepseek-flash——即"还能用"只是一个
+# 兼容别名在兜底，别名一撤，每次调用都会变成 400。
+RETIRED_MODELS = ("deepseek-chat", "deepseek-reasoner")
 
 _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off", ""}
@@ -179,6 +186,18 @@ class Settings:
                 "或别的支持 function calling 的模型；窄角色（gate / judge / utility）"
                 "不调工具，可以继续用它"
             )
+        for role, model in (
+            ("MAIN", self.main_model),
+            ("GATE", self.gate_model),
+            ("JUDGE", self.judge_model),
+            ("UTILITY", self.utility_model),
+        ):
+            if model in RETIRED_MODELS:
+                errors.append(
+                    f"YIXIANG_{role}_MODEL={model} 已下架：官网在售只有 deepseek-flash / "
+                    "deepseek-v4-pro。这个名字现在会被服务端静默换成 deepseek-flash，"
+                    "别名一撤就是每次调用报错"
+                )
         if self.history_turns < 0:
             errors.append("YIXIANG_HISTORY_TURNS 不能为负")
         if self.tool_retry_max < 0:

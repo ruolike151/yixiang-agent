@@ -176,11 +176,13 @@ class App:
             raise RuntimeError("App 尚未装配完成（缺 session / registry / provider）")
         turn_id = new_turn_id(self.clock)
         active.begin_turn(text, turn_id=turn_id)
+        # 入口截断后的用户消息才是"这一轮真正说的话"：门控、历史、trace 共用它（T-8）
+        user_text = active.pending_user
         started = time.perf_counter()
 
         # 降级标记只反映"这一轮"：上一轮的 E_EMBED_UNAVAILABLE 不能一直挂着（D-24）
         clear_rag_warnings()
-        decision = await self._gate(text, active)
+        decision = await self._gate(user_text, active)
         result = await run_loop(
             active, self.registry, self.provider, observer, stream=stream, tools=tools
         )
@@ -193,12 +195,12 @@ class App:
         result.latency_ms["total"] = int((time.perf_counter() - started) * 1000)
 
         # 工具痕迹折叠进 assistant 历史（§5.3），再整轮落盘（§5.4 的落盘一致性）
-        active.add_exchange(text, result.fold_into_history(), result.tool_calls)
+        active.add_exchange(user_text, result.fold_into_history(), result.tool_calls)
         record = build_turn_record(
             result=result,
             session_id=active.session_id,
             source=active.source,
-            user_text=text,
+            user_text=user_text,
             clock=self.clock,
             gate=result.gate,
             intent=result.intent,

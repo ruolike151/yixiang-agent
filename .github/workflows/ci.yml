@@ -1,0 +1,90 @@
+# 四步门禁（TECH §11.2、PART-4 §4）：ruff → 确定性用例 → skills validate → release_gate。
+#
+# 三条设计约束，改这个文件之前先读：
+#
+#   1. **顺序不能换**：lint 先跑（最便宜、最快给出反馈），判定最后跑（release_gate 自己
+#      会再跑一遍确定性用例）。任何一步失败即停——失败的那一步就是结论，后面的步骤没有
+#      信息增量。
+#   2. **判定逻辑不在 YAML 里**：最后一步只是 `python -m yixiang.ops.release_gate`。
+#      把阈值抄进 workflow 等于把考核标准复制成两份，改一处漏一处（那才是最容易发生的
+#      退步）。退出码 0 = 全过，1 = 有硬门禁失败，YAML 只需要转发这个退出码。
+#   3. **live 用例不进 PR**（§13.1 / §17.2-2）：外部 API 抖动不该阻塞开发，也不该让成本
+#      随提交次数线性增长。live 层走 nightly 与发版前手动 `uv run yixiang eval --live`。
+#
+# 嵌入后端固定 hash：这是离线等价后端（`rag/embed.py` 的 HashEmbedder），不下载
+# bge-small-zh-v1.5（约 100MB，也会让 CI 的耗时与网络强耦合）。检索门禁量的是**检索
+# 链路**有没有退步，不是某个嵌入模型的质量——真实嵌入的指标在发版前用真模型复测。
+# `~/.cache/fastembed` 仍然缓存：它让"想在本机/自托管 runner 上换真模型"这条路不必重下。
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  YIXIANG_EMBED_BACKEND: hash
+  PYTHONUTF8: "1"
+
+jobs:
+  gate:
+    name: 四步门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 uv（带缓存）
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 装 Python 3.12
+        run: uv python install 3.12
+
+      - name: 同步依赖（按 uv.lock，一分不差）
+        run: uv sync --frozen --group dev
+
+      - name: 缓存嵌入模型（hash 后端用不到，留着给真模型路径）
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: fastembed-${{ runner.os }}-
+
+      # ① 静态检查：便宜、快、能拦掉一类"根本跑不到"的错误
+      - name: ① ruff check
+        run: uv run ruff check .
+
+      # ② 确定性用例（L1+L2）：离线、零成本、≤30 秒（§13.1 / §7 的两条纪律）
+      - name: ② 确定性用例（-m "not live"）
+        run: uv run pytest evals/deterministic -m "not live"
+
+      # ③ 技能校验：skills/ 是给模型看的可执行提示，格式错了没人报错，只能靠这一步
+      - name: ③ 技能校验
+        run: uv run yixiang skills validate
+
+      # ④ 发布门禁：五项检查（确定性 100% / judge ≥4.0 / 门控漏检 0 / top-3 ≥60% /
+      #    单轮成本告警）。退出码就是结论，不要在 YAML 里再判一次。
+      - name: ④ 发布门禁（退出码 0 = 可以合并）
+        run: uv run python -m yixiang.ops.release_gate
+
+      # 失败时把留痕交出来：trace / job 日志 / judge 报告是最快的定位入口
+      - name: 上传 trace 与报告（仅失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: traces-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            data/traces
+            data/logs
+            data/reports
+            evals/judge/reports

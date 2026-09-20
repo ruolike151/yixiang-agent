@@ -20,11 +20,15 @@ from datetime import datetime
 from typing import Any
 
 from yixiang.rag import retrieve
+from yixiang.runtime.external import CLOSE_TAG, open_tag
+from yixiang.runtime.external import wrap_external as _wrap_external
 from yixiang.tools.registry import error_text
 
-# 片段包裹标签（D-23 / T-2）：source 名与 TECH §14.3-2 一致
-EXTERNAL_OPEN = '<external_content source="media_db">'
-EXTERNAL_CLOSE = "</external_content>"
+# 片段包裹标签（D-23 / T-2）：source 名与 TECH §14.3-2 一致；标签本体在
+# ``yixiang.runtime.external``，那里是唯一一份定义（记忆检索复用同一套）
+EXTERNAL_SOURCE = "media_db"
+EXTERNAL_OPEN = open_tag(EXTERNAL_SOURCE)
+EXTERNAL_CLOSE = CLOSE_TAG
 
 INGEST_HINT = (
     "影视库是空的：先跑 `uv run yixiang rag ingest --source local "
@@ -34,7 +38,7 @@ INGEST_HINT = (
 
 def wrap_external(text: str) -> str:
     """把检索片段包成外部内容（进 prompt 的**唯一**出口）。"""
-    return f"{EXTERNAL_OPEN}\n{text}\n{EXTERNAL_CLOSE}"
+    return _wrap_external(text, source=EXTERNAL_SOURCE)
 
 
 def _guard(conn: sqlite3.Connection | None) -> str | None:

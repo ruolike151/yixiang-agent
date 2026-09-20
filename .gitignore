@@ -17,6 +17,9 @@ venv/
 .coverage
 htmlcov/
 
+# judge 报告是生成物（题面在 evals/judge/cases.yaml，报告每次跑都会变）
+evals/judge/reports/
+
 # 编辑器 / 系统
 .idea/
 .vscode/

@@ -79,6 +79,19 @@ def test_doctor_fails_when_qq_is_enabled_without_allowlist(tmp_path, repo_root):
     assert doctor.main(settings) == 1
 
 
+def test_validate_accepts_the_offline_hash_backend_but_not_a_typo(tmp_path, repo_root):
+    """``YIXIANG_EMBED_BACKEND=hash`` 是 CI 与无网演示都在用的离线后端（不下载模型），
+
+    白名单必须认它——否则 ``doctor`` 会对一个官方配置项报错，而 CI 跑的正是这个值。
+    打错字的 backend 仍然要被抓出来（白名单的本职）。
+    """
+    ok = no_key_settings(tmp_path, repo_root, embed_backend="hash")
+    assert [e for e in ok.validate() if "EMBED_BACKEND" in e] == []
+
+    typo = no_key_settings(tmp_path, repo_root, embed_backend="fasembed")
+    assert [e for e in typo.validate() if "EMBED_BACKEND" in e]
+
+
 def test_doctor_check_six_fails_when_a_core_file_is_over_the_limit(tmp_path, repo_root):
     """PART-2 §1：doctor 要证明三文件"上限内"，不是只证明"存在"。"""
     settings = no_key_settings(tmp_path, repo_root)

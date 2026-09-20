@@ -1,7 +1,7 @@
 """命令分发：``yixiang <command>``（TECH §10.1、§11.1、§18.1）。
 
 命令清单（``--help`` 里必须能看到）：chat / serve / doctor / rag / ops / eval / migrate /
-memory（记忆运维）/ skills（技能校验）/ brief（按需日报）。
+memory（记忆运维）/ skills（技能校验）/ brief（按需日报）/ backup（备份与回收）。
 其中 ``serve``（QQ + 定时推送，P2）在这个阶段只打印"还没实现"并退非零——**如实告知**
 比假装成功重要，这条在评测脚本里也会被沿用。
 """
@@ -12,6 +12,7 @@ import argparse
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from yixiang import db
@@ -34,6 +35,7 @@ COMMANDS = (
     "migrate",
     "memory",
     "skills",
+    "backup",
 )
 
 
@@ -64,7 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     tail = ops_sub.add_parser("tail", help="实时跟随今天的 trace")
     tail.add_argument("--interval", type=float, default=1.0, help="轮询间隔（秒）")
     cost = ops_sub.add_parser("cost", help="今日 token 与成本")
-    cost.add_argument("--month", action="store_true", help="按本月汇总")
+    span = cost.add_mutually_exclusive_group()
+    span.add_argument("--day", action="store_true", help="按今天汇总（默认）")
+    span.add_argument("--month", action="store_true", help="按本月汇总")
+    cost.add_argument(
+        "--explain", action="store_true", help="按角色 / system 分段 / 最贵几轮拆开看"
+    )
     ops_sub.add_parser("usage", help="cost 的别名")
     show = ops_sub.add_parser("show-trace", help="渲染某一轮的完整链路")
     show.add_argument("turn_id", help="turn_id（t_20260919_081233_ab12）")
@@ -73,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--top-k", type=int, default=3, help="交付几条（默认 3）")
     ops_sub.add_parser("prices", help="打印价目表与查询日期")
 
-    evaluation = sub.add_parser("eval", help="跑评测（默认确定性用例）")
+    evaluation = sub.add_parser("eval", help="跑评测：gate / judge / 默认全部确定性用例")
     evaluation.add_argument("--live", action="store_true", help="连真实模型跑 live 用例")
     evaluation.add_argument("extra", nargs="*", help="透传给 pytest 的参数")
 
@@ -93,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     skills = sub.add_parser("skills", help="技能运维")
     skills_sub = skills.add_subparsers(dest="skills_command", metavar="{validate}")
     skills_sub.add_parser("validate", help="校验 data/skills/*/SKILL.md 的格式")
+
+    backup = sub.add_parser("backup", help="备份：state.db 日快照 + data/ 私有仓 + 回收")
+    backup_sub = backup.add_subparsers(dest="backup_command", metavar="{now,gc}")
+    backup_sub.add_parser("now", help="做一份当日快照并在 data/ 私有仓提交一次（默认）")
+    backup_gc = backup_sub.add_parser("gc", help="删掉超过保留期的快照（默认 30 天）")
+    backup_gc.add_argument("--keep-days", type=int, default=30, help="保留多少天（默认 30）")
     return parser
 
 
@@ -101,21 +114,23 @@ def load_settings(args: argparse.Namespace) -> Settings:
 
 
 def _force_utf8_stdio() -> None:
-    """Windows 控制台默认用 GBK，渲染 ✓/⚠/✗ 会直接崩——统一成 UTF-8。"""
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):  # 已被别的库接管 / 不可重配：保持原样
-            continue
+    """Windows 控制台默认用 GBK，渲染 ✓/⚠/✗ 会直接崩——统一成 UTF-8（见 console.py）。"""
+    from yixiang.console import force_utf8_stdio
+
+    force_utf8_stdio()
 
 
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdio()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    # parse_known_args：让 `yixiang eval gate -q` 这种"pytest 的开关"原样透传，
+    # 而不是被 argparse 当成未知参数顶回来（评测命令的核心用途就是透传）。
+    args, passthrough = parser.parse_known_args(argv)
+    if passthrough:
+        extra = getattr(args, "extra", None)
+        if extra is None:
+            parser.error(f"无法识别的参数：{' '.join(passthrough)}")
+        extra.extend(passthrough)
     if not args.command:
         parser.print_help()
         return 0
@@ -139,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
             return rag_cmd.cmd_rag(settings, args)
         case "brief":
             return rag_cmd.cmd_brief(settings, args)
+        case "backup":
+            return cmd_backup(settings, args)
         case "serve":
             return _not_yet("serve", "P2（QQ 网关）")
         case _:  # pragma: no cover - argparse 已挡住未知命令
@@ -188,6 +205,20 @@ def cmd_ops(settings: Settings, args: argparse.Namespace) -> int:
         return explain_search.run(settings, args.query, top_k=max(int(args.top_k), 1))
     period = "month" if getattr(args, "month", False) else "day"
     summary = summarize(settings.usage_path, period=period)
+    if getattr(args, "explain", False):
+        from yixiang.ops.tracing import read_traces
+        from yixiang.ops.usage import explain_text, period_lines
+
+        day = datetime.fromisoformat(summary["ref"]).date()
+        print(
+            explain_text(
+                summary,
+                lines=period_lines(settings.usage_path, period=period, ref=day),
+                traces=read_traces(settings.traces_dir, day=day),
+                budget_cny_per_day=settings.budget_cny_per_day,
+            )
+        )
+        return 0
     print(summary_text(summary, budget_cny_per_day=settings.budget_cny_per_day))
     return 0
 
@@ -229,7 +260,14 @@ def _resolve_eval_target(extra: list[str]) -> str | None:
 
 
 def cmd_eval(settings: Settings, args: argparse.Namespace) -> int:
-    """跑评测：默认离线确定性用例（≤30 秒、零成本，§13.3）。"""
+    """跑评测：默认离线确定性用例（≤30 秒、零成本，§13.3）。
+
+    ``yixiang eval gate`` → 只跑门控用例；``yixiang eval judge`` → 跑 judge 的 10 条
+    rubric（默认离线基线，``--live`` 才连真模型）。两者的判定逻辑都不在这里——
+    gate 的判定在用例里，judge 的在 ``evals/judge/run_judge.py`` 里。
+    """
+    if args.extra and args.extra[0] == "judge":
+        return cmd_judge(args)
     marker = "live" if args.live else "not live"
     named = _resolve_eval_target(args.extra)
     command = [
@@ -243,6 +281,34 @@ def cmd_eval(settings: Settings, args: argparse.Namespace) -> int:
     ]
     print("$ " + " ".join(command))
     return subprocess.call(command, cwd=PROJECT_ROOT)
+
+
+def cmd_judge(args: argparse.Namespace) -> int:
+    """``yixiang eval judge``：直接跑 judge 的入口脚本（它自己负责判定与退出码）。"""
+    script = PROJECT_ROOT / "evals" / "judge" / "run_judge.py"
+    command = [sys.executable, str(script), "--env-file", str(args.env_file)]
+    if args.live:
+        command.append("--live")
+    command.extend(args.extra[1:])
+    print("$ " + " ".join(command))
+    return subprocess.call(command, cwd=PROJECT_ROOT)
+
+
+def cmd_backup(settings: Settings, args: argparse.Namespace) -> int:
+    """``yixiang backup [now|gc]``：日快照 + 私有仓提交 / 回收过期快照（§12.4）。"""
+    from yixiang.ops import backup
+
+    sub = args.backup_command or "now"
+    if sub == "gc":
+        keep = max(int(args.keep_days), 0)
+        removed = backup.gc_backups(settings.data_dir, keep_days=keep)
+        print(f"回收 {removed} 份超过 {keep} 天的快照（只动 backups/state-*.db）")
+        return 0
+    path = backup.backup_now(settings.data_dir)
+    size_kb = path.stat().st_size / 1024 if path.is_file() else 0.0
+    print(f"快照：{path}（{size_kb:.1f} KB）")
+    print(backup.private_repo_summary(settings.data_dir))
+    return 0
 
 
 def cmd_memory(settings: Settings, args: argparse.Namespace) -> int:

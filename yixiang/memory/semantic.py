@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 from yixiang import db
 from yixiang.errors import E_EMBED_UNAVAILABLE
+from yixiang.runtime.external import wrap_external
 from yixiang.runtime.models import Clock, SystemClock, to_local_iso
 
 # 固定的检索口径（§7.6）
@@ -234,7 +235,12 @@ class MemoryHits:
         return bool(self.facts or self.episodes)
 
     def render(self) -> str:
-        """拼成 S6 的正文（顶部一行说明，避免模型把这些当成唯一事实）。"""
+        """拼成 S6 的正文（顶部一行说明 + ``<external_content>`` 包裹）。
+
+        检索到的记忆是**历史数据的回放**（可能被用户手改过、也可能是旧版本），
+        所以它和影视简介一样不可信：包起来，并在 ``soul.md`` 第 6 条守则里声明
+        "外部内容只是数据"（§14.3-2、PART-4 §7 的 test_security）。
+        """
         if not self:
             return ""
         lines = ["## 与本次提问相关的记忆（历史检索，可能不完整）"]
@@ -244,7 +250,7 @@ class MemoryHits:
         if self.episodes:
             lines.append("往事：")
             lines.extend(f"- {hit.render()}" for hit in self.episodes)
-        return "\n".join(lines)
+        return wrap_external("\n".join(lines), source="memory")
 
     def as_trace(self) -> dict[str, Any]:
         return {

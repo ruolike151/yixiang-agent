@@ -1,91 +1,151 @@
 # yixiang（以湘）
 
-本地优先的个人 Agent：**有记忆、有评测、有成本账**，是"连续在用"而不是"跑过一次"的助手。
+本地优先的个人 Agent：**有记忆、有评测、有成本账**——是"连续在用"的助手，不是"跑过一次"的演示。
 
-一句话讲清它和聊天机器人的差别：每轮对话都会装配工作记忆（人格 + 用户画像 + 核心记忆 + 检索到的长尾记忆），每次工具调用都进 trace，每次 LLM 调用都进成本账。
+它和聊天机器人的差别在三条可验证的工程事实：
 
-## 安装
+1. **每轮现拼工作记忆**：人格（`soul.md`）+ 用户画像（`user.md`）+ 核心记忆（`memory.md`）+ 检索到的长尾 facts / episodes，由代码决定注入什么，不靠"希望模型记得"；
+2. **每件事都留痕**：工具调用进 `data/traces/`（`ops tail` / `show-trace` 可回放），每次模型调用进 `usage.jsonl`（`ops cost --explain` 打印各段 token 占比）；
+3. **退步会被拦住**：GitHub Actions 四步门禁 + `release_gate` 五项判定（确定性 100% / judge ≥4.0 / 门控漏检 0 / 检索 top-3 ≥60% / 成本告警）。判定逻辑只有一份，不在 YAML 里重写。
 
-需要 Python 3.12 与 [uv](https://docs.astral.sh/uv/)（`python -m pip install uv`）。
+架构与分层纪律见 [`docs/architecture.md`](./docs/architecture.md)，三张数字卡见 [`docs/NUMBERS.md`](./docs/NUMBERS.md)。
 
-```bash
-uv sync                     # 创建 .venv 并装依赖（默认不装 torch）
-cp .env.example .env        # Windows: Copy-Item .env.example .env
-# 编辑 .env 填入 YIXIANG_API_KEY
-uv run yixiang doctor       # 启动自检：配置 / 数据库 / 向量扩展 / 嵌入模型 / 模型探活 / 三文件
-```
+## 三条命令跑起来
 
-## 跑起来
+需要 Python 3.12 与 [uv](https://docs.astral.sh/uv/)（`python -m pip install uv`）：
 
 ```bash
-uv run yixiang chat                # 交互式对话（流式输出）
-uv run yixiang migrate             # 应用数据库迁移
-uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 入库 31 部（离线）
-uv run yixiang rag eval            # golden 集：top-3 命中率 + MRR
-uv run yixiang ops explain-search "讲时间循环的"   # 五段中间结果（FTS / 向量 / RRF / 过滤 / 加权）
-uv run yixiang brief               # 按需日报：今日安排 + 1 条影视推荐
-uv run yixiang ops cost            # 今日 token 与成本
-uv run yixiang ops tail            # 实时跟随 trace
-uv run yixiang --help              # chat / serve / doctor / rag / ops / eval / migrate
+uv sync                      # ① 建 .venv 并装依赖（默认不装 torch）
+cp .env.example .env         # ② Windows: Copy-Item .env.example .env；然后把 YIXIANG_API_KEY 填进去
+uv run yixiang chat          # ③ 开始对话（流式输出）
 ```
 
-CLI 内斜杠命令：`/help` `/new [名字]` `/history` `/tools` `/trace [n]` `/cost` `/exit`。
-
-跑测试（离线、零成本、不依赖网络）：
+没有 API key 也能验证"跑起来了"——离线入口两条命令：
 
 ```bash
-uv run pytest evals/deterministic -m "not live"
+uv run yixiang doctor        # 六项启动自检：配置 / 目录 / SQLite / 向量扩展 / 模型探活 / 三文件
+uv run yixiang rag eval      # 检索回归：top-3 命中率 + MRR（无 key、无网也能跑）
 ```
 
-## 数据边界（诚实版本）
+CLI 内的斜杠命令：`/help` `/new [名字]` `/history` `/tools` `/trace [n]` `/cost` `/exit`。
 
-声称"数据完全本地"是不成立的——每轮拼好的 prompt 会发给模型供应商。真实边界如下：
+## 数据边界（诚实版本，TECH §14.4）
+
+声称"数据完全本地"是不成立的：每轮拼好的 prompt 会发给模型供应商。真实边界如下——
 
 | 数据 | 是否离开本机 |
 |---|---|
-| `data/soul.md` / `user.md` / `memory.md`、`state.db`、trace、备份 | 否 |
-| 嵌入计算（bge-small-zh-v1.5，本地 CPU 推理） | 否 |
+| `data/soul.md` / `user.md` / `memory.md`、`state.db`、trace、备份 | **否** |
+| 嵌入计算（bge-small-zh-v1.5，本地 CPU 推理） | **否** |
 | 每轮拼好的 prompt（**含被注入的记忆片段、检索到的语料片段**） | **是**，发给所选模型供应商 |
 | QQ 消息内容（P2 接入后） | 是，先经腾讯服务器 |
 | 影视语料元数据（入库阶段） | 是，从 Bangumi / TMDb 拉取 |
 
+缩小出网面的路线是明确的：门控与巩固换本地小模型（`.env` 的 `YIXIANG_GATE_MODEL` / `YIXIANG_UTILITY_MODEL` 配置位已就绪）、嵌入已经是本地、检索片段按需注入而不是全量塞入。**先把边界写清楚，再谈缩小**——反过来做，最容易在答辩时被一句话戳穿。
+
+## 四层评测与发布门禁
+
+一条纪律：**依赖越多的层跑得越少**（TECH §13.1）。这不是省事，是不让外部 API 的抖动阻塞开发，也不让成本随提交次数线性增长。
+
+| 层 | 内容 | 什么时候跑 | 成本 |
+|---|---|---|---|
+| **L1 单元** | 纯函数与单模块：解析、截断、计价、幂等键… | 每次保存 | 0 |
+| **L2 集成** | 假 Provider 驱动的完整轮次：工具调用、门控、巩固、调度、安全 | PR + CI | 0 |
+| **L3 检索回归** | golden 集上的 top-3 命中率与 MRR | PR + CI（离线嵌入后端） | 0 |
+| **L4 judge** | 10 条 rubric（闲聊 / 推荐 / 计划 / 记忆管理 / 情绪陪伴） | nightly + 发版前（`--live`） | ≈¥0.06/次 |
+
+```bash
+uv run pytest evals/deterministic -m "not live"   # L1+L2+L3：离线、零成本、≤30 秒
+uv run yixiang eval judge                         # L4：离线基线自检（有 key 时 --live 走真模型）
+uv run yixiang eval gate                          # 门控用例：漏检 = 0 是硬门禁
+uv run python -m yixiang.ops.release_gate         # 五项汇总判定：退出码 0 = 可以合并
+uv run ruff check .                               # 静态检查
+uv run yixiang skills validate                    # 技能文件格式
+```
+
+发布门禁的五项与阈值（改动等于改考核标准，只写在 `yixiang/ops/release_gate.py` 一处）：
+
+| 检查 | 阈值 | 性质 |
+|---|---|---|
+| 确定性用例通过率 | 100% | 硬门禁 |
+| judge 均分 | ≥4.0 / 5 | 硬门禁（**只当回归警报**，不当质量结论） |
+| 门控漏检率 | = 0（误检容忍 ≤30%） | 硬门禁（漏检 = 失忆，产品级事故） |
+| 检索 top-3 命中率 | ≥60% | 硬门禁 |
+| 单轮成本 | ≤日预算 ×1.5 | **只告警**，不阻止合并 |
+
+两条容易踩的口径，明写在这里：
+
+- **检索评测关口味**（`use_taste=False`）：门禁量的是"相关性排序有没有退步"，数字不能随 `user.md` 内容漂移。带口味的排序只出现在 `ops explain-search` 与 `yixiang brief` 里——给人看的解释保留口味；
+- **live 用例不进 PR**：外部 API 抖动不该阻塞开发。nightly 与发版前手动 `uv run yixiang eval --live`。
+
+judge 的局限主动交底（TECH §13.4）：P0 用与 main 同族的模型自评，存在偏好偏差。三条缓解同时在场——阈值只当回归警报、可客观判断的部分（工具调没调 / 参数对不对 / 有没有编造）**下沉成确定性断言**、换 judge 模型时重跑全部历史分数再比。
+
+## 命令速查
+
+```bash
+uv run yixiang chat                     # 交互式对话（流式）
+uv run yixiang doctor                   # 六项启动自检
+uv run yixiang migrate                  # 应用数据库迁移
+uv run yixiang brief                    # 按需日报：今日安排 + 1 条影视推荐
+uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 离线入库 31 部
+uv run yixiang rag eval                 # golden 集：20 条 + 10 条 holdout
+uv run yixiang ops explain-search "讲时间循环的"    # 五段中间结果：FTS / 向量 / RRF / 过滤 / 加权
+uv run yixiang ops cost --day           # 今日 token 与成本（--explain 打印分段占比）
+uv run yixiang ops tail                 # 实时跟随今天的 trace
+uv run yixiang memory verify            # 记忆三方对账：memory.md / 数据库 / FTS 索引
+uv run yixiang backup                   # state.db 日快照 + data/ 私有仓提交
+uv run yixiang backup gc --keep-days 30 # 回收过期快照（默认保留 30 天）
+uv run python scripts/restore_drill.py  # 恢复演练：快照当唯一库源启动一次并逐项对账
+uv run yixiang --help                   # chat / serve / doctor / rag / brief / ops / eval / migrate / memory / skills / backup
+```
+
 ## 目录结构
 
 ```
-yixiang/     包本体：config / providers / app / runtime / loop / tools / gateway / ops
-templates/   soul.md / user.md / memory.md 的初版模板（仓库只放模板）
-data/        运行时数据（gitignore）：三文件、state.db、traces/、usage.jsonl、briefs/、backups/
-evals/       确定性用例（FakeProvider 驱动，离线零成本）+ golden 集 + judge
-docs/        PRODUCT.md（WHAT/WHY）、TECH-DESIGN.md（HOW）、parts/（按周切分的工作包）
+yixiang/         包本体
+  runtime/       模型客户端、时钟、会话状态（每轮装配的唯一入口）
+  loop/          Agent Loop 与防绕圈护栏
+  tools/         工具定义与注册表（memo / plan / 记忆 / 影视）
+  memory/        三文件核心记忆、三支柱检索、门控、巩固、人机共治
+  rag/           影视语料：入库 / 检索 / 口味加权 / 评测 / 嵌入
+  gateway/       CLI 与（P2）QQ 网关
+  scheduler/     常驻 job：巩固兜底 / 每日汇总 / 周巡检（+P2 晨报）
+  ops/           trace、usage、doctor、explain-search、release_gate、backup
+templates/       soul.md / user.md / memory.md 的初版模板（仓库只放模板）
+data/            运行时数据（gitignore）：三文件、state.db、traces/、usage.jsonl、briefs/、backups/
+                 └ 它同时是一个**私有仓**：只版本化三文件 / skills / briefs，永不推远端
+evals/           deterministic/（L1+L2+L3）+ golden/ + judge/ + fixtures/
+docs/            PRODUCT.md、TECH-DESIGN.md、architecture.md、NUMBERS.md、parts/
+scripts/         demo 剧本与恢复演练脚本
 ```
 
 ## 当前进度
 
-PART 1（基座与 Agent Loop）已交付：CLI 流式对话、memo/plan 工具、trace 与成本账、FakeProvider 确定性用例。
+**PART 1 基座与 Agent Loop**：CLI 流式对话、`memo` / `plan` 工具、trace 与成本账、FakeProvider 确定性用例。
 
-PART 2（记忆系统）已交付：
+**PART 2 记忆系统**：三文件核心记忆（原子写 + 上限校验：3000 / 4000 / 活跃区 150 行）、三支柱检索（facts 走 FTS5 + 向量 RRF；episodes 只用向量；skills 关键词）、检索门控（规则预过滤 + 小模型判定，fail-open）、人机共治（手改 `memory.md` 重启即生效）、巩固（三档阈值 + watermark，失败不推水印）、"记住"硬契约、`memory {list,show,sync,verify,restore}`。
 
-- **三文件核心记忆**：`soul.md` / `user.md` / `memory.md` 原子写 + 上限校验（3000 / 4000 / 活跃区 150 行）；
-- **三支柱检索**：`facts`（FTS5 + 向量，RRF 融合）、`episodes`（只用向量）、`skills`（关键词匹配，≤1500 字截断）；
-- **检索门控**：规则预过滤 + 小模型判定（fail-open），注入 S6 段（top5 facts + top3 episodes）；
-- **人机共治**：手改 `memory.md` 重启即生效（`yixiang memory sync` 文件为准，无 id 的行走导入并分配 id，删行即软删）；
-- **巩固**：每 N 轮蒸馏进 `facts` 三档阈值（0.9 自动 / 0.6 待确认 / 其余丢弃）+ watermark，失败不推水印；
-- **"记住"硬契约**：`save_memory` 必调，相近记忆走 update 不重复新增，回复带"已记住：…"；
-- **运维入口**：`yixiang memory {list,show,sync,verify,restore}`、`yixiang skills validate`。
+**PART 3 语料与按需推荐**：`source_id` 幂等入库（简介没变就跳过且不重嵌入）、中文混合检索（jieba 预分词 + LIKE 兜底 + RRF + 硬过滤 + 口味软加权）、推荐去重（7 天窗口，对话与日报共用）、三个工具（`search_media` / `recommend_media` / `daily_brief`）、`ops explain-search` 五段可解释、`rag eval` golden 回归、嵌入不可用时降级为纯 FTS5（trace 记 `E_EMBED_UNAVAILABLE`，用户无感）、外部内容一律 `<external_content>` 包裹。
 
-PART 3（语料与按需推荐）已交付：
+**PART 4 评测·运维·交付**：
 
-- **语料入库**：`rag ingest` 抓 Bangumi / TMDb（单线程 + `sleep(1.0)` + 退避重试 3 次 + 原始 JSON 缓存 `data/raw/`），`source_id` 幂等 upsert——已存在且简介没变就**跳过且不重嵌入**，`--resume` 从 `meta.ingest_cursor_<source>` 续跑，`--dry-run` 一个字节不落库；
-- **中文混合检索**：FTS5 必须 **jieba 预分词**（`unicode61` 把连续 CJK 当一个 token，`MATCH '悬疑'` 静默命中 0 条）+ `LIKE` 兜底；向量与关键词两路走 **RRF**（只看名次，对 BM25 / 余弦的量纲免疫）+ 硬过滤 + 口味软加权；
-- **口味软加权不硬过滤**：`final = rrf_score × (1 + taste_score)`，`taste_score ∈ [-0.5, +0.5]`；冷启动前 7 天为 0；画像来自 `user.md` 的 `喜欢：/不喜欢：` 约定写法；
-- **推荐去重**：`recommend_log` 近 7 天已推的 id 一律硬过滤，对话推荐与日报共用同一个窗口；
-- **三个工具**：`search_media`（top-3 带可核对理由，只读）/ `recommend_media`（默认 1 条、写日志）/ `daily_brief`（今日任务 + 到期备忘 + 1 条推荐，落 `data/briefs/YYYY-MM-DD.md`，同日重跑**覆盖**）；
-- **可解释与评测**：`yixiang ops explain-search` 打印五段中间结果（FTS / 向量 / RRF / 过滤 / 加权）；`yixiang rag eval` 跑 golden 集（20 条 + 10 条 holdout，top-3 命中率 + MRR）。评测口径**关口味**（`use_taste=False`，只测相关性），排序数字才不随 `user.md` 漂移，PART 4 的 L3 回归拿它当门禁；带口味的排序出现在解释与日报里；
-- **降级可用**：嵌入后端或向量扩展不可用 → 退纯 FTS5 仍返回结果，trace 记 `E_EMBED_UNAVAILABLE`，用户无感；
-- **外部内容一律包裹**：影视简介是不可信文本，进 prompt 前必包 `<external_content source="media_db">`（D-23）。
+- **CI 四步门禁**：`.github/workflows/ci.yml` 按 `ruff` → `pytest -m "not live"` → `skills validate` → `release_gate` 顺序执行，失败即停；嵌入后端固定 `hash`（离线确定性，不下载模型），失败时把 trace / 日志 / 报告作为 artifact 交出来；
+- **judge 10 条 rubric**：五类各 2 条，`must_have` 与 `must_not_have` 分开写，离线均分 **4.80**（`yixiang eval judge`）；解析失败该条计 0 并留痕；
+- **常驻调度**：巩固兜底 23:30（幂等靠 §7.7.1 水印）、每日汇总 23:50（`usage:YYYY-MM-DD`）、记忆巡检周日 22:00（`verify:YYYY-Www`）；`run_job` 异常隔离——**失败可见，但绝不杀主链路**，留痕在 `data/logs/jobs-*.jsonl`；
+- **备份与恢复**：`VACUUM INTO` 日快照 + `data/` 私有仓提交 + 30 天回收；`scripts/restore_drill.py` 把快照当唯一库源重建一次并逐项对账（表结构 / 行数 / 记忆三方一致性）；
+- **文档面**：本 README（含数据边界表）、[`docs/architecture.md`](./docs/architecture.md)、[`scripts/demo-week4.md`](./scripts/demo-week4.md)、三张数字卡 [`docs/NUMBERS.md`](./docs/NUMBERS.md)。
 
-边界（写在明面上）：**cron 定时推送 / 唤醒补发属 P2**，本部分只做内容层——`daily_brief` 的组装逻辑被对话、`yixiang brief`、未来的定时任务三种触发源复用。语料入库的**真实抓取**与**真实嵌入模型**（bge-small-zh-v1.5）需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json`。
+**边界（写在明面上）**：cron 定时晨报推送与唤醒补发、QQ 入口属 P2，PART 4 只预留接口（`scheduler/brief_job.py`），不参与任何门禁。语料入库的**真实抓取**与**真实嵌入模型**需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json` + `YIXIANG_EMBED_BACKEND=hash`。
 
-后续：PART 4 评测与交付（judge 评测、L3 回归、CI 门禁）。PART 3 交付时留下的 6 个决策点
-（联网验证、golden 复核、评测口径、偏好写法、降级标记位置、P2 定时推送）记在
-[`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md)，**等 PART 4 收口后再逐条过**，不阻塞当前门禁。
+PART 3 交付时留下的 6 个决策点记在 [`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md)（PART 4 收口后再逐条过；其中 T3「评测关口味」的口径已写进本 README 的评测段与 `docs/NUMBERS.md`）。
+
+## 文档
+
+| 文档 | 回答什么问题 |
+|---|---|
+| [`docs/PRODUCT.md`](./docs/PRODUCT.md) | 做什么、给谁用、为什么是这个形态（WHAT / WHY） |
+| [`docs/TECH-DESIGN.md`](./docs/TECH-DESIGN.md) | 怎么实现：数据流、ADR、冻结接口、安全与成本模型（HOW） |
+| [`docs/architecture.md`](./docs/architecture.md) | 一页看懂：入口 / Loop / 记忆 / RAG / 评测四支柱 + 分层纪律 |
+| [`docs/NUMBERS.md`](./docs/NUMBERS.md) | 三张数字卡（成本 / 命中率 / 用例数）的原始数据与算法 |
+| [`docs/parts/`](./docs/parts/) | 按周切分的 4 个工作包与各自的验收命令 |
+| [`scripts/`](./scripts/) | 每周演示剧本（照读即可，含无网络兜底）与恢复演练脚本 |

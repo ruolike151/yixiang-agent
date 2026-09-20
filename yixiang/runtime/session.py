@@ -32,6 +32,12 @@ from yixiang.runtime.models import (
 # 单轮上下文软上限（字符）：超出时从最旧的一轮开始丢（§15.1 的粗略口径）。
 CONTEXT_BUDGET_CHARS = 24_000
 
+# 单条用户消息的硬上限（字符）：§14.2 T-8。超长粘贴（整篇 PDF / 一屏日志）如果
+# 原样进 prompt，会一次性吃掉整个上下文预算，把记忆段和历史全挤掉；所以入口处
+# 就截断，并把"丢了多少字"记进 trace（可见，不是静默）。
+USER_INPUT_LIMIT = 6000
+USER_TRUNCATED_NOTICE = "…（消息过长，已截断）"
+
 CORE_FILES = ("soul.md", "user.md", "memory.md")
 
 WEEKDAY_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -116,6 +122,7 @@ class SessionManager:
         self.pending_user = ""
         self.turn_intent = ""
         self.extra_contract = ""
+        self.truncated_chars = 0
         self.history: list[Message] = []
         self._last_working_memory: dict[str, object] = {}
         self._skill_loader: Any = None
@@ -199,10 +206,20 @@ class SessionManager:
             self.history.append(assistant_message(row["reply_text"]))
 
     def begin_turn(self, user_text: str, *, turn_id: str = "") -> str:
-        self.pending_user = user_text
+        """起一轮：**入口截断**超长输入，打标意图，清掉上一轮的检索状态。
+
+        截断发生在这里而不是 ``add_exchange`` / ``assemble``：用户消息在
+        prompt、``chat_log``、trace 三处必须是同一个字符串，否则"检索用了什么"
+        与"记下来的是什么"会对不上（T-8 的断言就打在这一点上）。
+        """
+        text = user_text or ""
+        self.truncated_chars = max(len(text) - USER_INPUT_LIMIT, 0)
+        if self.truncated_chars:
+            text = text[:USER_INPUT_LIMIT] + USER_TRUNCATED_NOTICE
+        self.pending_user = text
         if turn_id:
             self.turn_id = turn_id
-        self.turn_intent = detect_intent(user_text)
+        self.turn_intent = detect_intent(text)
         self.extra_contract = ""
         self.prime_retrieval("", allowed=False)  # App 门控后会覆盖
         return self.turn_id
@@ -356,6 +373,8 @@ class SessionManager:
             "s7": len(blocks[6]),
             "s8": len(blocks[7]),
             "history_turns": len(history) // 2,
+            # 超长输入被截掉多少字（0 = 没截断）；查"为什么它没看见后半段"看这里
+            "user_truncated": self.truncated_chars,
         }
 
 

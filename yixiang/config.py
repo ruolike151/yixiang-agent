@@ -165,9 +165,11 @@ class Settings:
             errors.append("YIXIANG_HISTORY_TURNS 不能为负")
         if self.tool_retry_max < 0:
             errors.append("YIXIANG_TOOL_RETRY_MAX 不能为负")
-        if self.embed_backend not in {"fastembed", "sentence-transformers", "api"}:
+        # hash 不是"玩具"：它是**离线等价后端**（`rag/embed.py` 的 HashEmbedder），
+        # CI 与无网演示都靠它把检索链路跑成确定性的，所以白名单必须有它。
+        if self.embed_backend not in {"fastembed", "sentence-transformers", "api", "hash"}:
             errors.append(
-                "YIXIANG_EMBED_BACKEND 只支持 fastembed / sentence-transformers / api"
+                "YIXIANG_EMBED_BACKEND 只支持 fastembed / sentence-transformers / api / hash"
             )
         return errors
 

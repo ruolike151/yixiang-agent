@@ -1069,6 +1069,7 @@ dependencies = [
     { name = "fastembed" },
     { name = "httpx" },
     { name = "jieba" },
+    { name = "pyyaml" },
     { name = "sqlite-vec" },
     { name = "websockets" },
 ]
@@ -1085,6 +1086,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jieba", specifier = ">=0.42.1" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
     { name = "websockets", specifier = ">=12.0" },
 ]

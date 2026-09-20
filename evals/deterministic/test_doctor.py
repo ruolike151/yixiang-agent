@@ -104,3 +104,40 @@ def test_doctor_check_six_fails_when_a_core_file_is_over_the_limit(tmp_path, rep
     assert check.status == doctor.FAIL
     assert "soul.md" in check.detail and "超过上限" in check.detail
     assert doctor.main(settings) == 1
+
+
+def test_validate_rejects_a_main_model_that_cannot_call_tools(tmp_path, repo_root):
+    """主模型必须能调工具：路由到不支持 function calling 的模型 = 整条 loop 退化成聊天。"""
+    bad = no_key_settings(tmp_path, repo_root, main_model="deepseek-reasoner")
+    problems = [item for item in bad.validate() if "MAIN_MODEL" in item]
+
+    assert problems
+    assert "deepseek-reasoner" in problems[0]  # 错误里点名是哪个模型，照着改就行
+
+    good = no_key_settings(tmp_path, repo_root, main_model="deepseek-flash")
+    assert [item for item in good.validate() if "MAIN_MODEL" in item] == []
+
+
+def test_validate_guards_only_the_main_role_not_the_narrow_roles(tmp_path, repo_root):
+    """守门是**按角色**的：gate / judge / utility 不调工具，用便宜的 chat 档没问题。"""
+    settings = no_key_settings(
+        tmp_path,
+        repo_root,
+        main_model="deepseek-flash",
+        gate_model="deepseek-reasoner",
+        judge_model="deepseek-reasoner",
+        utility_model="deepseek-reasoner",
+    )
+
+    assert [item for item in settings.validate() if "MAIN_MODEL" in item] == []
+
+
+def test_doctor_fails_when_the_main_model_cannot_call_tools(tmp_path, repo_root):
+    """不是"告警"而是"失败"：带着这个配置启动，每一轮都会少一只胳膊。"""
+    settings = no_key_settings(tmp_path, repo_root, main_model="deepseek-reasoner")
+
+    checks = doctor.run_checks(settings)
+
+    assert checks[0].status == doctor.FAIL
+    assert "MAIN_MODEL" in checks[0].detail
+    assert doctor.main(settings) == 1

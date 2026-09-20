@@ -20,6 +20,12 @@ ENV_PREFIX = "YIXIANG_"
 # 角色名（§4.2）：main / gate / utility / judge / embed
 ROLES = ("main", "gate", "utility", "judge", "embed")
 
+# 已知不支持 function calling 的模型：**main 角色不能用它们**。
+# main 是唯一必须能调工具的角色（查记忆、写备忘、读文件都靠它），配错了整条 agent loop
+# 会静默退化成"只会聊天的聊天机器人"，而且不报错——所以要在启动前拦住。
+# 其他角色（gate / judge / utility）不调工具，用便宜的 chat 档没问题，不在这条禁令里。
+NO_TOOL_MODELS = ("deepseek-reasoner",)
+
 _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off", ""}
 
@@ -166,6 +172,13 @@ class Settings:
             )
         if not 1 <= self.loop_max_iter <= 20:
             errors.append("YIXIANG_LOOP_MAX_ITER 应在 1~20")
+        if self.main_model in NO_TOOL_MODELS:
+            errors.append(
+                f"YIXIANG_MAIN_MODEL={self.main_model} 不支持工具调用："
+                "主模型必须能调工具（查记忆 / 写备忘都靠它），换成 deepseek-flash "
+                "或别的支持 function calling 的模型；窄角色（gate / judge / utility）"
+                "不调工具，可以继续用它"
+            )
         if self.history_turns < 0:
             errors.append("YIXIANG_HISTORY_TURNS 不能为负")
         if self.tool_retry_max < 0:

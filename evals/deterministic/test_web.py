@@ -221,7 +221,7 @@ def test_memory_round_trip_parses_entries_and_syncs(settings, clock):
 def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock):
     env_text = (
         "# 我的配置\n"
-        "YIXIANG_MAIN_MODEL=deepseek-chat  # 主模型\n"
+        "YIXIANG_MAIN_MODEL=deepseek-chat  # 主模型（老文件里的值，保存后换掉）\n"
         "YIXIANG_API_KEY=sk-test-placeholder-key\n"
     )
     api = make_api(settings, clock, env_text=env_text)
@@ -232,18 +232,18 @@ def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock
     assert snapshot["env_file_exists"] is True
     assert snapshot["choices"]["model_suggestions"][0] == "deepseek-flash"
 
-    result = api.save_config({"main_model": "deepseek-reasoner", "api_key": ""})
+    result = api.save_config({"main_model": "deepseek-flash", "api_key": ""})
     assert result["ok"] is True
     assert result["ignored"] == []
     assert result["written"] == ["YIXIANG_MAIN_MODEL"]
-    assert result["config"]["fields"]["main_model"] == "deepseek-reasoner"
+    assert result["config"]["fields"]["main_model"] == "deepseek-flash"
     assert result["restart_required"] is False  # data_dir 没动：不用重启
 
     written = api.env_file.read_text(encoding="utf-8")
     assert "# 我的配置" in written  # 注释原样保留
-    assert "YIXIANG_MAIN_MODEL=deepseek-reasoner  # 主模型" in written  # 原地替换 + 对齐不变
+    assert "YIXIANG_MAIN_MODEL=deepseek-flash  # 主模型" in written  # 原地替换 + 对齐不变
     assert "YIXIANG_API_KEY=sk-test-placeholder-key" in written  # 密钥留空 = 不改
-    assert api.settings.main_model == "deepseek-reasoner"  # 热更新：下一轮就生效
+    assert api.settings.main_model == "deepseek-flash"  # 热更新：下一轮就生效
 
     # 新键追加（原来没有的键落在文末）
     assert api.save_config({"history_turns": 4})["ok"] is True
@@ -258,6 +258,14 @@ def test_save_config_rewrites_env_in_place_and_blocks_bad_values(settings, clock
     assert exc.value.payload["errors"] == ["YIXIANG_LOOP_MAX_ITER 应在 1~20"]
     assert api.env_file.read_text(encoding="utf-8") == before
     assert api.settings.loop_max_iter == 6
+
+    # 不支持工具调用的模型当主模型：控制台这一关也得拦住（Task 2 的守门不只活在 doctor 里）
+    with pytest.raises(ConsoleError) as exc:
+        api.save_config({"main_model": "deepseek-reasoner"})
+    assert exc.value.code == "invalid_config"
+    assert "不支持工具调用" in exc.value.payload["errors"][0]
+    assert api.env_file.read_text(encoding="utf-8") == before
+    assert api.settings.main_model == "deepseek-flash"  # 拦下 = 热配置没被改坏
 
     # 白名单外的字段被忽略；全都被忽略 = 没什么可存
     with pytest.raises(ConsoleError) as exc:

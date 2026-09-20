@@ -86,4 +86,6 @@ PART 3（语料与按需推荐）已交付：
 
 边界（写在明面上）：**cron 定时推送 / 唤醒补发属 P2**，本部分只做内容层——`daily_brief` 的组装逻辑被对话、`yixiang brief`、未来的定时任务三种触发源复用。语料入库的**真实抓取**与**真实嵌入模型**（bge-small-zh-v1.5）需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json`。
 
-后续：PART 4 评测与交付（judge 评测、L3 回归、CI 门禁）。
+后续：PART 4 评测与交付（judge 评测、L3 回归、CI 门禁）。PART 3 交付时留下的 6 个决策点
+（联网验证、golden 复核、评测口径、偏好写法、降级标记位置、P2 定时推送）记在
+[`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md)，**等 PART 4 收口后再逐条过**，不阻塞当前门禁。

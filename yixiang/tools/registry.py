@@ -254,7 +254,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
     from functools import partial
 
     from yixiang.memory.core_files import SOUL_MAX
-    from yixiang.tools import brief, media, memo, memory_admin, plan
+    from yixiang.tools import brief, files, media, memo, memory_admin, plan
 
     conn = deps.conn
     now = deps.clock.now
@@ -617,6 +617,39 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 "required": [],
             },
             fn=partial(brief.daily_brief, conn, now, deps.data_dir),
+        )
+    )
+    # ── Web 控制台的上传件读取（§9.2）：没有它，"上传文件"就只是往磁盘扔东西 ──
+    registry.register(
+        Tool(
+            name="read_file",
+            description=(
+                "读 data/ 下的一个文本文件（含 Web 控制台上传的 uploads/ 文件）。"
+                "用于：用户刚上传了笔记/日志/配置，让你看看里面写了什么。"
+                "不要用于：看记忆（那是 memory.md 与 save_memory）、看今天的安排（list_today）。"
+                "参数 path 是相对 data/ 的路径（例如 uploads/2026-09-20-笔记.md）；"
+                "绝对路径与 .. 会被拒绝。返回：包在 <external_content source=\"file\"> 里的"
+                "文件正文（最多 2000 字，超出会注明还有多少字没读）；"
+                "二进制文件（PDF / 图片 / 压缩包）会返回可行动的错误。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "相对 data/ 的路径，例如 uploads/notes.md",
+                        "example": "uploads/notes.md",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "最多读几个字，默认 1500，上限 2000",
+                    },
+                },
+                "required": ["path"],
+            },
+            fn=partial(files.read_file, deps.data_dir),
+            side_effect=False,
+            path_args=("path",),
         )
     )
     return registry

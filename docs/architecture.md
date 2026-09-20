@@ -19,6 +19,7 @@
 flowchart TB
   subgraph entry["入口（只搬文本）"]
     CLI["gateway/cli.py<br/>REPL / 斜杠命令"]
+    WEB["web/<br/>本机控制台（HTTP + SSE）<br/>console.py 适配 · server.py 协议"]
     QQ["gateway/ QQ 入口<br/>P2 预留，未接"]
   end
 
@@ -51,6 +52,8 @@ flowchart TB
   CI[".github/workflows/ci.yml<br/>ruff → pytest → skills validate → release_gate"]
 
   CLI --> APP
+  WEB --> APP
+  WEB --> DATA
   QQ -.-> APP
   APP --> SESS
   APP --> AGENT
@@ -79,6 +82,24 @@ flowchart TB
 1. **`app.py` 是唯一的分叉点**：CLI、P2 的 QQ、评测脚本都只调 `App.handle_message()`。入口里没有业务逻辑（ADR-3），所以"线上跑的那条路"与"用例跑的那条路"是同一条；
 2. **`memory/` 与 `rag/` 各自独立**，只在 `db.py`、`runtime/models.py` 这两个中立层相遇——记忆的门控与检索质量互不干扰；
 3. **`evals/` 只被读，不被依赖**：生产代码不 import 用例。唯一的例外是 `ops/release_gate.py` 在门禁进程里按路径加载 `evals/judge/run_judge.py` 与 `test_gate.py` 的纯函数（复用同一份判定口径，避免"用例绿了门禁红了"）。
+
+### 1.1 Web 控制台：第三个入口，不是第二条链路
+
+`yixiang web` 是本机测试前端（只绑 `127.0.0.1`，标准库 `ThreadingHTTPServer`，无构建、无 CDN）。它同样受第 4 节第 1 条约束——**只搬文本**。三层各管一件事：
+
+| 层 | 文件 | 只做 | 不做 |
+|---|---|---|---|
+| 业务适配 | `web/console.py` | 把请求翻译成对 `App` 与 `data/` 的调用（人设 / 记忆 / 配置 / QQ / 上传 / 对话） | 不认识 HTTP，不写 JSON，不管 SSE 字节 |
+| 协议 | `web/server.py` | 路由、JSON、SSE、静态文件、multipart 解析 | 不做业务判断——"能不能改 / 超没超上限"全在 `console.py` |
+| 前端 | `web/static/`（手写 js/css） | 六栏面板、逐字渲染 SSE、hash 深链接 | 无构建、无 CDN、不用 `innerHTML` 拼数据 |
+
+三条与主链路同源的纪律：
+
+1. **对话只有一条路**：Web 侧调的还是 `App.handle_message()`，流式事件由 provider 的 observer 原样转成 SSE，不复制 loop；
+2. **写文件走既有出口**：人设 / 记忆走 `core_files.write_core_file()`（原子写 + 上限校验），配置走 `config.parse_env_text` 试算后原子写回 `.env`——"网页里存得进去、命令行读不出来"这种分叉从源头上没有位置；
+3. **串行化 + 只出掩码**：`sqlite3` 的连接不能跨线程用，所以 HTTP 可以多线程接连接、真正碰 `App` 的调用统一排进一条工作线程（`server.py` 的 `_SerialRunner`）；`api_key` / `qq_token` 永远只回掩码，空串表示"这次不改"。
+
+上传件落在 `data/uploads/`（同名不覆盖、`../` 被收敛成文件名），模型通过第 16 个工具 `read_file` 读它——否则"能上传"就只是往磁盘扔东西。
 
 ## 2. 一轮对话的时序
 
@@ -125,7 +146,7 @@ sequenceDiagram
 
 | 支柱 | 代码 | 管什么 | 明确不管什么 |
 |---|---|---|---|
-| **入口** | `gateway/cli.py`、P2 的 `gateway/` QQ 入口 | 读一行、打流式输出、斜杠命令（`/new` `/history` `/tools` `/trace` `/cost`） | 不含任何业务判断；换入口不改业务 |
+| **入口** | `gateway/cli.py`、`web/`（本机控制台）、P2 的 `gateway/` QQ 入口 | 读一行、打流式输出、斜杠命令（`/new` `/history` `/tools` `/trace` `/cost`）；Web 侧还有六栏测试面板与上传件落盘 | 不含任何业务判断；换入口不改业务 |
 | **Loop** | `loop/agent.py`、`loop/guard.py` | 迭代上限、防绕圈、工具调用编排、`finish_reason=length` 与坏 JSON 的失败路径 | 不认识"记忆"和"语料"这两个概念 |
 | **记忆** | `memory/` | 三文件核心记忆（原子写 + 上限校验）、三支柱检索（facts / episodes / skills）、检索门控、巩固与 watermark、人机共治、三方对账 | 不做影视语料的入库与推荐 |
 | **RAG 语料** | `rag/` | `source_id` 幂等入库、中文混合检索（FTS5 + 向量 + RRF）、硬过滤 + 口味软加权、7 天去重、golden 回归 | 不写长期记忆（推荐历史写 `recommend_log`，不是 `facts`） |

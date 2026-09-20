@@ -1,9 +1,10 @@
 """命令分发：``yixiang <command>``（TECH §10.1、§11.1、§18.1）。
 
-命令清单（``--help`` 里必须能看到）：chat / serve / doctor / rag / ops / eval / migrate /
-memory（记忆运维）/ skills（技能校验）/ brief（按需日报）/ backup（备份与回收）。
-其中 ``serve``（QQ + 定时推送，P2）在这个阶段只打印"还没实现"并退非零——**如实告知**
-比假装成功重要，这条在评测脚本里也会被沿用。
+命令清单（``--help`` 里必须能看到）：chat / web / serve / doctor / rag / ops / eval /
+migrate / memory（记忆运维）/ skills（技能校验）/ brief（按需日报）/ backup（备份与回收）。
+``web`` 是本机测试前端（只绑 127.0.0.1，标准库实现，见 ``yixiang/web/``）；
+``serve``（QQ + 定时推送，P2）在这个阶段只打印"还没实现"并退非零——**如实告知**比
+假装成功重要，这条在评测脚本里也会被沿用。
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from yixiang.ops.usage import summarize, summary_text
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COMMANDS = (
     "chat",
+    "web",
     "serve",
     "doctor",
     "rag",
@@ -53,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--no-stream", action="store_true", help="关掉流式（调试 / 评测用）")
     chat.add_argument("--once", metavar="文本", help="只跑一句话就退出（脚本 / 演示用）")
 
+    web = sub.add_parser("web", help="启动本地 Web 控制台（测试前端，只绑回环地址）")
+    web.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1）")
+    web.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
     sub.add_parser("serve", help="启动网关（QQ 属 P2，本阶段未实现）")
     sub.add_parser("doctor", help="六项启动自检")
     sub.add_parser("migrate", help="应用数据库迁移")
@@ -138,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
     match args.command:
         case "chat":
             return cmd_chat(settings, args)
+        case "web":
+            return cmd_web(settings, args)
         case "doctor":
             return doctor.main(settings)
         case "migrate":
@@ -171,6 +178,13 @@ def cmd_chat(settings: Settings, args: argparse.Namespace) -> int:
         cli._turn(args.once)  # noqa: SLF001 - 一次性入口复用同一渲染路径
         return 0
     return cli.run()
+
+
+def cmd_web(settings: Settings, args: argparse.Namespace) -> int:
+    """``yixiang web``：本地测试前端（业务适配层在 web/console.py，HTTP 在 web/server.py）。"""
+    from yixiang.web import serve
+
+    return serve(settings, host=args.host, port=args.port)
 
 
 def cmd_migrate(settings: Settings) -> int:

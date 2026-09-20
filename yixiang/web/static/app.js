@@ -1,0 +1,1512 @@
+/* 以湘控制台 · 前端（手写、无构建、无 CDN）
+ *
+ * 三条约束决定了这份代码的形状：
+ *   1. 只用浏览器原生能力（fetch + ReadableStream 读 SSE），离线也能跑；
+ *   2. 一律用 DOM API 建节点，**不用 innerHTML 拼数据**——对话内容、记忆正文、
+ *      错误信息都会进页面，拼字符串就是把模型的输出当代码执行；
+ *   3. 面板数据按需拉取并缓存，发送 / 保存类的操作走"禁用按钮 + 就地反馈"，
+ *      不整页刷新（测试时要能看到中间状态）。
+ */
+
+"use strict";
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+const PANELS = [
+  {
+    id: "chat",
+    label: "对话",
+    icon: "chat",
+    desc: "与命令行同一条链路：同一份 session、同一份 trace、同一份成本账。",
+  },
+  {
+    id: "history",
+    label: "历史对话",
+    icon: "clock",
+    desc: "按会话翻旧账：每轮的提问、回复、调了哪些工具、花了多少时间。",
+  },
+  {
+    id: "persona",
+    label: "人设与记忆",
+    icon: "user",
+    desc: "S1~S4 的正文都在这三个文件里；改完立刻影响下一轮，超限一个字节都不会写进去。",
+  },
+  {
+    id: "config",
+    label: "模型配置",
+    icon: "sliders",
+    desc: "写回 .env 并热更新运行时（data_dir 例外，需要重启服务）。",
+  },
+  {
+    id: "prompt",
+    label: "提示词",
+    icon: "layers",
+    desc: "本轮的 S1~S8 实况，以及已注册的工具与技能——模型看到了什么，这里就显示什么。",
+  },
+  {
+    id: "qq",
+    label: "QQ 设置",
+    icon: "link",
+    desc: "QQ 网关的开关与白名单（P2 才接网关，配置先落 .env）。",
+  },
+];
+
+const ICONS = {
+  chat: ["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"],
+  clock: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 7.5v5l3 2"],
+  user: ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"],
+  sliders: ["M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3", "M1 14h6M9 8h6M17 16h6"],
+  layers: ["M12 2 2 7l10 5 10-5-10-5z", "M2 17l10 5 10-5", "M2 12l10 5 10-5"],
+  link: [
+    "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7L12 5",
+    "M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7L12 19",
+  ],
+  upload: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M17 8l-5-5-5 5", "M12 3v12"],
+  send: ["M22 2 11 13", "M22 2 15 22l-4-9-9-4z"],
+  refresh: [
+    "M23 4v6h-6",
+    "M1 20v-6h6",
+    "M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15",
+  ],
+  save: ["M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z", "M17 21v-8H7v8", "M7 3v5h8"],
+  check: ["M20 6 9 17l-5-5"],
+  alert: ["M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z", "M12 9v4", "M12 17h.01"],
+  plus: ["M12 5v14M5 12h14"],
+  file: ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6"],
+  tool: [
+    "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z",
+  ],
+  book: ["M4 19.5A2.5 2.5 0 0 1 6.5 17H20", "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"],
+  spark: ["M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"],
+};
+
+/* ------------------------------------------------------------------ DOM */
+function h(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key === "dataset") Object.assign(node.dataset, value);
+    else if (key.startsWith("on") && typeof value === "function") {
+      node.addEventListener(key.slice(2).toLowerCase(), value);
+    } else if (value === true) node.setAttribute(key, "");
+    else node.setAttribute(key, String(value));
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+
+function icon(name, size = 18) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  const attrs = {
+    viewBox: "0 0 24 24",
+    width: String(size),
+    height: String(size),
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "1.8",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+    focusable: "false",
+  };
+  for (const [key, value] of Object.entries(attrs)) svg.setAttribute(key, value);
+  for (const d of ICONS[name] || []) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function button(label, { iconName, className = "", onClick, title, disabled = false } = {}) {
+  const node = h(
+    "button",
+    {
+      type: "button",
+      class: className,
+      title: title || label,
+      disabled,
+      onclick: onClick,
+    },
+    iconName ? icon(iconName, 16) : null,
+    label ? h("span", { text: label }) : null
+  );
+  if (!label && iconName) node.classList.add("icon-only");
+  return node;
+}
+
+function field(labelText, control, hint) {
+  const id = control.id;
+  return h(
+    "div",
+    { class: "field" },
+    h("label", { for: id, text: labelText }),
+    control,
+    hint ? h("p", { class: "field-hint", text: hint }) : null
+  );
+}
+
+function badge(text, tone = "") {
+  return h("span", { class: `badge ${tone}`.trim(), text });
+}
+
+/* ------------------------------------------------------------------ API */
+class ApiError extends Error {
+  constructor(message, payload, status) {
+    super(message);
+    this.payload = payload || {};
+    this.status = status;
+  }
+}
+
+async function api(path, { method = "GET", body, formData } = {}) {
+  const init = { method, headers: {} };
+  if (formData) init.body = formData;
+  else if (body !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const response = await fetch(path, init);
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { message: text.slice(0, 400) };
+    }
+  }
+  if (!response.ok) {
+    throw new ApiError(
+      (payload && payload.message) || `${response.status} ${response.statusText}`,
+      payload,
+      response.status
+    );
+  }
+  return payload;
+}
+
+function toast(message, tone = "") {
+  const box = document.getElementById("toasts");
+  const node = h("div", { class: `toast ${tone}`.trim(), text: message });
+  box.append(node);
+  setTimeout(() => node.remove(), tone === "bad" ? 8000 : 4200);
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已复制到剪贴板");
+  } catch {
+    toast("浏览器不允许写剪贴板，手动复制吧", "bad");
+  }
+}
+
+/* ------------------------------------------------------------------ 状态 */
+const store = {
+  panel: "chat",
+  arg: "",
+  summary: null,
+  sessions: null,
+  transcript: null,
+  transcriptSession: "",
+  persona: null,
+  memoryData: null,
+  config: null,
+  qq: null,
+  prompt: null,
+  tools: null,
+  skills: null,
+  uploads: [],
+  streaming: false,
+  loading: new Set(),
+};
+
+const $main = document.getElementById("main");
+
+function searching(key) {
+  return store.loading.has(key);
+}
+
+/** 拉取失败时数据仍是 null：这时候显示骨架屏，而不是渲染一个空表格骗人。 */
+function pending(...values) {
+  return values.some((value) => value === null || value === undefined);
+}
+
+async function load(key, fetcher, { force = false } = {}) {
+  if (searching(key)) return;
+  store.loading.add(key);
+  try {
+    await fetcher();
+  } catch (error) {
+    toast(error.message || String(error), "bad");
+  } finally {
+    store.loading.delete(key);
+  }
+}
+
+function fmtTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function fmtNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString("zh-CN") : String(value);
+}
+
+function fmtBytes(value) {
+  const size = Number(value || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function meter(used, limit, tone = "") {
+  const ratio = limit > 0 ? Math.min(used / limit, 1) : 0;
+  const level = ratio >= 0.95 ? "bad" : ratio >= 0.8 ? "warn" : tone;
+  return h(
+    "div",
+    { class: `meter ${level}`.trim(), role: "img", "aria-label": `${used} / ${limit}` },
+    h("span", { style: `width:${(ratio * 100).toFixed(1)}%` })
+  );
+}
+
+function panelHead(title, desc, ...actions) {
+  return h(
+    "div",
+    { class: "panel-head" },
+    h("div", {}, h("h2", { text: title }), h("p", { text: desc })),
+    actions.length ? h("div", { class: "row" }, ...actions) : null
+  );
+}
+
+function skeleton(lines = 3) {
+  return h(
+    "div",
+    { class: "card" },
+    h("div", { class: "skeleton", style: "width:40%" }),
+    ...Array.from({ length: lines }, () => h("div", { class: "skeleton block" }))
+  );
+}
+
+/* ------------------------------------------------------------------ 路由 */
+function route() {
+  const raw = decodeURIComponent(location.hash.replace(/^#/, ""));
+  const [panel, ...rest] = (raw || "chat").split("/");
+  const known = PANELS.some((item) => item.id === panel);
+  store.panel = known ? panel : "chat";
+  store.arg = rest.join("/");
+  return store.panel;
+}
+
+function navigate(panel, arg = "") {
+  const target = arg ? `#${panel}/${encodeURIComponent(arg)}` : `#${panel}`;
+  if (location.hash === target) {
+    render();
+    return;
+  }
+  location.hash = target;
+}
+
+/* ------------------------------------------------------------------ 外壳 */
+function renderNav() {
+  const list = document.getElementById("nav-list");
+  const counts = {
+    chat: store.summary ? `${store.summary.session.turns} 轮` : "",
+    history: store.sessions ? `${store.sessions.sessions.length}` : "",
+    config: store.summary ? `${store.summary.counters.tools} 工具` : "",
+    qq: store.summary && store.summary.qq.fields.qq_enabled ? "已开" : "",
+  };
+  list.replaceChildren(
+    ...PANELS.map((panel) =>
+      h(
+        "li",
+        {},
+        h(
+          "a",
+          {
+            class: "nav-item",
+            href: `#${panel.id}`,
+            "aria-current": store.panel === panel.id ? "page" : null,
+            onclick: (event) => {
+              event.preventDefault();
+              navigate(panel.id);
+            },
+          },
+          icon(panel.icon, 17),
+          h("span", { text: panel.label }),
+          counts[panel.id] ? h("span", { class: "nav-count", text: counts[panel.id] }) : null
+        )
+      )
+    )
+  );
+}
+
+function renderStatus() {
+  const strip = document.getElementById("status-strip");
+  const summary = store.summary;
+  if (!summary) {
+    strip.replaceChildren(h("div", {}, h("dt", { text: "状态" }), h("dd", { text: "连接中…" })));
+    return;
+  }
+  const items = [
+    ["主模型", summary.models.main],
+    ["密钥", summary.provider.api_key_set ? summary.provider.api_key_mask : "未配置"],
+    ["嵌入", summary.provider.embed_backend],
+    ["今日成本", `¥${Number(summary.cost.total.cost_cny || 0).toFixed(4)}`],
+  ];
+  strip.replaceChildren(
+    ...items.map(([term, value]) =>
+      h("div", {}, h("dt", { text: term }), h("dd", { text: String(value) }))
+    )
+  );
+  const foot = document.getElementById("foot-session");
+  foot.textContent = `会话：${summary.session.id}（${summary.session.turns} 轮 · source=${summary.session.source}）`;
+  document.getElementById("foot-paths").textContent = `data: ${summary.app.data_dir}`;
+}
+
+function renderBrandMark() {
+  const mark = document.getElementById("brand-mark");
+  mark.replaceChildren(icon("spark", 20));
+}
+
+/* ------------------------------------------------------------------ 对话 */
+function toolChips(tools) {
+  if (!tools || !tools.length) return null;
+  return h(
+    "div",
+    { class: "chips" },
+    ...tools.map((item) =>
+      h("span", {
+        class: `chip ${item.ok ? "ok" : "bad"}`,
+        text: `${item.tool || item.name || "tool"} ${item.ok ? "ok" : "失败"} ${
+          item.ms ? `${item.ms}ms` : ""
+        }`.trim(),
+        title: JSON.stringify(item.args || {}),
+      })
+    )
+  );
+}
+
+function turnToNodes(turn, { withUser = true } = {}) {
+  const nodes = [];
+  if (withUser) {
+    nodes.push(
+      h(
+        "article",
+        { class: "bubble user" },
+        h("div", { class: "bubble-meta" }, h("span", { class: "role", text: "you" })),
+        h("p", { text: turn.user || "" })
+      )
+    );
+  }
+  const meta = [h("span", { class: "role", text: "yixiang" }), h("span", { text: fmtTime(turn.at) })];
+  nodes.push(
+    h(
+      "article",
+      { class: "bubble assistant" },
+      h("div", { class: "bubble-meta" }, ...meta),
+      h("p", { text: turn.reply || "（这一轮没有正文）" }),
+      toolChips(turn.tools)
+    )
+  );
+  return nodes;
+}
+
+function chatScroll() {
+  const box = h("div", { class: "chat-scroll", id: "chat-scroll" });
+  const turns = store.transcript ? store.transcript.turns : [];
+  if (!turns.length) {
+    box.append(
+      h("p", {
+        class: "empty",
+        text:
+          "还没有往来记录。先在「模型配置」里确认 API key，然后在下面写一句试试；" +
+          "要让它读文件，点「上传文件」把文件放进 data/uploads/ 再让它 read_file。",
+      })
+    );
+  } else {
+    for (const turn of turns) box.append(...turnToNodes(turn));
+  }
+  return box;
+}
+
+function uploadTray() {
+  if (!store.uploads.length) return null;
+  return h(
+    "div",
+    { class: "card" },
+    h("div", { class: "card-head" }, h("h3", { text: "本次已上传" })),
+    ...store.uploads.map((item) =>
+      h(
+        "div",
+        { class: "row" },
+        icon("file", 16),
+        h("span", { class: "grow mono", text: `${item.path} · ${fmtBytes(item.bytes)}` }),
+        button("复制 read_file 调用", {
+          iconName: "check",
+          className: "ghost",
+          onClick: () => copyText(item.hint),
+        }),
+        button("填进输入框", {
+          className: "ghost",
+          onClick: () => {
+            const box = document.getElementById("chat-input");
+            if (!box) return;
+            box.value = `${box.value.trim()} ${item.hint}`.trim();
+            box.focus();
+          },
+        })
+      )
+    )
+  );
+}
+
+async function refreshSummary() {
+  store.summary = await api("/api/state");
+  renderStatus();
+  renderNav();
+  return store.summary;
+}
+
+async function sendMessage(text, { input, submit, scroll }) {
+  store.streaming = true;
+  submit.disabled = true;
+  input.disabled = true;
+
+  const userBubble = h(
+    "article",
+    { class: "bubble user" },
+    h("div", { class: "bubble-meta" }, h("span", { class: "role", text: "you" })),
+    h("p", { text })
+  );
+  const body = h("p", {});
+  const chips = h("div", { class: "chips" });
+  const meta = h("div", {
+    class: "bubble-meta",
+    text: "正在连接模型…",
+  });
+  const assistant = h(
+    "article",
+    { class: "bubble assistant streaming" },
+    meta,
+    body,
+    chips
+  );
+  const cursor = h("span", { class: "caret", "aria-hidden": "true" });
+  body.append(cursor);
+  const empty = scroll.querySelector(".empty");
+  if (empty) empty.remove();
+  scroll.append(userBubble, assistant);
+  scroll.scrollTop = scroll.scrollHeight;
+
+  const pending = new Map();
+  let replyText = "";
+  let result = null;
+  let failure = null;
+
+  const addChip = (node) => {
+    chips.append(node);
+    return node;
+  };
+  const handle = (event) => {
+    switch (event.kind) {
+      case "text_delta":
+        replyText += event.text || "";
+        body.textContent = replyText;
+        body.append(cursor);
+        break;
+      case "text_revoke":
+        replyText = "";
+        body.textContent = "";
+        body.append(cursor);
+        addChip(h("span", { class: "chip info", text: "这轮要查资料，撤回草稿" }));
+        break;
+      case "notice":
+        addChip(h("span", { class: "chip", text: event.text || "" }));
+        break;
+      case "tool_start": {
+        const chip = addChip(
+          h("span", { class: "chip info", text: `调用 ${event.tool} …` })
+        );
+        pending.set(event.tool, chip);
+        break;
+      }
+      case "tool_end": {
+        const chip = pending.get(event.tool);
+        const text = `${event.tool} ${event.ok ? "ok" : "失败"} ${event.ms || 0}ms`;
+        if (chip) {
+          chip.textContent = text;
+          chip.className = `chip ${event.ok ? "ok" : "bad"}`;
+        } else {
+          addChip(h("span", { class: `chip ${event.ok ? "ok" : "bad"}`, text }));
+        }
+        break;
+      }
+      case "error":
+        failure = event;
+        assistant.classList.add("error");
+        break;
+      case "result":
+        result = event;
+        break;
+      default:
+        break;
+    }
+    scroll.scrollTop = scroll.scrollHeight;
+  };
+
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new ApiError(payload.message || `HTTP ${response.status}`, payload, response.status);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index = buffer.indexOf("\n\n");
+      while (index >= 0) {
+        const chunk = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        const line = chunk.split("\n").find((item) => item.startsWith("data:"));
+        if (line) {
+          try {
+            handle(JSON.parse(line.slice(5).trim()));
+          } catch {
+            /* 半行 / 非 JSON 的注释行（心跳）直接跳过 */
+          }
+        }
+        index = buffer.indexOf("\n\n");
+      }
+    }
+  } catch (error) {
+    failure = { message: error.message || String(error) };
+    assistant.classList.add("error");
+  }
+
+  cursor.remove();
+  assistant.classList.remove("streaming");
+
+  if (result) {
+    const tokens = result.usage || {};
+    const parts = [
+      result.model || "",
+      `${result.latency_ms ? result.latency_ms.total : 0}ms`,
+      `${result.iterations || 0} 轮迭代`,
+      `in ${fmtNumber(tokens.in)} / out ${fmtNumber(tokens.out)} token`,
+    ].filter(Boolean);
+    meta.textContent = parts.join(" · ");
+    if (result.reply) {
+      replyText = result.reply;
+      body.textContent = result.reply;
+    }
+    for (const tool of result.tools || []) {
+      const chip = pending.get(tool.tool);
+      if (chip) {
+        chip.textContent = `${tool.tool} ${tool.ok ? "ok" : "失败"} ${tool.ms || 0}ms`;
+        chip.className = `chip ${tool.ok ? "ok" : "bad"}`;
+      }
+    }
+    if (result.error) {
+      assistant.classList.add("error");
+      chips.append(h("span", { class: "chip bad", text: `error: ${result.error}` }));
+    }
+    if (result.memory_write_failed) {
+      chips.append(h("span", { class: "chip bad", text: "记忆没写进去" }));
+    }
+    if (store.transcript) {
+      store.transcript.turns.push({
+        id: result.turn_id,
+        user: text,
+        reply: replyText,
+        tools: result.tools || [],
+        at: new Date().toISOString(),
+      });
+    }
+  }
+  if (failure) {
+    meta.textContent = "这一轮没跑完";
+    if (!replyText) body.remove();
+    chips.append(h("p", { class: "field-error", text: failure.message || "未知错误" }));
+  }
+
+  store.streaming = false;
+  submit.disabled = false;
+  input.disabled = false;
+  input.focus();
+  try {
+    await load("summary", refreshSummary, { force: true });
+    store.sessions = null; // 新会话 / 新轮次：历史列表下次进面板时重拉
+  } catch {
+    /* 状态刷新失败不影响这一轮的结论 */
+  }
+}
+
+async function renderChat() {
+  if (!store.summary) await refreshSummary();
+  if (!store.transcript) {
+    await load("transcript", async () => {
+      store.transcript = await api("/api/session?limit=200");
+      store.transcriptSession = store.transcript.session_id;
+    });
+  }
+  const scroll = chatScroll();
+  const input = h("textarea", {
+    id: "chat-input",
+    rows: "3",
+    placeholder: "写一句给以湘。回车发送，Shift+回车换行。",
+    "aria-label": "发消息",
+  });
+  const fileInput = h("input", {
+    type: "file",
+    id: "chat-file",
+    multiple: true,
+    hidden: true,
+    onchange: async (event) => {
+      const files = Array.from(event.target.files || []);
+      event.target.value = "";
+      for (const file of files) {
+        await load("upload", async () => {
+          const data = new FormData();
+          data.append("file", file, file.name);
+          const result = await api("/api/upload", { method: "POST", formData: data });
+          store.uploads.push(result);
+          toast(`已上传 ${result.name}（${fmtBytes(result.bytes)}）`, "ok");
+        });
+      }
+      render();
+    },
+  });
+  const submit = button("发送", {
+    iconName: "send",
+    className: "primary",
+    disabled: store.streaming,
+    title: store.streaming ? "上一轮还在跑" : "发送（回车）",
+    onClick: () => fire(),
+  });
+  const fire = () => {
+    const text = input.value.trim();
+    if (!text || store.streaming) return;
+    input.value = "";
+    sendMessage(text, { input, submit, scroll });
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      fire();
+    }
+  });
+
+  const head = panelHead(
+    `对话 · ${store.transcript ? store.transcript.session_id : "…"}`,
+    PANELS[0].desc,
+    button("新会话", {
+      iconName: "plus",
+      className: "ghost",
+      onClick: async () => {
+        await load("new-session", async () => {
+          const result = await api("/api/session/new", { method: "POST", body: {} });
+          store.sessions = result;
+          store.transcript = null;
+          await refreshSummary();
+          render();
+        });
+      },
+    }),
+    button("刷新", {
+      iconName: "refresh",
+      className: "ghost",
+      onClick: () => {
+        store.transcript = null;
+        render();
+      },
+    })
+  );
+
+  return [
+    head,
+    h(
+      "div",
+      { class: "card" },
+      scroll,
+      h(
+        "div",
+        { class: "composer" },
+        input,
+        h(
+          "div",
+          { class: "row" },
+          button("上传文件", {
+            iconName: "upload",
+            className: "ghost",
+            onClick: () => fileInput.click(),
+          }),
+          fileInput,
+          h("span", {
+            class: "card-note",
+            text: "上传后落在 data/uploads/，模型用 read_file 读它（≤2MB）",
+          }),
+          h("span", { class: "grow" }),
+          submit
+        ),
+        uploadTray()
+      )
+    ),
+    ...(store.summary.errors.length
+      ? [
+          h(
+            "div",
+            { class: "notice bad" },
+            icon("alert", 18),
+            h("div", {}, ...store.summary.errors.map((item) => h("p", { text: item })))
+          ),
+        ]
+      : []),
+  ];
+}
+
+/* ------------------------------------------------------------------ 历史 */
+async function renderHistory() {
+  if (!store.sessions) {
+    await load("sessions", async () => {
+      store.sessions = await api("/api/sessions?limit=50");
+    });
+  }
+  if (!store.transcript) {
+    await load("transcript", async () => {
+      store.transcript = await api("/api/session?limit=200");
+    });
+  }
+  if (pending(store.sessions, store.transcript)) {
+    return [panelHead("历史对话", PANELS[1].desc), skeleton()];
+  }
+  const list = h("div", { class: "scroll-list" });
+  if (!store.sessions.sessions.length) {
+    list.append(h("p", { class: "empty", text: "还没有任何历史会话：去「对话」那栏聊一句就有了。" }));
+  }
+  for (const session of store.sessions.sessions) {
+    const active = session.session_id === store.sessions.current;
+    list.append(
+      h(
+        "button",
+        {
+          class: "session-item",
+          type: "button",
+          "aria-pressed": active ? "true" : "false",
+          onclick: async () => {
+            await load("switch", async () => {
+              const result = await api("/api/session/switch", {
+                method: "POST",
+                body: { session_id: session.session_id },
+              });
+              store.sessions = result;
+              store.transcript = await api(
+                `/api/session/${encodeURIComponent(session.session_id)}?limit=200`
+              );
+              await refreshSummary();
+              render();
+            });
+          },
+        },
+        icon("chat", 16),
+        h(
+          "span",
+          { class: "session-body" },
+          h("span", { class: "session-title", text: session.title || "（没有标题）" }),
+          h("span", {
+            class: "session-sub",
+            text: `${session.session_id} · ${session.turns} 轮 · ${fmtTime(session.last_at)}`,
+          })
+        ),
+        active ? badge("当前", "ok") : null
+      )
+    );
+  }
+
+  const turns = h("div", { class: "turns" });
+  for (const turn of store.transcript.turns) {
+    turns.append(
+      h(
+        "article",
+        { class: "turn" },
+        h(
+          "div",
+          { class: "row" },
+          h("span", { class: "mono", text: `#${turn.id}` }),
+          h("span", { class: "card-note", text: fmtTime(turn.at) })
+        ),
+        h(
+          "dl",
+          {},
+          h("dt", { text: "你" }),
+          h("dd", { text: turn.user || "" }),
+          h("dt", { text: "以湘" }),
+          h("dd", { text: turn.reply || "（空）" })
+        ),
+        toolChips(turn.tools)
+      )
+    );
+  }
+
+  return [
+    panelHead(
+      "历史对话",
+      PANELS[1].desc,
+      button("刷新", {
+        iconName: "refresh",
+        className: "ghost",
+        onClick: () => {
+          store.sessions = null;
+          store.transcript = null;
+          render();
+        },
+      })
+    ),
+    h(
+      "div",
+      { class: "grid-2" },
+      h(
+        "section",
+        { class: "card" },
+        h(
+          "div",
+          { class: "card-head" },
+          h("h3", { text: "会话列表" }),
+          h("span", { class: "card-note", text: "点一条就切过去" })
+        ),
+        list
+      ),
+      h(
+        "section",
+        { class: "card" },
+        h(
+          "div",
+          { class: "card-head" },
+          h("h3", { text: `往来记录 · ${store.transcript.session_id}` }),
+          h("span", {
+            class: "card-note",
+            text: `${store.transcript.turns.length} 轮（不套 history_turns 窗口）`,
+          })
+        ),
+        turns.childElementCount
+          ? turns
+          : h("p", { class: "empty", text: "这个会话还没有往来记录。" })
+      )
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------ 人设与记忆 */
+async function renderPersona() {
+  await load("persona", async () => {
+    store.persona = await api("/api/persona");
+  });
+  await load("memory", async () => {
+    store.memoryData = await api("/api/memory");
+  });
+  if (pending(store.persona, store.memoryData)) {
+    return [panelHead("人设与记忆", PANELS[2].desc), skeleton()];
+  }
+
+  const cards = store.persona.files.map((file) => {
+    const box = h("textarea", { id: `persona-${file.name}`, rows: "12", spellcheck: "false" });
+    box.value = file.text;
+    const counter = h("span", { class: "card-note" });
+    const update = () => {
+      const used = box.value.trim().length;
+      counter.textContent = `${used} / ${file.limit} ${file.unit}`;
+      meterNode.replaceChildren(meter(used, file.limit));
+    };
+    const meterNode = h("div", {});
+    box.addEventListener("input", update);
+    update();
+    const save = button("保存", {
+      iconName: "save",
+      className: "primary",
+      onClick: async () => {
+        save.disabled = true;
+        await load("save-persona", async () => {
+          const result = await api("/api/persona", {
+            method: "PUT",
+            body: { name: file.name, text: box.value },
+          });
+          store.persona = { files: result.files };
+          toast(`${file.name} 已保存`, "ok");
+          render();
+        });
+        save.disabled = false;
+      },
+    });
+    return h(
+      "section",
+      { class: "card" },
+      h(
+        "div",
+        { class: "card-head" },
+        h("h3", { text: file.label }),
+        h(
+          "div",
+          { class: "row" },
+          badge(file.source === "data" ? "来自 data/" : "来自模板", file.source === "data" ? "" : "warn"),
+          counter,
+          save
+        )
+      ),
+      meterNode,
+      box,
+      h("p", {
+        class: "field-hint",
+        text: file.over
+          ? "已经超过上限：保存会被拒绝，先删减。"
+          : "上限由 core_files 定义，与命令行写入同一套校验。",
+      })
+    );
+  });
+
+  const memory = store.memoryData;
+  const memBox = h("textarea", { id: "memory-text", rows: "16", spellcheck: "false" });
+  memBox.value = memory.text;
+  const memCounter = h("span", { class: "card-note" });
+  const memMeter = h("div", {});
+  const updateMem = () => {
+    const used = memBox.value.split("\n").filter((line) => line.trim() && !line.startsWith("<!--")).length;
+    memCounter.textContent = `约 ${used} 活跃行 / ${memory.max_lines} 行`;
+    memMeter.replaceChildren(meter(used, memory.max_lines));
+  };
+  memBox.addEventListener("input", updateMem);
+  updateMem();
+
+  const saveMemory = button("保存 memory.md", {
+    iconName: "save",
+    className: "primary",
+    onClick: async () => {
+      saveMemory.disabled = true;
+      await load("save-memory", async () => {
+        const result = await api("/api/memory", { method: "PUT", body: { text: memBox.value } });
+        store.memoryData = result;
+        toast("memory.md 已保存；记得同步进数据库", "ok");
+        render();
+      });
+      saveMemory.disabled = false;
+    },
+  });
+  const syncMemory = button("同步进数据库", {
+    iconName: "refresh",
+    className: "ghost",
+    onClick: async () => {
+      await load("sync-memory", async () => {
+        const result = await api("/api/memory/sync", { method: "POST", body: {} });
+        toast(`同步完成：${result.summary}`, "ok");
+        store.memoryData = await api("/api/memory");
+        render();
+      });
+    },
+  });
+
+  const entries = h(
+    "table",
+    {},
+    h(
+      "thead",
+      {},
+      h(
+        "tr",
+        {},
+        h("th", { text: "#" }),
+        h("th", { text: "段" }),
+        h("th", { text: "内容" }),
+        h("th", { text: "钉住" })
+      )
+    ),
+    h(
+      "tbody",
+      {},
+      ...(memory.entries.length
+        ? memory.entries.map((entry) =>
+            h(
+              "tr",
+              {},
+              h("td", { class: "mono", text: String(entry.line) }),
+              h("td", { text: entry.section || "—" }),
+              h("td", { text: entry.content }),
+              h("td", { text: entry.pinned ? "是" : "否" })
+            )
+          )
+        : [h("tr", {}, h("td", { colspan: "4", text: "还没有条目。" }))])
+    )
+  );
+
+  return [
+    panelHead(
+      "人设与记忆",
+      PANELS[2].desc,
+      button("重新读取", {
+        iconName: "refresh",
+        className: "ghost",
+        onClick: () => {
+          store.persona = null;
+          store.memoryData = null;
+          render();
+        },
+      })
+    ),
+    ...(memory.problems.length
+      ? [
+          h(
+            "div",
+            { class: "notice bad" },
+            icon("alert", 18),
+            h("div", {}, ...memory.problems.map((item) => h("p", { text: item })))
+          ),
+        ]
+      : []),
+    h("div", { class: "grid-2" }, ...cards),
+    h(
+      "section",
+      { class: "card" },
+      h(
+        "div",
+        { class: "card-head" },
+        h("h3", { text: "长期记忆（memory.md）" }),
+        h("div", { class: "row" }, memCounter, saveMemory, syncMemory)
+      ),
+      memMeter,
+      memBox,
+      h("p", { class: "card-note mono", text: memory.path }),
+      h(
+        "details",
+        {},
+        h("summary", { text: `解析出的条目（${memory.entries.length}）` }),
+        entries
+      )
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------ 模型配置 */
+const CONFIG_META = {
+  main_model: { label: "主对话模型", hint: "唯一必填的角色。" },
+  gate_model: { label: "门控模型", hint: "留空回落到主模型。" },
+  judge_model: { label: "评判模型", hint: "留空回落到主模型。" },
+  utility_model: { label: "杂务模型", hint: "留空回落到评判 / 主模型。" },
+  api_base: { label: "API Base", hint: "例如 https://api.deepseek.com/v1" },
+  api_key: { label: "API Key", type: "password", hint: "留空 = 不改（只显示掩码）。" },
+  embed_backend: { label: "嵌入后端", type: "select-embed" },
+  embed_model: { label: "嵌入模型", hint: "api 后端要填；hash 后端忽略。" },
+  data_dir: { label: "数据目录", hint: "改了要重启服务才生效。" },
+  consolidate_every: { label: "巩固间隔（轮）", type: "number" },
+  history_turns: { label: "历史窗口（轮）", type: "number" },
+  retrieve_top_k: { label: "检索条数", type: "number" },
+  episode_top_k: { label: "片段条数", type: "number" },
+  loop_max_iter: { label: "单轮最大迭代", type: "number", hint: "1~20" },
+  tool_retry_max: { label: "工具重试次数", type: "number" },
+  llm_timeout: { label: "模型超时（秒）", type: "number", step: "0.5" },
+  gate_timeout: { label: "门控超时（秒）", type: "number", step: "0.5" },
+  budget_cny_per_day: { label: "每日预算（元）", type: "number", step: "0.1" },
+  log_level: { label: "日志级别", type: "select-log" },
+  scheduler_enabled: { label: "启用定时任务", type: "checkbox" },
+  brief_cron: { label: "日报 cron" },
+  brief_catchup_until: { label: "日报补跑截止" },
+  brief_sink: { label: "日报输出", hint: "例如 console" },
+};
+
+async function renderConfig() {
+  await load("config", async () => {
+    store.config = await api("/api/config");
+  });
+  if (pending(store.config)) return [panelHead("模型配置", PANELS[3].desc), skeleton()];
+
+  const config = store.config;
+  const controls = new Map();
+  const form = h("div", { class: "grid-2" });
+
+  for (const [name, meta] of Object.entries(CONFIG_META)) {
+    const value = config.fields[name];
+    let control;
+    if (meta.type === "checkbox") {
+      const box = h("input", { type: "checkbox", id: `cfg-${name}` });
+      box.checked = Boolean(value);
+      control = h(
+        "div",
+        { class: "switch" },
+        box,
+        h("label", { for: `cfg-${name}`, text: meta.label })
+      );
+      controls.set(name, box);
+      form.append(h("div", { class: "field" }, control, hintOf(meta)));
+      continue;
+    }
+    if (meta.type === "select-embed" || meta.type === "select-log") {
+      const select = h("select", { id: `cfg-${name}` });
+      const choices =
+        meta.type === "select-embed" ? config.choices.embed_backend : config.choices.log_level;
+      for (const choice of choices) {
+        select.append(
+          h("option", { value: choice, text: choice, selected: String(value) === choice })
+        );
+      }
+      controls.set(name, select);
+      form.append(field(meta.label, select, hintOf(meta)));
+      continue;
+    }
+    const input = h("input", {
+      type: meta.type === "password" ? "password" : meta.type === "number" ? "number" : "text",
+      id: `cfg-${name}`,
+      step: meta.step || null,
+      autocomplete: "off",
+      spellcheck: "false",
+    });
+    if (meta.type === "password") {
+      input.value = "";
+      input.placeholder = config.secret_mask.api_key || "还没有配置";
+    } else {
+      input.value = value === null || value === undefined ? "" : String(value);
+    }
+    controls.set(name, input);
+    form.append(field(meta.label, input, hintOf(meta)));
+  }
+
+  const save = button("保存并热更新", {
+    iconName: "save",
+    className: "primary",
+    onClick: async () => {
+      const payload = {};
+      for (const [name, control] of controls) {
+        const meta = CONFIG_META[name];
+        if (meta.type === "checkbox") payload[name] = control.checked;
+        else if (meta.type === "number") payload[name] = control.value === "" ? "" : Number(control.value);
+        else if (meta.type === "password") {
+          if (control.value.trim()) payload[name] = control.value.trim();
+        } else payload[name] = control.value;
+      }
+      save.disabled = true;
+      await load("save-config", async () => {
+        const result = await api("/api/config", { method: "PUT", body: payload });
+        store.config = result.config;
+        await refreshSummary();
+        toast(
+          result.restart_required
+            ? "已写入 .env；data_dir 变了，重启服务才生效"
+            : "已写入 .env 并热更新",
+          result.restart_required ? "bad" : "ok"
+        );
+        render();
+      });
+      save.disabled = false;
+    },
+  });
+
+  return [
+    panelHead("模型配置", PANELS[3].desc, save),
+    h(
+      "div",
+      { class: "notice" },
+      icon("file", 18),
+      h(
+        "div",
+        {},
+        h("p", {
+          text: `写入目标：${config.env_file || "（没有 .env，命令行 --env-file 为空）"}`,
+        }),
+        h("p", {
+          class: "card-note",
+          text: config.env_file_exists ? "文件已存在：命中的键原地替换，注释保留。" : "文件还不存在：保存时会新建。",
+        })
+      )
+    ),
+    ...(config.errors.length
+      ? [
+          h(
+            "div",
+            { class: "notice bad" },
+            icon("alert", 18),
+            h("div", {}, ...config.errors.map((item) => h("p", { text: item })))
+          ),
+        ]
+      : []),
+    form,
+  ];
+}
+
+function hintOf(meta) {
+  return meta.hint || "";
+}
+
+/* ------------------------------------------------------------ 提示词 */
+async function renderPrompt() {
+  await load("prompt", async () => {
+    store.prompt = await api("/api/prompt");
+  });
+  await load("tools", async () => {
+    store.tools = await api("/api/tools");
+    store.skills = await api("/api/skills");
+  });
+  if (pending(store.prompt, store.tools, store.skills)) {
+    return [panelHead("提示词", PANELS[4].desc), skeleton()];
+  }
+
+  const used = store.prompt.used_chars;
+  const budget = store.prompt.budget_chars;
+  const blocks = store.prompt.blocks.map((block) =>
+    h(
+      "details",
+      { open: block.id === "S1" || block.id === "S4" },
+      h(
+        "summary",
+        {},
+        h("span", { class: "mono", text: block.id }),
+        ` ${block.label}`,
+        h("span", { class: "card-note", text: ` · ${block.chars} 字 · ${block.source}` })
+      ),
+      block.text
+        ? h("div", { class: "scroll-box", text: block.text })
+        : h("p", { class: "empty", text: "这一段现在是空的（空闲状态下 S5 / S6 为空是正常的）。" })
+    )
+  );
+
+  const tools = store.tools.tools.map((tool) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, h("span", { class: "mono", text: tool.name })),
+      h("td", { text: tool.description }),
+      h("td", { text: tool.side_effect ? "有副作用" : "只读" }),
+      h("td", { class: "mono", text: (tool.required || []).join(", ") || "—" })
+    )
+  );
+
+  return [
+    panelHead(
+      "提示词",
+      PANELS[4].desc,
+      button("重新拼一次", {
+        iconName: "refresh",
+        className: "ghost",
+        onClick: () => {
+          store.prompt = null;
+          render();
+        },
+      })
+    ),
+    h(
+      "section",
+      { class: "card" },
+      h(
+        "div",
+        { class: "card-head" },
+        h("h3", { text: `本轮上下文占用：${fmtNumber(used)} / ${fmtNumber(budget)} 字` }),
+        h("span", { class: "card-note", text: store.prompt.note })
+      ),
+      meter(used, budget),
+      ...blocks
+    ),
+    h(
+      "section",
+      { class: "card" },
+      h(
+        "div",
+        { class: "card-head" },
+        h("h3", { text: `已注册工具（${store.tools.count}）` }),
+        h("span", {
+          class: "card-note",
+          text: `技能 ${store.skills.count} 个 · S1~S4 正文在「人设与记忆」里改`,
+        })
+      ),
+      h(
+        "table",
+        {},
+        h(
+          "thead",
+          {},
+          h(
+            "tr",
+            {},
+            h("th", { text: "工具" }),
+            h("th", { text: "说明" }),
+            h("th", { text: "性质" }),
+            h("th", { text: "必填参数" })
+          )
+        ),
+        h("tbody", {}, ...tools)
+      ),
+      store.skills.skills.length
+        ? h(
+            "div",
+            { class: "chips" },
+            ...store.skills.skills.map((skill) =>
+              h("span", {
+                class: "chip",
+                text: `${skill.name}（触发：${(skill.triggers || []).join(" / ") || "无"}）`,
+              })
+            )
+          )
+        : h("p", { class: "card-note", text: "data/skills/ 下还没有技能。" })
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------ QQ 设置 */
+async function renderQQ() {
+  await load("qq", async () => {
+    store.qq = await api("/api/qq");
+  });
+  if (pending(store.qq)) return [panelHead("QQ 设置", PANELS[5].desc), skeleton()];
+
+  const qq = store.qq;
+  const enabled = h("input", { type: "checkbox", id: "qq-enabled" });
+  enabled.checked = Boolean(qq.fields.qq_enabled);
+  const group = h("input", { type: "checkbox", id: "qq-group" });
+  group.checked = Boolean(qq.fields.qq_group_enabled);
+  const listen = h("input", { type: "text", id: "qq-listen", spellcheck: "false" });
+  listen.value = qq.fields.qq_listen || "";
+  const token = h("input", { type: "password", id: "qq-token", autocomplete: "off" });
+  token.placeholder = qq.secret_mask.qq_token || "还没有配置";
+  const allowed = h("textarea", { id: "qq-allowed", rows: "4", spellcheck: "false" });
+  allowed.value = qq.fields.qq_allowed || "";
+
+  const save = button("保存 QQ 设置", {
+    iconName: "save",
+    className: "primary",
+    onClick: async () => {
+      save.disabled = true;
+      await load("save-qq", async () => {
+        const payload = {
+          qq_enabled: enabled.checked,
+          qq_listen: listen.value.trim(),
+          qq_allowed: allowed.value.trim(),
+          qq_group_enabled: group.checked,
+        };
+        if (token.value.trim()) payload.qq_token = token.value.trim();
+        const result = await api("/api/qq", { method: "PUT", body: payload });
+        store.qq = result.qq;
+        await refreshSummary();
+        toast("QQ 设置已写入 .env", "ok");
+        render();
+      });
+      save.disabled = false;
+    },
+  });
+
+  return [
+    panelHead("QQ 设置", PANELS[5].desc, save),
+    h(
+      "section",
+      { class: "card" },
+      h(
+        "div",
+        { class: "card-head" },
+        h("h3", { text: "接入状态" }),
+        badge(
+          qq.status,
+          qq.fields.qq_enabled && qq.allowed_count ? "ok" : qq.fields.qq_enabled ? "bad" : ""
+        )
+      ),
+      h("p", { class: "card-note", text: qq.note }),
+      h("p", {
+        class: "card-note",
+        text: `白名单 ${qq.allowed_count} 个：${qq.allowed_list.join("、") || "（空）"}`,
+      })
+    ),
+    h(
+      "div",
+      { class: "grid-2" },
+      h(
+        "section",
+        { class: "card" },
+        h("div", { class: "card-head" }, h("h3", { text: "开关" })),
+        h(
+          "div",
+          { class: "switch" },
+          enabled,
+          h("label", { for: "qq-enabled", text: "启用 QQ 网关" })
+        ),
+        h(
+          "div",
+          { class: "switch" },
+          group,
+          h("label", { for: "qq-group", text: "允许群聊（默认只接私聊）" })
+        ),
+        field("监听地址", listen, "例如 127.0.0.1:8080（P2 接网关时生效）"),
+        field("访问令牌", token, "留空 = 不改（只显示掩码）")
+      ),
+      h(
+        "section",
+        { class: "card" },
+        h(
+          "div",
+          { class: "card-head" },
+          h("h3", { text: "白名单" }),
+          h("span", { class: "card-note", text: "逗号分隔；开了网关却没白名单会被拒绝" })
+        ),
+        field("允许的 QQ 号", allowed, "一行一个或用逗号分隔，例如 10001,10002")
+      )
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------------ 渲染 */
+const RENDERERS = {
+  chat: renderChat,
+  history: renderHistory,
+  persona: renderPersona,
+  config: renderConfig,
+  prompt: renderPrompt,
+  qq: renderQQ,
+};
+
+let renderToken = 0;
+
+async function render() {
+  const token = ++renderToken;
+  route();
+  renderNav();
+  renderStatus();
+  const nodes = await RENDERERS[store.panel]();
+  if (token !== renderToken) return; // 渲染期间用户又切了面板：这一份丢掉
+  $main.replaceChildren(...nodes.filter(Boolean));
+  document.title = `${PANELS.find((item) => item.id === store.panel).label} · 以湘控制台`;
+}
+
+async function boot() {
+  renderBrandMark();
+  try {
+    await refreshSummary();
+  } catch (error) {
+    $main.replaceChildren(
+      h(
+        "div",
+        { class: "notice bad" },
+        icon("alert", 18),
+        h(
+          "div",
+          {},
+          h("p", { text: "连不上本地服务。" }),
+          h("p", { class: "card-note", text: error.message || String(error) }),
+          h("p", { class: "card-note", text: "确认 yixiang web 还在跑，然后刷新页面。" })
+        )
+      )
+    );
+    return;
+  }
+  window.addEventListener("hashchange", () => render());
+  await render();
+}
+
+boot();

@@ -26,10 +26,15 @@ _FALSE = {"0", "false", "no", "n", "off", ""}
 
 def parse_env_file(path: Path) -> dict[str, str]:
     """极简 .env 解析：``KEY=VALUE``、``#`` 注释、可选引号。不引第三方库。"""
-    values: dict[str, str] = {}
     if not path.is_file():
-        return values
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        return {}
+    return parse_env_text(path.read_text(encoding="utf-8"))
+
+
+def parse_env_text(text: str) -> dict[str, str]:
+    """解析 .env 的**文本**（``parse_env_file`` 与 Web 控制台的试算共用一套规则）。"""
+    values: dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue

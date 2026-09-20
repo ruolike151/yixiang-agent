@@ -184,6 +184,49 @@ class SessionManager:
             )
         return sessions
 
+    def source_of(self, session_id: str, default: str = "cli") -> str:
+        """某个会话原先的来源标记（Web 控制台切回旧会话时别改写它的 source）。
+
+        ``chat_log.source`` 记的是"这句话从哪个入口进来的"：切到一个 cli 会话
+        继续聊，新消息仍应标成 ``cli``，否则 trace 里的来源会随入口漂移。
+        """
+        if self.store is None:
+            return default
+        row = self.store.execute(
+            "SELECT source FROM chat_log WHERE session_id = ? ORDER BY id LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return str(row["source"]) if row else default
+
+    def transcript(self, *, limit: int = 200) -> list[dict[str, object]]:
+        """当前会话的完整往来（Web 控制台"查看历史对话"）。
+
+        与 ``/history`` 同一张表，但**不套历史窗口**：``load_history`` 只取最近
+        ``history_turns`` 轮给模型用，这里要的是"这一整天聊了什么"。
+        返回按时间正序（旧 → 新），元素是 ``{id, user, reply, tools, at}``。
+        """
+        if self.store is None:
+            return []
+        rows = self.store.execute(
+            """
+            SELECT id, user_text, reply_text, tools_json, created_at
+              FROM chat_log
+             WHERE session_id = ?
+             ORDER BY id DESC LIMIT ?
+            """,
+            (self.session_id, max(int(limit), 1)),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "user": row["user_text"],
+                "reply": row["reply_text"],
+                "tools": _tools_of(row["tools_json"]),
+                "at": row["created_at"],
+            }
+            for row in reversed(rows)
+        ]
+
     # ------------------------------------------------------------------ 历史
     def load_history(self, turns: int | None = None) -> None:
         """从 ``chat_log`` 读回最近 N 轮（``/history`` 与会话切换的重建路径）。"""
@@ -381,3 +424,16 @@ class SessionManager:
 def load_core_files(settings: Settings) -> dict[str, str]:
     """一次性读三文件（doctor / 调试用）。"""
     return {name: read_core_file(settings, name) for name in CORE_FILES}
+
+
+def _tools_of(raw: object) -> list[str]:
+    """把 ``chat_log.tools_json`` 还原成工具名列表（解析不了就返回空表，不炸回放）。"""
+    if not raw:
+        return []
+    try:
+        items = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return [str(item.get("tool", "")) for item in items if isinstance(item, dict)]

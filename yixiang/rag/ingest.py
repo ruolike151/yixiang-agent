@@ -572,7 +572,16 @@ def _request_json(
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
-    """一次重试封装的 JSON 请求：退避 ``1s / 2s / 3s``，3 次都失败就抛。"""
+    """一次重试封装的 JSON 请求：最多 ``MAX_RETRIES`` 次，全失败就抛。
+
+    退避节奏（``REQUEST_INTERVAL_S = 1.0`` 时的**实测**序列，别照抄成 1/2/3）：
+
+      * 第 1 次尝试失败 → 睡 ``1.0s``；
+      * 第 2 次尝试前再睡 ``1.0s``，失败后再睡 ``1.0s``；
+      * 第 3 次尝试前睡 ``2.0s``（``attempt × REQUEST_INTERVAL_S``），失败后再睡 ``1.0s``。
+
+    也就是"每次失败固定 1s + 每次重试前 ``attempt × 1s``"，共 5 段睡眠。
+    """
     import httpx
 
     pause = sleep or time.sleep

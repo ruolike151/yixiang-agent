@@ -95,6 +95,11 @@ class Settings:
     # ── 运行时 ──
     data_dir: Path = field(default_factory=lambda: Path("data"))
 
+    # ── Bangumi（P1，§9.2）──
+    # 只用来读**自己的**收藏（Task 28）。搜索与条目详情免 token，
+    # 所以空着也能跑，doctor 只告警、validate() 不报错。
+    bangumi_token: str = ""
+
     # ── QQ（P2）──
     qq_enabled: bool = False
     # 8766 而不是 8765：8765 是 Web 控制台（``web.server.DEFAULT_PORT``）的默认端口。

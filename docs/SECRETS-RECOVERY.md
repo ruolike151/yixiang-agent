@@ -10,6 +10,7 @@
 | `YIXIANG_API_KEY` | 所有真实模型调用不可用；需要重新申请密钥 |
 | `YIXIANG_MAIN_MODEL` 等模型配置 | 回落到默认值（`deepseek-flash`），行为与之前不同 |
 | `YIXIANG_BUDGET_CNY_PER_DAY` 等预算 | 回落到 `0.5`，`ops cost` 的告警线随之变化 |
+| `YIXIANG_BANGUMI_TOKEN` | 读不了自己的 Bangumi 收藏（"按我的口味推荐"这一条能力消失）；搜番 / 查评分不受影响，重新生成即可 |
 
 `data/usage.jsonl` 里历史行的 `cost_cny` **不会被重算**（成本是当时的事实），
 所以密钥丢了不会让账本变成错的，只会让"下一轮"接不上。

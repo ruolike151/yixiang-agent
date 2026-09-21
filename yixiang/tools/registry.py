@@ -254,7 +254,16 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
     from functools import partial
 
     from yixiang.memory.core_files import SOUL_MAX
-    from yixiang.tools import bangumi, brief, files, media, memo, memory_admin, plan
+    from yixiang.tools import (
+        bangumi,
+        bangumi_collections,
+        brief,
+        files,
+        media,
+        memo,
+        memory_admin,
+        plan,
+    )
 
     conn = deps.conn
     now = deps.clock.now
@@ -699,6 +708,38 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
             },
             fn=bangumi.bangumi_subject,
             side_effect=False,
+            timeout_s=40.0,
+        )
+    )
+    # ── Bangumi 收藏 → 口味画像（Task 28）：要 PAT，默认只看不写 ──
+    registry.register(
+        Tool(
+            name="bangumi_my_collections",
+            description=(
+                "读**自己的** Bangumi 收藏（需要 YIXIANG_BANGUMI_TOKEN），按自己打的分算出题材偏好。"
+                "用于：'按我的口味推荐一部番'、'我是不是偏爱科幻'——本地语料只有题材，"
+                "拿不到'我喜欢什么'这个信号。"
+                "不要用于：搜番 / 查评分（那是 bangumi_search，免 token）。"
+                "返回：包在 <external_content source=\"bangumi\"> 里的画像（喜欢：… / 不喜欢：…）；"
+                "write=true 才会写进 data/user.md 的「偏好」段，默认 false（先给人看）。"
+                "没配 token 时返回可行动的错误并指向申请地址，不发任何请求。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "write": {
+                        "type": "boolean",
+                        "description": "是否写进 data/user.md 的「偏好」段，默认 false（只看不写）",
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "喜欢 / 不喜欢各最多保留几个题材词，默认 8",
+                    },
+                },
+                "required": [],
+            },
+            fn=partial(bangumi_collections.sync_taste_profile, settings),
+            side_effect=True,
             timeout_s=40.0,
         )
     )

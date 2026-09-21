@@ -1,10 +1,11 @@
-"""doctor 七项自检（PART-1 §1 "自检通过"、TECH §1.2）。
+"""doctor 八项自检（PART-1 §1 "自检通过"、TECH §1.2）。
 
 口径有意分成两半，用例把这两半都钉住：
   * **没配 key 时不该失败**——检查 1 判"配置能否加载并校验"，检查 5 跳过并告警；
     本地 clone 下来不填 key 也能把 doctor 跑到"0 失败"，否则连 /tools 都试不了。
   * **检查 6 真的会复制**——``templates/`` 的三文件落到 ``data/``，且第二次跑只保留不覆盖。
   * **检查 7 只看副本存不存在**——没配 key 不适用（告警），备份过就转 OK。
+  * **检查 8 只看 token 在不在**——没配只告警（搜番 / 查评分免 token），且不发请求。
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ LABELS = (
     "模型探活",
     "三文件就位",
     "密钥可恢复性",
+    "Bangumi 收藏 token",
 )
 
 
@@ -42,7 +44,7 @@ def no_key_settings(tmp_path: Path, repo_root: Path, **overrides) -> Settings:
     return Settings.load(env_file=None, environ={}, project_root=repo_root, **values)
 
 
-def test_doctor_runs_seven_checks_and_warns_but_never_fails_without_api_key(tmp_path, repo_root):
+def test_doctor_runs_eight_checks_and_warns_but_never_fails_without_api_key(tmp_path, repo_root):
     checks = doctor.run_checks(no_key_settings(tmp_path, repo_root))
 
     assert [check.label for check in checks] == list(LABELS)
@@ -51,9 +53,10 @@ def test_doctor_runs_seven_checks_and_warns_but_never_fails_without_api_key(tmp_
         "配置加载与校验",
         "模型探活",
         "密钥可恢复性",  # 还没备份过 → 告警，不阻塞
+        "Bangumi 收藏 token",  # 没填 PAT → 告警，不阻塞（搜索免 token）
     ]
     assert doctor.main(no_key_settings(tmp_path, repo_root)) == 0
-    assert "4 项通过，3 项告警" in doctor.render(checks)
+    assert "4 项通过，4 项告警" in doctor.render(checks)
 
 
 def test_doctor_copies_templates_into_data_dir_and_keeps_them(tmp_path, repo_root):

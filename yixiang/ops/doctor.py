@@ -1,4 +1,4 @@
-"""``yixiang doctor``：七项启动自检（TECH §1.2、PART-1 §1）。
+"""``yixiang doctor``：八项启动自检（TECH §1.2、PART-1 §1）。
 
 口径（有意为之，写在代码里免得以后自己都记不清）：
 
@@ -10,6 +10,8 @@
   * 检查 7 判的是 ``.env`` **有没有一份落在 ``data/`` 里的副本**，不是"key 填没填"：
     副本就是可恢复性的全部证据，丢了密钥不会让程序起不来（所以只告警），
     但会让历史 ``usage.jsonl`` 的账不可复算（所以值一条黄灯）。
+  * 检查 8 判的是 ``YIXIANG_BANGUMI_TOKEN`` **在不在**，且**不发任何网络请求**——
+    它只影响一条能力（读自己的收藏）；搜番 / 查评分免 token，所以没配只告警。
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ class Check:
 
 
 def run_checks(settings: Settings) -> list[Check]:
-    """跑完七项自检。任何一项 ``fail`` 都让 doctor 退非零。"""
+    """跑完八项自检。任何一项 ``fail`` 都让 doctor 退非零。"""
     checks = [_check_config(settings)]
     conn = None
     try:
@@ -52,6 +54,7 @@ def run_checks(settings: Settings) -> list[Check]:
     checks.append(_check_model(settings))
     checks.append(_check_core_files(settings))
     checks.append(_check_secrets_recovery(settings))
+    checks.append(_check_bangumi_token(settings))
     return checks
 
 
@@ -191,6 +194,23 @@ def _check_secrets_recovery(settings: Settings) -> Check:
         "密钥可恢复性",
         WARN,
         f"还没有 .env 备份：跑 `python -m yixiang backup` 或手动复制到 {directory}",
+    )
+
+
+def _check_bangumi_token(settings: Settings) -> Check:
+    """第 8 项：Bangumi PAT 在不在。
+
+    判据是"有没有 token"，不是"能不能连上"——这一步**不发网络请求**（doctor 要能在
+    离线机器上跑到底）。它只影响一条能力：读自己的收藏进口味画像；搜索与条目详情免
+    token，所以没配只告警、不失败。
+    """
+    if str(getattr(settings, "bangumi_token", "") or "").strip():
+        return Check("Bangumi 收藏 token", OK, "已配置（只用于读自己的收藏）")
+    return Check(
+        "Bangumi 收藏 token",
+        WARN,
+        "未配置 YIXIANG_BANGUMI_TOKEN：搜番 / 查评分照常（免 token），"
+        "只有「按我的收藏口味推荐」需要它；申请地址 https://next.bgm.tv/demo/access-token",
     )
 
 

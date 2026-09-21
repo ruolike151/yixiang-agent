@@ -254,7 +254,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
     from functools import partial
 
     from yixiang.memory.core_files import SOUL_MAX
-    from yixiang.tools import brief, files, media, memo, memory_admin, plan
+    from yixiang.tools import bangumi, brief, files, media, memo, memory_admin, plan
 
     conn = deps.conn
     now = deps.clock.now
@@ -617,6 +617,89 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 "required": [],
             },
             fn=partial(brief.daily_brief, conn, now, deps.data_dir),
+        )
+    )
+    # ── Bangumi live 检索（Task 27）：免 token、硬过滤强，和 search_media 分工 ──
+    registry.register(
+        Tool(
+            name="bangumi_search",
+            description=(
+                "在 Bangumi 上**实时**搜番（免密钥，需要网络）。"
+                "用于：'有没有叫 X 的番'、'《X》评分多少'、'2020 年后评分 8 分以上的科幻番'。"
+                "不要用于：'讲时间循环的'这类按题材找片——keyword 只匹配标题与别名，"
+                "题材要么传 tag，要么直接用 search_media 检索本地语料。"
+                "返回：包在 <external_content source=\"bangumi\"> 里的条目行"
+                "（中文名（原名）· 首播 · 评分 · 标签 · id）；Bangumi 不可达时自动退回本地语料检索"
+                "并在开头说明。拿到 id 之后可以用 bangumi_subject 看详情。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "片名或别名关键词，例如 '夏日重现'",
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "题材标签硬过滤，例如 '悬疑'、'科幻'",
+                    },
+                    "air_date_from": {
+                        "type": "string",
+                        "description": "首播不早于该日期，YYYY-MM-DD",
+                        "example": "2020-01-01",
+                    },
+                    "rating_min": {
+                        "type": "number",
+                        "description": "评分下限（0~10）",
+                        "example": 8,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数，默认 5，上限 20",
+                    },
+                },
+                # keyword 与 tag 至少要有一个，但 JSON Schema 的 anyOf 不在
+                # registry._validate 的支持范围里（它只查 required/type/enum），
+                # 所以这里留空，由 search_bangumi 自己返回可行动的错误。
+                "required": [],
+            },
+            fn=partial(bangumi.search_bangumi, conn, now),
+            side_effect=False,
+            timeout_s=30.0,
+        )
+    )
+    registry.register(
+        Tool(
+            name="bangumi_subject",
+            description=(
+                "按 Bangumi 条目 id 取一部番的详情：原名 / 别名 / 首播 / 平台 / 集数 / 评分 / 标签 / 简介。"
+                "用于：拿 bangumi_search 返回的 id 追问'这部谁做的 / 几集 / 有没有续集'。"
+                "不要用于：按片名找番（那是 bangumi_search）。"
+                "返回：包在 <external_content source=\"bangumi\"> 里的条目详情；"
+                "with_relations=true 追加关联条目、with_staff=true 追加导演/脚本/音乐等主要职员。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "subject_id": {
+                        "type": "integer",
+                        "description": "Bangumi 条目 id，例如 bangumi_search 返回的 346873",
+                        "example": 346873,
+                    },
+                    "with_relations": {
+                        "type": "boolean",
+                        "description": "是否追加关联条目（续集 / 原作 / 游戏等），默认 false",
+                    },
+                    "with_staff": {
+                        "type": "boolean",
+                        "description": "是否追加主要职员（导演 / 脚本 / 音乐等），默认 false",
+                    },
+                },
+                "required": ["subject_id"],
+            },
+            fn=bangumi.bangumi_subject,
+            side_effect=False,
+            timeout_s=40.0,
         )
     )
     # ── Web 控制台的上传件读取（§9.2）：没有它，"上传文件"就只是往磁盘扔东西 ──

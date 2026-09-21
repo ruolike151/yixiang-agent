@@ -120,7 +120,7 @@ def test_state_shows_models_counters_and_masks_the_key(settings, clock):
 
     state = api.state()
 
-    assert state["counters"]["tools"] == 16
+    assert state["counters"]["tools"] == 18
     assert state["counters"]["skills"] == 0  # tmp 里还没有 skills/
     assert state["models"]["main"] == "deepseek-flash"
     assert state["models"]["gate"] == "deepseek-flash"  # 留空 → 回落主模型
@@ -482,10 +482,10 @@ def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
         status, raw = client.call("GET", "/api/state")
         assert status == 200
         state = json.loads(raw)
-        assert state["counters"]["tools"] == 16
+        assert state["counters"]["tools"] == 18
         assert state["session"]["id"] == "web:default"
         assert state["provider"]["api_key_mask"] == mask_secret(settings.api_key)
-        assert json.loads(client.call("GET", "/api/tools")[1])["count"] == 16
+        assert json.loads(client.call("GET", "/api/tools")[1])["count"] == 18
         assert json.loads(client.call("GET", "/api/skills")[1])["count"] == 0
 
         # 前端外壳与静态资源

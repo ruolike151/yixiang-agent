@@ -35,7 +35,7 @@ def test_slash_commands_never_touch_the_model(settings, clock):
     assert "/trace" in out.getvalue()
 
     assert cli.handle_line("/tools") is True
-    assert "已注册工具（16）" in out.getvalue()
+    assert "已注册工具（18）" in out.getvalue()
     assert "create_plan" in out.getvalue()
     assert "search_media" in out.getvalue()
     assert "read_file" in out.getvalue()

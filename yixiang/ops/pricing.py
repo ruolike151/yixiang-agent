@@ -1,6 +1,6 @@
 """价目表与成本计算（TECH-DESIGN §4.4）。
 
-**价格以官网为准**：下表查询日期 2026-09-20，单位「元 / 百万 token」。
+**价格以官网为准**：下表查询日期 2026-09-21，单位「元 / 百万 token」。
 价格变动时只改这里，``usage.jsonl`` 里的历史行不会被重算（成本是当时的事实）。
 
 只收「我们真的会路由到」的模型：调用过的模型必须在表里有自己的一行，否则成本会静默
@@ -11,13 +11,16 @@ from __future__ import annotations
 
 from yixiang.runtime.models import Usage
 
-# 查询日期：2026-09-20。三元组 = (缓存未命中输入, 缓存命中输入, 输出)
+# 查询日期：2026-09-21。三元组 = (缓存未命中输入, 缓存命中输入, 输出)
 # deepseek-flash 官网分「高峰 / 空闲」两档（空闲 = 高峰的一半），这里取**高峰**价：宁可高估。
 # 只收官网上架的名字：deepseek-chat / deepseek-reasoner 已下架（实测仍能调用，但服务端把
 # model 换成 deepseek-flash），它们的行留在表里等于拿一个我们并不在付的价记账。
 PRICES: dict[str, tuple[float, float, float]] = {
-    "deepseek-flash": (2.0, 0.04, 8.0),  # 当前唯一在用的模型（main / gate / judge / utility）
+    "deepseek-flash": (2.0, 0.04, 8.0),  # main（gate 还回落在这里）
     "glm-4-flash": (0.0, 0.0, 0.0),  # 免费额度，但仍记账 token
+    # 本机 Ollama 上的 qwen3.5（judge / utility，Task 9）：跑在自己的 4060 上，边际成本 0。
+    # 这一行必须留着——没有它就按兜底价（= 表内最贵档）记账，本地推理会记出比云端还贵的账。
+    "qwen3.5-9b-uncensored-vision:latest": (0.0, 0.0, 0.0),
 }
 
 # 未知模型的兜底价 = 表里最贵的一档：宁可高估，不掩盖成本。

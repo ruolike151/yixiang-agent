@@ -51,6 +51,9 @@ RETRY_SERVER = (0.5, 1.5)
 RETRY_RATE_LIMIT = (2.0, 6.0)
 RETRY_TIMEOUT = (0.5,)
 
+# 走"另一家"的角色（Task 9）：judge 与回落它的 utility 共用一个端点（见 ``_base_for``）。
+SECOND_VENDOR_ROLES = ("judge", "utility")
+
 
 @runtime_checkable
 class ChatModel(Protocol):
@@ -102,21 +105,43 @@ class OpenAICompatibleProvider:
         self._owns_client = client is None
 
     # ------------------------------------------------------------------ 基础设施
+    def _base_for(self, role: str) -> str:
+        """判分档（judge + 回落它的 utility）可以整档换一家（Task 9）。
+
+        为什么 utility 也算：它的回落链是 ``utility_model or judge_model or main_model``——
+        utility 留空时用的就是 judge 家的模型名，请求就必须发去 judge 家的端点。
+        （真踩过：只给 judge 换家、utility 还打 main 那家 → 那一端直接 400
+        "The supported API model names are ... but you passed qwen3.5-..."。）
+        """
+        if role in SECOND_VENDOR_ROLES:
+            return self.settings.judge_base
+        return self.settings.api_base
+
+    def _key_for(self, role: str) -> str:
+        if role in SECOND_VENDOR_ROLES:
+            return self.settings.judge_auth_key
+        return self.settings.api_key
+
+    def endpoint_for(self, role: str = "main") -> str:
+        return self._base_for(role).rstrip("/") + "/chat/completions"
+
     @property
     def endpoint(self) -> str:
-        return self.settings.api_base.rstrip("/") + "/chat/completions"
+        """无角色时的默认端点（老代码 / 老用例仍可用）。"""
+        return self.endpoint_for("main")
 
-    def headers(self) -> dict[str, str]:
+    def headers(self, role: str = "main") -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.settings.api_key:
-            headers["Authorization"] = f"Bearer {self.settings.api_key}"
+        key = self._key_for(role)
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
         return headers
 
     def redact(self, text: str) -> str:
         """任何要进日志/trace 的字符串都过一遍：密钥永不落盘（§14.3）。"""
-        key = self.settings.api_key
-        if key and len(key) >= 8:
-            return text.replace(key, "***")
+        for key in (self.settings.api_key, self.settings.judge_auth_key):
+            if key and len(key) >= 8:
+                text = text.replace(key, "***")
         return text
 
     def _http(self) -> httpx.AsyncClient:
@@ -153,6 +178,10 @@ class OpenAICompatibleProvider:
             payload["tools"] = req.tools
         if stream:
             payload["stream_options"] = {"include_usage": True}
+        if self.settings.thinking_disabled_for(str(payload["model"])):
+            # 本地小模型的思考模式：OpenAI 兼容端点上只有这一个开关管用（见 config.py 的实测）。
+            # 不关的话 max_tokens 会被思考过程吃光，调用者拿到的是空 content。
+            payload["reasoning_effort"] = "none"
         return payload
 
     # ---------------------------------------------------------------- 非流式调用
@@ -176,7 +205,10 @@ class OpenAICompatibleProvider:
             failure: _Failure
             try:
                 response = await self._http().post(
-                    self.endpoint, json=payload, headers=self.headers(), timeout=req.timeout
+                    self.endpoint_for(req.role),
+                    json=payload,
+                    headers=self.headers(req.role),
+                    timeout=req.timeout,
                 )
             except httpx.TimeoutException as exc:
                 failure = _Failure(E_LLM_TIMEOUT, "timeout", f"请求超时：{exc}")
@@ -243,7 +275,11 @@ class OpenAICompatibleProvider:
 
         try:
             async with self._http().stream(
-                "POST", self.endpoint, json=payload, headers=self.headers(), timeout=req.timeout
+                "POST",
+                self.endpoint_for(req.role),
+                json=payload,
+                headers=self.headers(req.role),
+                timeout=req.timeout,
             ) as response:
                 if response.status_code >= 400:
                     await response.aread()

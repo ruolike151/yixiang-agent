@@ -20,6 +20,18 @@ def test_every_model_we_actually_call_has_its_own_price_row():
     assert "deepseek-flash" in pricing.PRICES
 
 
+def test_the_local_qwen_has_a_zero_cost_row():
+    """本机 Ollama 的 qwen3.5 真的会被路由到（judge / utility）。
+
+    没有这一行的话，它的 token 会按兜底价（= 表内最贵档）记账——本地推理明明不花钱，
+    账上却比云端还贵，``ops cost`` 与每日预算就全是假的。
+    """
+    assert pricing.PRICES["qwen3.5-9b-uncensored-vision:latest"] == (0.0, 0.0, 0.0)
+
+    usage = Usage(input_tokens=10_000, cached_input_tokens=0, output_tokens=2_000)
+    assert pricing.cost_cny("qwen3.5-9b-uncensored-vision:latest", usage) == 0.0
+
+
 def test_the_retired_models_are_not_quoted_any_more():
     """下架的名字留在表里 = 拿一个我们并不在付的价去记账（reasoner 那行就曾写着 4/1/16）。"""
     for name in ("deepseek-chat", "deepseek-reasoner"):

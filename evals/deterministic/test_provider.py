@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -96,6 +97,109 @@ def test_default_main_model_is_the_model_we_actually_use():
 def test_default_main_model_has_its_own_price_row():
     # 默认模型在价目表里有名有姓，成本才不会静默按兜底价计（偏乐观）
     assert Settings().main_model in PRICES
+
+
+# ------------------------------------------------- judge 换家 + 关思考（Task 9）
+def test_the_judge_role_can_go_to_a_different_vendor(settings):
+    """同一个 provider：``role="judge"`` 走 judge 家，``role="main"`` 走原来那家。"""
+    settings.api_base = "https://api.deepseek.com/v1"
+    settings.api_key = "sk-main-not-real"
+    settings.judge_api_base = "http://127.0.0.1:11434/v1"
+    settings.judge_api_key = ""  # 本机端点没有密钥 → 不许凭空造一个 Authorization
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("authorization", "")))
+        return httpx.Response(200, json=completion_body("裁判给了 4 分"))
+
+    provider = OpenAICompatibleProvider(
+        settings, transport=httpx.MockTransport(handler), jitter=0.0
+    )
+    run_complete(provider, request_for(settings, role="judge"))
+    run_complete(provider, request_for(settings, role="main"))
+
+    judge_url, judge_auth = seen[0]
+    main_url, main_auth = seen[1]
+    assert judge_url.startswith("http://127.0.0.1:11434/v1/chat/completions")
+    assert judge_auth == ""
+    assert main_url.startswith("https://api.deepseek.com/v1/chat/completions")
+    assert main_auth == "Bearer sk-main-not-real"
+
+
+def test_an_unset_judge_vendor_falls_back_to_the_main_one(settings):
+    """没配 judge 家 = 老行为，一个字节都不变（向后兼容，别再要一次密钥）。"""
+    settings.api_base = "https://api.deepseek.com/v1"
+    settings.api_key = "sk-main-not-real"
+    settings.judge_api_base = ""
+    settings.judge_api_key = ""
+    settings.judge_model = "deepseek-v4-pro"
+
+    provider = OpenAICompatibleProvider(settings)
+    try:
+        assert provider.endpoint_for("judge") == "https://api.deepseek.com/v1/chat/completions"
+        assert provider.headers("judge")["Authorization"] == "Bearer sk-main-not-real"
+    finally:
+        asyncio.run(provider.aclose())
+
+
+def test_the_utility_role_rides_along_with_the_judge_vendor(settings):
+    """utility 的回落链是 judge → main：它用 judge 家的模型名，就得走 judge 家的端点。
+
+    反例是**真踩过**的：只给 judge 换家、utility 还打 main 那家，那一端会直接 400
+
+        The supported API model names are deepseek-flash, deepseek-v4-pro,
+        but you passed qwen3.5-9b-uncensored-vision:latest.
+    """
+    settings.api_base = "https://api.deepseek.com/v1"
+    settings.api_key = "sk-main-not-real"
+    settings.judge_api_base = "http://127.0.0.1:11434/v1"
+    settings.judge_api_key = ""
+    settings.utility_model = "qwen3.5-9b-uncensored-vision:latest"
+
+    provider = OpenAICompatibleProvider(settings)
+    try:
+        assert provider.endpoint_for("utility").startswith("http://127.0.0.1:11434/v1")
+        assert "Authorization" not in provider.headers("utility")
+        # gate 不受影响：它还是 main 那家
+        assert provider.endpoint_for("gate").startswith("https://api.deepseek.com/v1")
+    finally:
+        asyncio.run(provider.aclose())
+
+
+def test_a_no_think_model_gets_reasoning_effort_none(settings):
+    """本地模型的思考模式必须关：OpenAI 兼容端点上只有 ``reasoning_effort="none"`` 生效。
+
+    实测（Ollama + qwen3.5-9b）：不传开关 → max_tokens 全被思考吃掉、``content`` 为空；
+    传 ``chat_template_kwargs`` / ``think`` → 一律不透传。关掉后同一条 prompt 从 44s 降到 0.3s。
+    """
+    settings.no_think_models = "qwen3.5-9b-uncensored-vision:latest"
+    settings.judge_model = "qwen3.5-9b-uncensored-vision:latest"
+    provider, bodies, _ = provider_for(
+        settings, [completion_body("4"), completion_body("好的")]
+    )
+    run_complete(provider, request_for(settings, role="judge"))
+    run_complete(provider, request_for(settings, role="main"))
+
+    # ① 请求侧：judge 那一发带上了关思考的开关
+    assert bodies[0]["model"] == "qwen3.5-9b-uncensored-vision:latest"
+    assert bodies[0]["reasoning_effort"] == "none"
+    # ② 云端那条一个字节都不许多带（开关只按**模型名**命中，不按角色）
+    assert bodies[1]["model"] == "deepseek-flash"
+    assert "reasoning_effort" not in bodies[1]
+
+
+def test_no_think_patterns_tolerate_blanks_and_a_trailing_wildcard(settings):
+    settings.no_think_models = " , qwen3.5-*, glm-4-flash "
+    assert settings.thinking_disabled_for("qwen3.5-9b-uncensored-vision:latest")
+    assert settings.thinking_disabled_for("glm-4-flash")
+    assert not settings.thinking_disabled_for("deepseek-flash")
+    assert not settings.thinking_disabled_for("")
+
+    # 空配置 = 谁都不关（老行为）：默认值必须是空的，否则会悄悄给云端模型带参数
+    settings.no_think_models = ""
+    assert settings.no_think_patterns == ()
+    assert not settings.thinking_disabled_for("qwen3.5-9b-uncensored-vision:latest")
 
 
 def test_role_routing_picks_the_model_and_writes_one_usage_line(settings):

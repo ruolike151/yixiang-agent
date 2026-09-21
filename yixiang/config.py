@@ -87,6 +87,18 @@ class Settings:
     utility_model: str = ""
     api_base: str = "https://api.deepseek.com/v1"
     api_key: str = ""
+    # judge / utility 可以换一家（Task 9）：留空 = 跟 main 同一家，老行为一个字节不变。
+    # 本机 Ollama（``http://127.0.0.1:11434/v1``）没有密钥，所以 judge_api_key 允许为空——
+    # 为空时**连 Authorization 头都不发**（本机端点被多余的 Bearer 反而可能拒掉）。
+    judge_api_base: str = ""
+    judge_api_key: str = ""
+    # 关掉"思考模式"的模型名单（逗号分隔，支持 `qwen3.5-*` 这样的后缀通配）。
+    # 为什么需要它：本地大模型默认先把思考过程写进几十上百个 token 的 ``reasoning``，
+    # 在 OpenAI 兼容端点上**唯一生效**的开关是请求体里的 ``reasoning_effort="none"``
+    # （实测：``chat_template_kwargs={"enable_thinking": false}`` 与 ``think=false``
+    # 都不透传，那条 prompt 用掉 512 个 max_tokens 仍然一个字都没吐出来）。
+    # 留空 = 谁都不关（老行为）。
+    no_think_models: str = ""
 
     # ── 嵌入 ──
     embed_backend: str = "fastembed"
@@ -217,6 +229,44 @@ class Settings:
                 "YIXIANG_EMBED_BACKEND 只支持 fastembed / sentence-transformers / api / hash"
             )
         return errors
+
+    # -------------------------------------------------------- 换家与思考模式
+    @property
+    def judge_base(self) -> str:
+        """judge / utility 角色的端点根：没配就用 main 那家（向后兼容）。"""
+        return (self.judge_api_base or self.api_base).strip()
+
+    @property
+    def judge_auth_key(self) -> str:
+        """judge 家要用的密钥。
+        **换了家却没给密钥 = 就是不给密钥**（本机 Ollama 正是这样）：这里绝不能回落到
+        main 的 key——那等于把 DeepSeek 的密钥原样发给另一个端点。只有"没换家"时才回落。
+        """
+        if self.judge_api_base.strip():
+            return self.judge_api_key
+        return self.judge_api_key or self.api_key
+    @property
+    def no_think_patterns(self) -> tuple[str, ...]:
+        """``YIXIANG_NO_THINK_MODELS`` 解析成的名单：去空白、丢空项。"""
+        return tuple(
+            item for item in (part.strip() for part in self.no_think_models.split(",")) if item
+        )
+
+    def thinking_disabled_for(self, model: str) -> bool:
+        """这个模型要不要在请求里带上 ``reasoning_effort="none"``（按**模型名**判，不按角色）。
+        名单项 = 精确模型名，或 ``前缀*``（本地模型名几乎都带 ``:latest`` 之类的标签，
+        每次 ollama pull 都可能变，写前缀比逐个写全名稳）。
+        """
+        name = (model or "").strip()
+        if not name:
+            return False
+        for pattern in self.no_think_patterns:
+            if pattern.endswith("*"):
+                if name.startswith(pattern[:-1]):
+                    return True
+            elif name == pattern:
+                return True
+        return False
 
     # ------------------------------------------------------------------ 路由
     def model_for(self, role: str) -> str:

@@ -14,6 +14,8 @@
 时要重跑全部历史分数校准，否则新旧分数不可比。
 
 解析失败**不静默**：该条计 0、``reasons`` 写明原因、模型原始输出留在报告里。
+另外，"内容完整、只是括号写歪"与"模型根本没答"不是同一件事：前者按平衡括号修回来，
+并在 ``reasons`` 里留一句说明（真踩过——见 ``parse_verdict``）。
 """
 
 from __future__ import annotations
@@ -62,8 +64,23 @@ JUDGE_SYSTEM = (
     "自己的偏好。只输出一个 JSON 对象，不要输出任何别的文字：\n"
     '{"score": 1 到 5 的整数, "reasons": ["一句话理由", "…"]}\n'
     "5 = 完全满足 rubric；4 = 差一项或风格略偏；3 = 差两项；2 = 明显不合格；"
-    "1 = 违反硬性要求或跑题。"
+    "1 = 违反硬性要求或跑题。\n"
+    "reasons 里不要引用候选回复的原文、不要出现引号——引号会把 JSON 写坏（真踩过）。"
 )
+
+# 重试时补在题面尾部的叮嘱（小模型第一次把引号抄进 reasons 时用得上）
+RETRY_SUFFIX = (
+    "\n\n上一次的输出没法解析成 {score, reasons[]}：只输出一个 JSON 对象，"
+    "reasons 里不要引用候选回复的原文、不要出现引号，也不要输出任何解释。"
+)
+
+# 修过括号 / 重问过都要在理由里说明：不写这两句，报告里就分不清"模型答歪了"和"模型没答"
+REPAIRED_NOTE = "（裁判输出的括号不配对，已按平衡括号修复后解析）"
+RETRY_NOTE = "（第一次判词没能解析成 JSON，叮嘱后重问了一次）"
+
+# 括号配对：多出来的收括号丢掉、缺的按栈补齐（见 _balanced_candidate）
+_CLOSER_OF = {"}": "{", "]": "["}
+_OPENER_OF = {"{": "}", "[": "]"}
 
 
 @dataclass(slots=True)
@@ -219,56 +236,86 @@ def score_offline(case: JudgeCase) -> tuple[int, list[str]]:
 
 
 # --------------------------------------------------------------------- live 打分
-def extract_json_object(text: str) -> dict[str, Any] | None:
-    """从模型输出里捞出第一个**平衡**的 JSON 对象。
+@dataclass(slots=True)
+class Verdict:
+    """一条判词：``repaired`` / ``retried`` 是两条"格式歪过"的留痕，不是分数的一部分。"""
 
-    容错三种常见形态：裸 JSON、````` ```json ```` 围栏、JSON 前后带解释文字。
-    不做"抓最外层最长的括号"——那样遇到嵌套就把两段拼坏了。
+    score: int
+    reasons: list[str] = field(default_factory=list)
+    repaired: bool = False
+    retried: bool = False
+
+
+def _balanced_candidate(raw: str, start: int) -> tuple[str, bool] | None:
+    """从 ``raw[start]``（一个 ``{``）往后扫，返回**括号配平后**的候选串与"修过没"。
+
+    正常的输出原样返回（``repaired=False``）；模型把括号写歪时按两条规则修：多出来的
+    收括号丢掉、缺的收括号按栈补齐（``repaired=True``）。只认**第一个**配平点，不做
+    "抓最外层最长的括号"——那样遇到嵌套就把两段拼坏了。字符串里的括号不参与配对。
+    """
+    stack: list[str] = []
+    chars: list[str] = []
+    in_string = False
+    escaped = False
+    repaired = False
+    for char in raw[start:]:
+        chars.append(char)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in _OPENER_OF:
+            stack.append(char)
+        elif char in _CLOSER_OF:
+            if stack and stack[-1] == _CLOSER_OF[char]:
+                stack.pop()
+            else:  # 多余的收括号：丢掉它，并记一笔
+                chars.pop()
+                repaired = True
+                continue
+            if not stack:  # 配平了：真假交给 json.loads
+                return "".join(chars), repaired
+    if not stack:  # 扫到尾部还没进过对象：这个 start 不是对象起点
+        return None
+    return "".join(chars) + "".join(_OPENER_OF[item] for item in reversed(stack)), True
+
+
+def _parse_object(text: str) -> tuple[dict[str, Any] | None, bool]:
+    """捞出第一个能 ``json.loads`` 成字典的对象，附带"括号有没有被修过"。
+
+    容错：裸 JSON、````` ```json ```` 围栏、JSON 前后带解释文字，以及括号写歪——
+    真跑 J-01 时 qwen3.5 交回来的判词内容全对，收尾却把 ``}]`` 写成 ``]]``、还漏了
+    ``}``（``evals/judge/reports/judge-20260921.json``）。这类输出判 0 会把"模型没答"
+    和"括号写歪"混成同一件事。
     """
     raw = (text or "").strip()
-    if not raw:
-        return None
     start = raw.find("{")
     while start != -1:
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(raw)):
-            char = raw[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        parsed = json.loads(raw[start : index + 1])
-                    except ValueError:
-                        break
-                    if isinstance(parsed, dict):
-                        return parsed
-                    break
+        candidate = _balanced_candidate(raw, start)
+        if candidate is not None:
+            try:
+                parsed = json.loads(candidate[0])
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed, candidate[1]
         start = raw.find("{", start + 1)
-    return None
+    return None, False
 
 
-def parse_score(text: str) -> tuple[int, list[str]] | None:
-    """解析 ``{score, reasons[]}``；返回 ``None`` 表示这条**判不出来**（计 0 并留痕）。"""
-    payload = extract_json_object(text)
+def parse_verdict(text: str) -> Verdict | None:
+    """解析 ``{score, reasons[]}``；``None`` 表示这条**判不出来**（计 0 并留痕）。"""
+    payload, repaired = _parse_object(text)
     if payload is None:
         return None
-    raw_score = payload.get("score")
     try:
-        score = int(round(float(raw_score)))
+        score = int(round(float(payload.get("score"))))
     except (TypeError, ValueError):
         return None
     reasons_raw = payload.get("reasons")
@@ -278,7 +325,7 @@ def parse_score(text: str) -> tuple[int, list[str]] | None:
         reasons = [str(item) for item in reasons_raw]
     else:
         reasons = []
-    return min(SCORE_MAX, max(SCORE_MIN, score)), reasons
+    return Verdict(min(SCORE_MAX, max(SCORE_MIN, score)), reasons, repaired)
 
 
 def build_judge_prompt(case: JudgeCase, reply: str) -> str:
@@ -295,11 +342,48 @@ def build_judge_prompt(case: JudgeCase, reply: str) -> str:
     return "\n\n".join(lines)
 
 
-def _complete(provider: Any, request: ProviderRequest) -> Any:
-    """同步调一次 ``provider.complete``（judge 是运维工具，不引入事件循环）。"""
-    import asyncio
+def _ask_judge(
+    provider: Any, case: JudgeCase, reply: str, *, timeout: float
+) -> tuple[Verdict | None, str]:
+    """问裁判要判词；解析不出来就带着叮嘱再问一次（最多两发）。
 
-    return asyncio.run(provider.complete(request))
+    返回 ``(判词, 最后一发的原始输出)``；判词为 ``None`` = 两发都没解析出来（计 0）。
+    本地小模型偶尔会把候选回复里的引号抄进 ``reasons``（J-02 现场），于是整个 JSON
+    不成形——那不是"判不出来"，是格式写歪，重问一次的代价比记 0 小得多。
+    """
+    prompt = build_judge_prompt(case, reply)
+    raw = ""
+    for attempt in (1, 2):
+        if attempt == 2:
+            prompt += RETRY_SUFFIX
+        request = ProviderRequest(
+            role="judge",
+            system=[JUDGE_SYSTEM],
+            messages=[user_message(prompt)],
+            temperature=0.0,
+            max_tokens=_LIVE_MAX_TOKENS,
+            timeout=timeout,
+        )
+        raw = str(getattr(_complete(provider, request), "text", "") or "")
+        verdict = parse_verdict(raw)
+        if verdict is not None:
+            verdict.retried = attempt == 2
+            return verdict, raw
+    return None, raw
+
+
+def _complete(provider: Any, request: ProviderRequest) -> Any:
+    """同步调一次 ``provider.complete``（judge 是运维工具，调用方还写同步代码）。
+
+    **必须走常驻 loop**（``eventloop.run``），不能每个用例 ``asyncio.run`` 一次：
+    provider 缓存的 httpx 连接池绑在"建它的那条 loop"上，``asyncio.run`` 跑完就把 loop
+    关掉，第二条用例起必然 ``RuntimeError: Event loop is closed``——十连炸，而头一条已经
+    真实计费、报告里却只剩一张 0 分表（真踩过，见 ``evals/deterministic/test_judge_live.py``）。
+    这也是 CLI / Web 早就定下的同一条规矩（``yixiang/runtime/eventloop.py``）。
+    """
+    from yixiang.runtime import eventloop
+
+    return eventloop.run(provider.complete(request))
 
 
 def judge_live(case: JudgeCase, provider: Any, *, timeout: float = 60.0) -> JudgeResult:
@@ -330,18 +414,7 @@ def judge_live(case: JudgeCase, provider: Any, *, timeout: float = 60.0) -> Judg
         )
 
     try:
-        verdict = _complete(
-            provider,
-            ProviderRequest(
-                role="judge",
-                system=[JUDGE_SYSTEM],
-                messages=[user_message(build_judge_prompt(case, reply))],
-                temperature=0.0,
-                max_tokens=_LIVE_MAX_TOKENS,
-                timeout=timeout,
-            ),
-        )
-        raw = str(getattr(verdict, "text", "") or "")
+        verdict, raw = _ask_judge(provider, case, reply, timeout=timeout)
     except Exception as exc:
         return JudgeResult(
             id=case.id,
@@ -351,9 +424,8 @@ def judge_live(case: JudgeCase, provider: Any, *, timeout: float = 60.0) -> Judg
             raw=reply,
         )
 
-    parsed = parse_score(raw)
-    if parsed is None:
-        # 解析失败 = 计 0 + 留痕（PART-4 §7 的 J-01~J-10 最后一句）
+    if verdict is None:
+        # 两发都解析不出来 = 计 0 + 留痕（PART-4 §7 的 J-01~J-10 最后一句）
         return JudgeResult(
             id=case.id,
             category=case.category,
@@ -361,8 +433,19 @@ def judge_live(case: JudgeCase, provider: Any, *, timeout: float = 60.0) -> Judg
             reasons=["解析失败：拿不到 {score, reasons[]}"],
             raw=raw,
         )
-    score, reasons = parsed
-    return JudgeResult(id=case.id, category=case.category, score=score, reasons=reasons, raw=reply)
+    # 格式歪过就要留痕（修括号 / 重问），分数本身还是模型给的
+    notes = [
+        note
+        for flagged, note in ((verdict.repaired, REPAIRED_NOTE), (verdict.retried, RETRY_NOTE))
+        if flagged
+    ]
+    return JudgeResult(
+        id=case.id,
+        category=case.category,
+        score=verdict.score,
+        reasons=notes + list(verdict.reasons),
+        raw=reply,
+    )
 
 
 # --------------------------------------------------------------------- 主入口

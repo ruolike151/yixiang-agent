@@ -1108,6 +1108,19 @@ const CONFIG_META = {
   utility_model: { label: "杂务模型", hint: "留空回落到评判 / 主模型。" },
   api_base: { label: "API Base", hint: "例如 https://api.deepseek.com/v1" },
   api_key: { label: "API Key", type: "password", hint: "留空 = 不改（只显示掩码）。" },
+  judge_api_base: {
+    label: "评判 API Base",
+    hint: "judge / 杂务换家才填（本机 Ollama：http://127.0.0.1:11434/v1）；留空 = 跟主端点同一家。",
+  },
+  judge_api_key: {
+    label: "评判 API Key",
+    type: "password",
+    hint: "换了家才填；留空且换了家 = 那一端不发密钥（本机端点正是这样）。",
+  },
+  no_think_models: {
+    label: "关思考模型",
+    hint: "逗号分隔，支持 qwen3.5-* 这样的前缀通配；命中就在请求里带 reasoning_effort=none。",
+  },
   embed_backend: { label: "嵌入后端", type: "select-embed" },
   embed_model: { label: "嵌入模型", hint: "api 后端要填；hash 后端忽略。" },
   data_dir: { label: "数据目录", hint: "改了要重启服务才生效。" },

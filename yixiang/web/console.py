@@ -52,6 +52,9 @@ CONFIG_FIELDS = (
     "utility_model",
     "api_base",
     "api_key",
+    "judge_api_base",
+    "judge_api_key",
+    "no_think_models",
     "embed_backend",
     "embed_model",
     "data_dir",
@@ -72,7 +75,7 @@ CONFIG_FIELDS = (
 )
 QQ_FIELDS = ("qq_enabled", "qq_listen", "qq_token", "qq_allowed", "qq_group_enabled")
 # 密钥类字段：空串 = "这次不改"（前端拿到的是掩码，回填空串才不会被写成空值）
-SECRET_FIELDS = ("api_key", "qq_token")
+SECRET_FIELDS = ("api_key", "judge_api_key", "qq_token")
 
 # 下拉候选。模型名**不是白名单**（vLLM / Ollama 可以填任意名字），只作为建议值；
 # 候选必须同时满足两条：能在 ``ops/pricing.py`` 里查到价（否则成本静默按兜底价计，偏乐观）、
@@ -177,6 +180,8 @@ class ConsoleAPI:
                 "api_base": settings.api_base,
                 "api_key_set": bool(settings.api_key),
                 "api_key_mask": mask_secret(settings.api_key),
+                "judge_base": settings.judge_base,
+                "judge_api_key_set": bool(settings.judge_auth_key),
                 "embed_backend": settings.embed_backend,
                 "embed_model": settings.embed_model,
             },
@@ -312,10 +317,15 @@ class ConsoleAPI:
         for name in CONFIG_FIELDS:
             raw = getattr(settings, name)
             values[name] = str(raw) if isinstance(raw, Path) else raw
-        values["api_key"] = ""  # 要改就填新的；留空 = 不改
+        # 密钥明文永不出站：要改就填新的，留空 = 这次不改
+        values["api_key"] = ""
+        values["judge_api_key"] = ""
         return {
             "fields": values,
-            "secret_mask": {"api_key": mask_secret(settings.api_key)},
+            "secret_mask": {
+                "api_key": mask_secret(settings.api_key),
+                "judge_api_key": mask_secret(settings.judge_auth_key),
+            },
             "choices": {
                 "model_suggestions": list(MODEL_SUGGESTIONS),
                 "embed_backend": list(EMBED_CHOICES),

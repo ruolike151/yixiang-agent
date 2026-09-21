@@ -21,7 +21,7 @@ from dataclasses import replace
 import pytest
 from fake_provider import FakeProvider, text_reply, tool_round
 
-from yixiang import memory
+from yixiang import db, memory
 from yixiang.app import App
 from yixiang.errors import E_EMBED_UNAVAILABLE
 from yixiang.memory import rrf, semantic
@@ -29,7 +29,12 @@ from yixiang.ops import explain_search as explain_cli
 from yixiang.ops import rag_cmd
 from yixiang.ops.show_trace import render_turn_box
 from yixiang.rag import evaluate, ingest, retrieve, taste
-from yixiang.rag.embed import EmbedUnavailable, HashEmbedder
+from yixiang.rag.embed import (
+    EMBED_DIM_META,
+    EMBED_MODEL_META,
+    EmbedUnavailable,
+    HashEmbedder,
+)
 from yixiang.tools import brief, media
 
 # 离线口径（§7）：同一套 dim 贯穿入库与检索，否则 meta 里的维度自检会拦下来
@@ -251,6 +256,75 @@ def test_reindex_required_when_the_dimension_changes(corpus, conn, clock, settin
     assert explain.vec == []
     assert explain.ranked  # 向量那一路退了，关键词那一路上
     assert "yixiang rag reindex" in retrieve.trace_info()["reindex_required"]
+
+
+def test_reindex_switches_the_embedding_model_instead_of_dead_ending(
+    corpus, conn, clock, settings
+):
+    """换嵌入模型后 ``rag reindex`` 必须真的能换——否则那条错误信息就是死循环。
+
+    旧向量与新模型不在同一语义空间，整表重建是唯一正确的做法；而 ``vec0`` 的维度
+    写死在建表语句里，**不 DROP 连维度都换不了**。所以重建路径先丢旧向量表再写入；
+    增量/检索路径上的守卫由上一个用例守着，不因为重建而放宽。
+    """
+    retrieve.configure(
+        conn,
+        data_dir=settings.data_dir,
+        clock=clock,
+        embedder=HashEmbedder(model="hash-v2", dim=64),  # 模型名与维度一起换
+    )
+
+    counts = retrieve.reindex_media(conn)
+
+    assert counts["vec"] == CORPUS_SIZE  # 旧索引被换掉，新向量按新维度写满
+    assert db.get_meta(conn, EMBED_MODEL_META) == "hash-v2"
+    assert db.get_meta(conn, EMBED_DIM_META) == "64"
+    explain = retrieve.explain_search("讲时间循环的", top_k=3, exclude_recent_days=0)
+    assert explain.vec, "重建之后向量那一路必须真的能召回"
+    assert not retrieve.trace_info().get("reindex_required")
+
+
+def test_reindex_drops_the_old_vector_table_on_a_fresh_connection(
+    tmp_path, clock, settings, repo_root
+):
+    """真机上 ``rag reindex`` 开的是**新连接**：``sqlite-vec`` 是每连接加载的，
+    没加载过扩展的连接去 DROP ``vec0`` 表会直接报 ``no such module: vec0``。
+
+    这条用例必须用**文件库 + 两条连接**复现（内存库的夹具连接早就把扩展加载过了，
+    所以它测不出这个坑）。
+    """
+    path = tmp_path / "state.db"
+    first = db.connect(path)
+    try:
+        db.migrate(first)
+        ingest.ingest_items(
+            first,
+            ingest.load_local(repo_root.joinpath(*FIXTURE), source="local"),
+            source="local",
+            embedder=HashEmbedder(dim=DIM),
+            clock=clock,
+        )
+        assert first.execute("SELECT COUNT(*) AS n FROM media_vec").fetchone()["n"] == CORPUS_SIZE
+    finally:
+        first.close()
+
+    fresh = db.connect(path)  # 新连接：sqlite-vec 还没加载
+    try:
+        db.migrate(fresh)
+        retrieve.configure(
+            fresh,
+            data_dir=settings.data_dir,
+            clock=clock,
+            embedder=HashEmbedder(model="hash-v2", dim=64),
+        )
+
+        counts = retrieve.reindex_media(fresh)
+
+        assert counts["vec"] == CORPUS_SIZE
+        assert db.get_meta(fresh, EMBED_DIM_META) == "64"
+    finally:
+        retrieve.reset()
+        fresh.close()
 
 
 # --------------------------------------------------------------- 口味画像

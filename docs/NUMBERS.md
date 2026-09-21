@@ -82,7 +82,7 @@ $ python -m yixiang ops cost --day --explain
 
 ```text
 $ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval --source local --file evals/fixtures/media_sample.json
-检索评测（media.jsonl）：20 条查询 · top-3 · 语料 31 部 · 嵌入 可用 · 口味 关（只测相关性）
+检索评测（media.jsonl）：20 条查询 · top-3 · 语料 31 部 · 嵌入 可用（hash 假嵌入；真嵌入见下表最后两行） · 口味 关（只测相关性）
 top-3 命中率：90.0%（18/20，目标 ≥60%） · MRR 0.792 → 通过
 ```
 
@@ -96,7 +96,7 @@ $ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag ingest --source bangumi --sor
 bangumi：共 128 条 · 新增 102 · 更新 0 · 跳过 26 · 向量 333
 media 表现有 333 部作品。
 $ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval
-检索评测（media.jsonl）：20 条查询 · top-3 · 语料 333 部 · 嵌入 可用 · 口味 关（只测相关性）
+检索评测（media.jsonl）：20 条查询 · top-3 · 语料 333 部 · 嵌入 可用（hash 假嵌入；真嵌入见下表最后两行） · 口味 关（只测相关性）
 top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 ```
 
@@ -111,8 +111,12 @@ top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 | 同上，**嵌入不可用**（纯 FTS5 降级） | 20 | 31 部 | 降级 | **85.0%**（17/20） | 0.800 | 只用于证明"降级仍可用" |
 | `evals/golden/media_holdout.jsonl` | 10 | 31 部 | `hash` 可用 | **100.0%**（10/10） | 0.867 | 发版前（防调参过拟合） |
 | `evals/golden/media.jsonl`，**真抓两段之后** | 20 | **333 部** | `hash` 可用 | **70.0%**（14/20） | **0.667** | 本机真抓一次（2026-09-21），**不进 CI** |
+| `evals/golden/media.jsonl`，**同上语料 + 真嵌入** | 20 | **333 部** | **`fastembed` 真嵌入**（`bge-small-zh-v1.5`，512 维） | **90.0%**（18/20） | **0.792** | nightly + 发版前（真模型） |
+| `evals/golden/media_holdout.jsonl`，**同上语料 + 真嵌入** | 10 | **333 部** | **`fastembed` 真嵌入**（同上） | **90.0%**（9/10） | 0.750 | nightly + 发版前（真模型） |
 
-> 口径说明：**31 部那三行的 90.0% / 0.792 / 85.0% / 100.0% 是 CI 每次跑的门禁数字；333 部那一行是本机真抓一次的结果，两者规模不同、不能互相替代。** `hash` 是假嵌入——语料从 31 部涨到 333 部后排序质量下降（MRR 0.792 → 0.667），但 top-3 仍在 60% 门禁之上；把这条拉回来是 Task 8（真实嵌入）的验收条件。333 部语料下的 6 条 MISS 是：`时间旅行题材`、`名字里带夏天的动画`、`宫崎骏的龙猫`、`不想看打斗的科幻`、`适合全家一起看的动画电影`、`有笑点但不是纯搞笑的犯罪片`（前两条与下面那张表里的是同一类问题）。
+> 口径说明：**看数字先看两件事——哪份语料、哪张嵌入。** 31 部那三行（90.0% / 0.792 / 85.0% / 100.0%）是 CI 每次跑的门禁数字，复现要把 `YIXIANG_DATA_DIR` 指到**空目录**（见复算清单①）——本机 `data/` 里已经有 333 部语料，直接跑同一条命令不会再围着 31 部评。333 部那几行来自本机真抓一次，**不进 CI**。`hash` 是假嵌入：语料从 31 部涨到 333 部后排序质量掉下来（MRR 0.792 → 0.667，top-3 90.0% → 70.0%）；换上真嵌入 `fastembed`（`bge-small-zh-v1.5`，512 维，模型在 `~/.cache/fastembed`）后，同一份 333 部语料拿到 **90.0% / MRR 0.792**——等于把 31 部那行的水平拿了回来，这就是 Task 8 的验收条件，实测已达成。333 部 + `hash` 的 6 条 MISS 是：`时间旅行题材`、`名字里带夏天的动画`、`宫崎骏的龙猫`、`不想看打斗的科幻`、`适合全家一起看的动画电影`、`有笑点但不是纯搞笑的犯罪片`（前两条与下面那张表里的是同一类问题）。
+>
+> 一个容易踩的口径坑，写出来免得复算时对不上：**向量表换过模型以后，`hash` 查询会被 `ReindexRequired` 守卫挡住、静默退成纯 FTS5。** `ensure_media_vec` 一旦发现库里存的是 `BAAI/bge-small-zh-v1.5`、而当前后端要写 `hash`，宁可不比也不混着比（跨语义空间比分数比"没有结果"更糟），于是向量那一路召回为空。本机现在跑 `YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval` 得到的是 **75.0%（15/20）/ MRR 0.625**，既不是 `hash` 那一行也不是降级那一行，而是"hash 查询 + 纯 FTS5 召回"的混合口径。要复现 `hash` 那一行，得像复算清单③那样**在库副本上先 `rag reindex`**。这个状态在 trace 里记成 `rag.reindex_required`，但 `rag eval` 的横幅仍然只写"嵌入 可用"——横幅看的是"后端能不能算向量"，看不到"向量表有没有被守卫挡下"，这是**已知的显示口径缺口**。
 
 两条已知 MISS（都是"用近义说法描述一部片"）：
 
@@ -120,6 +124,8 @@ top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 |---|---|---|---|
 | `名字里带夏天的动画` | 夏日重现 / 夏日大作战 | 你的名字。、头脑特工队、声之形 | 关键词路被"名字"带偏；hash 是**假嵌入**，没有真语义 |
 | `宫崎骏的龙猫` | 龙猫 | 你的名字。、疯狂的石头、凉宫春日的忧郁 | 语料里没有"宫崎骏"这个字段，只有导演名 |
+
+> 这张表是 **31 部语料 + `hash`** 那一档的两个 MISS（同一份 20 条考卷）；同一份考卷在 **333 部语料 + 真嵌入**下是 90.0%（18/20）· MRR 0.792——`名字里带夏天的动画` 与 `宫崎骏的龙猫` **两条都翻成了 HIT**，真嵌入换来的另外两条 MISS 是 `轻松治愈的日常番` 与 `时间旅行题材`。口径差异在这里，别混着引用。
 
 两条口径必须一起看，否则数字不可比：
 
@@ -245,9 +251,23 @@ $ python scripts/restore_drill.py
 # 卡 1：成本
 python -m yixiang ops cost --day --explain
 
-# 卡 2：命中率（三条一起看才完整）
-YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval            # 90.0% / MRR 0.792
-YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval --holdout  # 100% / MRR 0.867
+# 卡 2：命中率（先分清"哪份语料 + 哪张嵌入"，数字才有意义）
+# ① 31 部离线语料（CI 门禁口径）。必须把 data 指到空目录：本机 data/ 已有 333 部，
+#    同一条命令会围着库里的语料评，不再是 31 部那几行。
+YIXIANG_DATA_DIR=/tmp/yx-eval31 YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval --source local --file evals/fixtures/media_sample.json  # 31 部：90.0% / MRR 0.792
+YIXIANG_DATA_DIR=/tmp/yx-eval31 YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval --holdout  # 31 部：100.0% / MRR 0.867
+
+# ② 333 部真抓语料 + 真嵌入（本机 data/ 的现役口径；不加 YIXIANG_EMBED_BACKEND=hash 就是 fastembed 真模型）
+python -m yixiang rag eval            # 90.0% / MRR 0.792
+python -m yixiang rag eval --holdout  # 90.0% / MRR 0.750
+
+# ③ 同一份 333 部语料 + hash 假嵌入：hash 查询撞上 fastembed 向量表会被 ReindexRequired 挡住，
+#    所以要先拷一份库、在副本上 reindex 出 hash 向量，再评（直接在主库上换后端跑不出这一行）。
+cp data/state.db /tmp/yx333/state.db
+YIXIANG_DATA_DIR=/tmp/yx333 YIXIANG_EMBED_BACKEND=hash python -m yixiang rag reindex
+YIXIANG_DATA_DIR=/tmp/yx333 YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval  # 333 部：70.0% / MRR 0.667
+
+# ④ judge
 YIXIANG_EMBED_BACKEND=hash python -m yixiang eval judge          # 4.80
 
 # 卡 3：用例数

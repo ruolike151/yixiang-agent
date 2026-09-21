@@ -3,13 +3,13 @@
 > 目标：证明 PART 4 的五件事——**CI 门禁真的会拦住退步 / judge 10 条有区分度 /
 > 常驻任务幂等且异常隔离 / 快照能当唯一库源恢复 / 陌生人照 README 三条命令能跑起来**。
 >
-> 下面所有输出都是**实际跑出来的**（2026-09-20，Windows / `.venv` / 统一
-> `YIXIANG_EMBED_BACKEND=hash`）。三条命令是离线入口：不联网、不下载模型、不花钱。
-> 真模型只在 `judge --live` 与 `chat` 里出现，其余环节一模一样。
+> 下面所有输出都是**实际跑出来的**（Windows / `.venv`）。第 2~3、5~6 节是离线入口：
+> 统一 `YIXIANG_EMBED_BACKEND=hash`，不联网、不下载模型、不花钱。
 >
 > 演示前先设好环境变量（PowerShell）：`$env:YIXIANG_EMBED_BACKEND='hash'`、
-> `$env:PYTHONUTF8='1'`。不设也能演，但那一路会去下 bge-small（约 100MB）——
-> **演示当天别赌网络**。
+> `$env:PYTHONUTF8='1'`。**第 4 节的检索数字要的是另一档**：先
+> `Remove-Item Env:YIXIANG_EMBED_BACKEND` 走真嵌入——模型已经落在 `~/.cache/fastembed`，
+> 不会再下那 100MB。两档的数字都写在 `docs/NUMBERS.md` 卡 2 里，现场**别混着引用**。
 
 ## 0. 演示前的准备（不算在 3 分钟里）
 
@@ -17,7 +17,8 @@
 uv sync                                              # 建 .venv（默认不装 torch）
 uv run yixiang migrate                               # 期望：user_version=1
 uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json
-# 期望：local：共 31 条 · 新增 31 · 更新 0 · 跳过 0 · 向量 31
+# 期望：local：共 31 条 · 新增 31 · 更新 0 · 跳过 0 · 向量 31（干净 data 目录）
+#      若库里已有真抓语料，这句会变成"新增 0 · 跳过 31 · 向量 333"——也正常（source_id 幂等）
 uv run yixiang doctor                                # 六项自检全绿再开始讲
 ```
 
@@ -53,8 +54,8 @@ All checks passed!                                                    ← ① ru
       10 条 · 均分 4.80 / 通过线 4.0（offline） · 最低：J-05=4；J-09=4
   ✓ 门控漏检率                        0.0% / 阈值 0.0%       [硬门禁]
       漏检 0.0%（硬门禁 0）· 误检 10.0%（容忍 ≤30%，实测口径 40 条标注）
-  ✓ 检索 top-3 命中率                90.0% / 阈值 60.0%      [硬门禁]
-      18/20 命中 · MRR 0.792 · 语料 31 部 · 嵌入 ok · 口味关（T3 口径）
+  ✓ 检索 top-3 命中率                75.0% / 阈值 60.0%      [硬门禁]
+      15/20 命中 · MRR 0.625 · 语料 333 部 · 嵌入 ok · 口味关（T3 口径）
 告警项（不阻止合并）：
   ✓ 单轮成本上限                    ¥0.0150 / 阈值 ¥0.7500    [只告警]
       今天 2 轮 · 合计 ¥0.0236（预算 ¥0.50/天）· 最贵一轮上界 ¥0.0150
@@ -71,6 +72,13 @@ All checks passed!                                                    ← ① ru
 >
 > 讲点三（成本只告警）："五项里前四项是硬门禁，成本那项**只告警**。超预算多半是'用户今天聊得多'，
 > 不是代码退步；拿它拦合并，门禁很快就会变成没人看的噪音。"
+>
+> 讲点四（这里的 75.0% 与第 4 节的 90.0% 为什么不是同一个数）："门禁这一趟固定走 `YIXIANG_EMBED_BACKEND=hash`
+> ——离线、零下载，CI 也这么跑；而本机 `data/` 里现在是 333 部真抓语料、向量表是**真嵌入**建的。
+> `hash` 查询撞上 `fastembed` 向量表会被 `ReindexRequired` 守卫挡住（宁可不比，也不跨语义空间比分数），
+> 于是退成纯 FTS5，门禁读到的就是 **75.0% / MRR 0.625（15/20）**。第 4 节那一步不设 `hash`，走真嵌入，
+> 才是 **90.0% / MRR 0.792**。两个数都指得到源头，但**不能混着引用**——`docs/NUMBERS.md` 卡 2 就是按
+> '考卷 × 语料 × 嵌入'分行列的。"
 
 ## 3. judge：10 条 rubric 与它的区分度（0:55–1:25）
 
@@ -103,28 +111,34 @@ uv run yixiang eval judge
 ## 4. 检索回归与门控的不对称（1:25–1:55）
 
 ```powershell
-uv run yixiang rag eval            # 门禁挂在这个数上
+uv run yixiang rag eval            # 门禁挂在这个数上（不设 YIXIANG_EMBED_BACKEND=hash 就是真嵌入）
 uv run yixiang rag eval --holdout  # 发版前防过拟合
 ```
 
-实测输出：
+实测输出（**真嵌入 `bge-small-zh-v1.5` + 333 部真抓语料**）：
 
 ```text
-检索评测（media.jsonl）：20 条查询 · top-3 · 语料 31 部 · 嵌入 可用 · 口味 关（只测相关性）
+检索评测（media.jsonl）：20 条查询 · top-3 · 语料 333 部 · 嵌入 可用 · 口味 关（只测相关性）
 top-3 命中率：90.0%（18/20，目标 ≥60%） · MRR 0.792 → 通过
-  ✗ 名字里带夏天的动画 —— 期望 夏日重现/夏日大作战，实际 top-3：你的名字。、头脑特工队、声之形
-  ✗ 宫崎骏的龙猫 —— 期望 龙猫，实际 top-3：你的名字。、疯狂的石头、凉宫春日的忧郁
+  ✗ 轻松治愈的日常番 —— 期望 轻音少女/白箱/别对映像研出手！/给桃子的信/龙猫/紫罗兰永恒花园，实际 top-3：悠哉日常大王 Nonstop、悠哉日常大王、悠哉日常大王 Repeat
+  ✗ 时间旅行题材 —— 期望 命运石之门/重启咲良田/夏日重现/星际穿越，实际 top-3：奇诺之旅、比宇宙更远的地方、古诺希亚
 
-检索评测（media_holdout.jsonl）：10 条查询 · top-3 · 语料 31 部 · 嵌入 可用 · 口味 关（只测相关性）
-top-3 命中率：100.0%（10/10，目标 ≥60%） · MRR 0.867 → 通过
+检索评测（media_holdout.jsonl）：10 条查询 · top-3 · 语料 333 部 · 嵌入 可用 · 口味 关（只测相关性）
+top-3 命中率：90.0%（9/10，目标 ≥60%） · MRR 0.750 → 通过
+  ✗ 日常校园生活的番 —— 期望 凉宫春日的忧郁/别对映像研出手！/轻音少女/声之形，实际 top-3：跃动青春、悠哉日常大王 Nonstop、悠哉日常大王 Repeat
 ```
+
+同一份 20 条考卷、同一份 333 部语料，换成 `hash` 假嵌入是 **70.0%（14/20）/ MRR 0.667**——真嵌入把 MRR 拉回 0.792
+（换的是"排序质量"，不是"有没有结果"）。31 部离线语料那一档见 `docs/NUMBERS.md` 卡 2：`hash` 90.0% / MRR 0.792，
+holdout 100% / MRR 0.867。
 
 > 讲点一（两条口径）："评测**关口味**（`use_taste=False`）也**关去重**——门禁量的是'相关性排序有没有
 > 退步'，数字不能随 `user.md` 内容漂移，也不能被 7 天去重窗口把正确答案挡在门外。带口味的排序
 > 只出现在 `ops explain-search` 与 `yixiang brief` 里。"
 >
-> 讲点二（降级仍可用）："把嵌入拿掉只走 FTS5，同一份考卷还有 **85.0%（17/20）**、MRR 0.800——
-> 功能不会因为模型没下下来就不可用，trace 里记 `E_EMBED_UNAVAILABLE`，用户无感。"
+> 讲点二（降级仍可用）："把嵌入拿掉只走 FTS5，同一份考卷在 **31 部语料**下还有 **85.0%（17/20）**、
+> MRR 0.800，在 **333 部语料**下是 75.0%（15/20）、MRR 0.625——功能不会因为模型没下下来就不可用，
+> trace 里记 `E_EMBED_UNAVAILABLE`，用户无感。"
 >
 > 讲点三（不对称阈值）："门控是**漏检 = 0**、误检容忍 ≤30%（实测 10%）。漏检 = 该检索没检索 =
 > 失忆，用户直接感知；误检只是多注入几段记忆，代价是延迟和 token。调优方向永远是'宁可多检索'。"
@@ -197,7 +211,8 @@ uv run python scripts/restore_drill.py   # 演练：把快照当唯一库源启�
 
 1. **退步会被拦住**：CI 四步 + `release_gate` 五项（确定性 100% / judge ≥4.0 / 门控漏检 0 /
    top-3 ≥60% / 成本告警），判定逻辑只有一份，退出码就是结论；
-2. **每条数字都能指到源头**：完整实测 6.5 秒（随负载浮动）、零成本；命中率 90.0% / MRR 0.792（holdout 100%）；
+2. **每条数字都能指到源头**：完整实测 6.5 秒（随负载浮动）、零成本；检索 90.0% / MRR 0.792
+   （333 部真抓语料 + 真嵌入；同语料 `hash` 假嵌入 70.0% / 0.667，holdout 90.0% / 0.750）；
    judge 4.80；成本口径与算法在 `docs/NUMBERS.md`——不是截图，是复算命令；
 3. **收口这一周没加功能**：四个子系统各自冻结，P2（定时推送 / QQ 入口）只留接口、不进任何门禁；
    收口之后补的 Web 控制台只是**范围外的入口层**（第 10 节加演，不进任何门禁）。
@@ -227,12 +242,15 @@ $env:YIXIANG_EMBED_BACKEND='hash'; $env:PYTHONUTF8='1'
 uv run ruff check .
 uv run pytest evals/deterministic -m "not live" -rs        # 185 passed, 2 skipped
 uv run yixiang eval judge                                  # 4.80（offline）
-uv run yixiang rag eval                                    # 90.0% / MRR 0.792
+uv run yixiang rag eval                                    # hash 口径：75.0% / MRR 0.625（333 部语料）
 uv run python -m yixiang.ops.release_gate                  # 硬门禁 4/4
 uv run python scripts/restore_drill.py                     # 恢复演练通过
 ```
 
-整段演示的真正门槛只有一个：`.venv` 建好、数据目录里有一份 `data/state.db` 与 31 部语料。
+上面把 `YIXIANG_EMBED_BACKEND` 去掉再跑 `uv run yixiang rag eval` 就是真嵌入那一档：**90.0% / MRR 0.792**
+（模型已在 `~/.cache/fastembed`，不会再下载）。
+
+整段演示的真正门槛只有一个：`.venv` 建好、数据目录里有一份 `data/state.db`（本机是 333 部真抓语料）。
 没有语料时 `release_gate` 会自己按离线 fixture 入库再评测（`rag eval --source local --file` 的同一条路径），
 所以**干净环境里第一次跑门禁也能出真实数字**，而不是"没有语料 → 假装通过"。
 

@@ -427,6 +427,16 @@ def index_media_vectors(
     ids = [int(value) for value in media_ids]
     if not ids:
         return 0
+    embedded = _embed_media_rows(conn, ids, batch=batch)
+    if embedded is None:
+        return 0
+    return _write_embedded_media(conn, *embedded)
+
+
+def _embed_media_rows(
+    conn: sqlite3.Connection, ids: list[int], *, batch: int
+) -> tuple[list[sqlite3.Row], list[list[float]]] | None:
+    """取行 + 算向量；嵌入不可用返回 ``None``，调用方据此**保持原状**。"""
     marks = ",".join("?" * len(ids))
     rows = conn.execute(
         f"SELECT id, title, title_zh, mtype, genres, synopsis FROM media WHERE id IN ({marks}) "
@@ -434,11 +444,17 @@ def index_media_vectors(
         ids,
     ).fetchall()
     if not rows:
-        return 0
-    ctx = current()
+        return None
     vectors = embed_texts([row_embed_text(row) for row in rows], batch=batch)
     if vectors is None:
-        return 0
+        return None
+    return rows, vectors
+
+
+def _write_embedded_media(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row], vectors: list[list[float]]
+) -> int:
+    ctx = current()
     written = write_media_vectors(
         conn,
         [(int(row["id"]), vector) for row, vector in zip(rows, vectors, strict=False)],
@@ -477,11 +493,45 @@ def write_media_vectors(
 
 
 def rebuild_media_vec(conn: sqlite3.Connection, *, batch: int = 32) -> int:
-    """全量重建向量索引（``rag reindex`` 用；嵌入不可用则返回 0）。"""
+    """全量重建向量索引（``rag reindex`` 用；嵌入不可用则返回 0）。
+
+    这是**换嵌入模型 / 换维度的唯一路径**：旧向量与新模型不在同一个语义空间，
+    而 ``vec0`` 的维度写死在建表语句里——不 DROP 就连建表都建不回来。增量路径上
+    的 ``ReindexRequired`` 守卫保持不放宽（它挡的是"静默混用"，不是"重建"）。
+
+    顺序是**先嵌入、再 DROP、最后写**：反过来会让一次"模型暂时不可用"把还能用的
+    旧索引删掉——降级是允许的，丢数据不是。
+    """
     ids = [
         int(row["id"]) for row in conn.execute("SELECT id FROM media ORDER BY id").fetchall()
     ]
-    return index_media_vectors(conn, ids, batch=batch)
+    if not ids:
+        return 0
+    embedded = _embed_media_rows(conn, ids, batch=batch)
+    if embedded is None:
+        return 0
+    reset_media_vec(conn)
+    return _write_embedded_media(conn, *embedded)
+
+
+def reset_media_vec(conn: sqlite3.Connection) -> None:
+    """丢掉向量表与它的元数据键（整表重建前调用）。
+
+    ``vec0`` 的维度写在 ``CREATE VIRTUAL TABLE ... float[N]`` 里，只清行改不了维度，
+    所以换模型必须 DROP 重建；meta 跟着一起清，让 ``ensure_media_vec`` 把新模型的
+    名字与维度重新写一遍。
+
+    **先加载扩展再 DROP**：``sqlite-vec`` 是按连接加载的，进程刚开始、还没碰过向量
+    表的新连接去 DROP ``vec0`` 表会报 ``no such module: vec0``（``rag reindex`` 正是
+    这条路径）。扩展加载不起来就说明本机没有向量能力，此时也没什么可 DROP 的，但
+    meta 仍要清——否则换个能用的环境回来，旧 meta 会拦住新模型。
+    """
+    with conn:
+        if db.load_sqlite_vec(conn):
+            conn.execute(f"DROP TABLE IF EXISTS {VEC_MEDIA}")
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?, ?)", (EMBED_MODEL_META, EMBED_DIM_META)
+        )
 
 
 def reindex_media(conn: sqlite3.Connection, *, batch: int = 32) -> dict[str, int]:
@@ -913,6 +963,7 @@ __all__ = [
     "rebuild_media_vec",
     "reindex_media",
     "reset",
+    "reset_media_vec",
     "retrieve_media",
     "row_embed_text",
     "search_fts",

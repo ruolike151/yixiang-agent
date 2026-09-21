@@ -24,7 +24,8 @@ uv run yixiang chat          # ③ 开始对话（流式输出）
 
 ```bash
 uv run yixiang doctor        # 六项启动自检：配置 / 目录 / SQLite / 向量扩展 / 模型探活 / 三文件
-uv run yixiang rag eval      # 检索回归：top-3 命中率 + MRR（无 key、无网也能跑）
+uv run yixiang rag eval      # 检索回归：top-3 命中率 + MRR（无 key 可跑；首次会下 100MB 嵌入模型，
+                             #   想零下载就加 YIXIANG_EMBED_BACKEND=hash，那一路是离线假嵌入）
 ```
 
 CLI 内的斜杠命令：`/help` `/new [名字]` `/history` `/tools` `/trace [n]` `/cost` `/exit`。
@@ -66,7 +67,7 @@ uv run yixiang web        # 打开 http://127.0.0.1:8765/
 |---|---|---|---|
 | **L1 单元** | 纯函数与单模块：解析、截断、计价、幂等键… | 每次保存 | 0 |
 | **L2 集成** | 假 Provider 驱动的完整轮次：工具调用、门控、巩固、调度、安全 | PR + CI | 0 |
-| **L3 检索回归** | golden 集上的 top-3 命中率与 MRR | PR + CI（离线嵌入后端） | 0 |
+| **L3 检索回归** | golden 集上的 top-3 命中率与 MRR | PR + CI（离线嵌入后端）+ nightly 真嵌入 | 0 |
 | **L4 judge** | 10 条 rubric（闲聊 / 推荐 / 计划 / 记忆管理 / 情绪陪伴） | nightly + 发版前（`--live`） | ≈¥0.06/次 |
 
 ```bash
@@ -104,7 +105,7 @@ uv run yixiang doctor                   # 六项启动自检
 uv run yixiang migrate                  # 应用数据库迁移
 uv run yixiang brief                    # 按需日报：今日安排 + 1 条影视推荐
 uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 离线入库 31 部
-uv run yixiang rag eval                 # golden 集：20 条 + 10 条 holdout
+uv run yixiang rag eval                 # golden 集：20 条 + 10 条 holdout（不加 YIXIANG_EMBED_BACKEND=hash 就是真嵌入）
 uv run yixiang ops explain-search "讲时间循环的"    # 五段中间结果：FTS / 向量 / RRF / 过滤 / 加权
 uv run yixiang ops cost --day           # 今日 token 与成本（--explain 打印分段占比）
 uv run yixiang ops tail                 # 实时跟随今天的 trace

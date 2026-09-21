@@ -23,6 +23,7 @@ import math
 import re
 import sqlite3
 import struct
+from pathlib import Path
 from typing import Any, Protocol
 
 from yixiang.runtime.models import to_local_iso
@@ -33,6 +34,12 @@ EMBED_DIM_META = "media.embed_dim"
 
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_DIM = 512
+
+# 模型缓存目录：**必须显式指定**。fastembed 的默认值是系统临时目录
+# （``%TEMP%\fastembed_cache``），会被磁盘清理删掉；删掉之后离线机器只能降级成
+# 纯 FTS5，而重下一次是 100MB。文档（TECH §1884、``.env.example``）承诺的就是
+# 这个路径，代码与文档在这里不许分叉。
+CACHE_DIR = Path.home() / ".cache" / "fastembed"
 
 # 已知模型的维度（省掉"先嵌入一条才知道维度"的启动开销）
 BUILTIN_DIM = {DEFAULT_MODEL: 512, "BAAI/bge-base-zh-v1.5": 768}
@@ -118,7 +125,9 @@ class FastEmbedEmbedder:
             try:
                 from fastembed import TextEmbedding  # type: ignore import-not-found
 
-                self._backend = TextEmbedding(model_name=self._model_name)
+                self._backend = TextEmbedding(
+                    model_name=self._model_name, cache_dir=str(CACHE_DIR)
+                )
             except Exception as exc:  # 模型没下下来 / onnxruntime 缺库
                 raise EmbedUnavailable(f"fastembed 不可用：{exc}") from exc
         return self._backend

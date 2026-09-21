@@ -149,12 +149,12 @@ main 长期难以本地化。
 > 这条撞车只在"网关与控制台同时开"时发作，报错却指向"端口被占用"，所以由 `test_doctor.py` 的
 > `test_the_qq_listen_default_does_not_collide_with_the_web_default_port` 钉住默认值。
 
-### 2.2 形态完整、但一次都没跑过的真实路径
+### 2.2 形态完整、但真机验证程度不一的真实路径
 
 | 项 | 现状 | 影响 |
 |---|---|---|
-| **真实抓取**（Bangumi / TMDb） | 抓取代码完整（限速 / 退避 / 缓存 / 断点续跑），**从未在真网络上跑过** | 面试问"真跑过吗"只能答"离线等价入口验过" |
-| **真实嵌入**（fastembed `bge-small-zh-v1.5`） | 代码完整，**从未加载过真模型**；CI 固定 `YIXIANG_EMBED_BACKEND=hash` | 真实语义指标未知；README 的 90% 是假嵌入的数字 |
+| **真实抓取**（Bangumi / TMDb） | **已跑过**（Task 7）：真网络抓一页并幂等入库，`evals/live/` 里 2 条 `-m live` 用例守着；本机已抓 333 部 | 面试问"真跑过吗"现在答得出；TMDb 那一路仍只验过离线入口 |
+| **真实嵌入**（fastembed `bge-small-zh-v1.5`） | **已跑过**（Task 8）：模型落 `~/.cache/fastembed`，333 部语料真嵌入 **90.0% / MRR 0.792**（31 部那行是 `hash` 假嵌入）；CI 仍固定 `YIXIANG_EMBED_BACKEND=hash` | 真实语义指标已回填进 [`NUMBERS.md`](./NUMBERS.md) 卡 2；真模型只在 nightly / 发版前跑 |
 | **judge `--live`** | 只跑过离线基线（均分 4.80）；`data/usage.jsonl` 里**没有一条 `role=judge` 的记录** | "真假模型评分"这条路没验过 |
 | **nightly 工作流** | **不存在**——`.github/workflows/` 下只有 `ci.yml` | README 与 TECH §13.6 都写"live 走 nightly"，实际没有这个定时任务 |
 
@@ -166,7 +166,7 @@ main 长期难以本地化。
 | T2 | golden 集两条已知 MISS 定案 | 「宫崎骏的龙猫」是语料缺导演字段、「名字里带夏天的动画」是 hash 假嵌入失手——**要么修，要么把"为什么不修"写成结论** |
 | T3 | 评测口径关口味 | **已收口**：README 评测段与 `NUMBERS.md` 都写了 `use_taste=False` |
 | T4 | `templates/user.md` 偏好写法的兼容期 | 新写法「`- 喜欢：悬疑、科幻`」与旧自由写法都能解析；决定什么时候删掉旧分支 |
-| T5 | D-24 降级标记的位置 | `E_EMBED_UNAVAILABLE` 只记 trace、不进 `result.error`（用户无感）。确认巡检够用 |
+| T5 | D-24 降级标记的位置 | **已确认（Task 8）**：`E_EMBED_UNAVAILABLE` 只记 trace、不进 `result.error`（用户无感），这条够用；但同源的 `rag.reindex_required` 会**静默退成纯 FTS5 而 `rag eval` 横幅仍写"嵌入 可用"**——结论是 trace 够用、**横幅不够，巡检不能只看横幅** |
 | T6 | 定时晨报推送 | 见 §2.1 |
 
 ### 2.4 文档与实现不一致（← **已全部修掉**，留档备查）

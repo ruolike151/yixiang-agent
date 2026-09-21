@@ -14,7 +14,6 @@ D-23 的分界线单独说一句：影视简介是**不可信文本**，进 prom
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 from dataclasses import replace
@@ -53,6 +52,15 @@ def _titles(text: str) -> list[str]:
     marker = text.rfind(MEDIA_SECTION)
     body = text[marker:] if marker != -1 else text
     return TITLE_RE.findall(body)
+
+
+def _rag_args(*argv: str):
+    """走**真解析器**取参数：手搓 ``argparse.Namespace`` 会在每次加 flag 时静默失效
+    （Task 26 给 ``rag ingest`` 加 ``--sort`` 时正是这样炸出 ``AttributeError`` 的）。
+    """
+    from yixiang.__main__ import build_parser
+
+    return build_parser().parse_args(["rag", *argv])
 
 
 class BrokenEmbedder:
@@ -546,18 +554,8 @@ def test_explain_search_renders_five_stages(corpus):
 def test_rag_cli_offline_end_to_end(settings, repo_root, capsys):
     """§1 验收表的离线等价入口：ingest（幂等）→ eval → explain-search 全程不联网。"""
     settings.embed_backend = "hash"  # 离线等价入口：确定性假后端，不下载模型
-    ingest_args = argparse.Namespace(
-        rag_command="ingest",
-        source="local",
-        file=str(repo_root.joinpath(*FIXTURE)),
-        tags="",
-        genres="",
-        pages=1,
-        limit=20,
-        since="",
-        api_key="",
-        resume=False,
-        dry_run=False,
+    ingest_args = _rag_args(
+        "ingest", "--source", "local", "--file", str(repo_root.joinpath(*FIXTURE))
     )
 
     assert rag_cmd.cmd_rag(settings, ingest_args) == 0
@@ -568,18 +566,7 @@ def test_rag_cli_offline_end_to_end(settings, repo_root, capsys):
     assert rag_cmd.cmd_rag(settings, ingest_args) == 0  # 连跑两次行数不变
     assert f"跳过 {CORPUS_SIZE}" in capsys.readouterr().out
 
-    eval_args = argparse.Namespace(
-        rag_command="eval",
-        holdout=False,
-        top_k=3,
-        source="",
-        file="",
-        tags="",
-        genres="",
-        pages=1,
-        limit=20,
-        api_key="",
-    )
+    eval_args = _rag_args("eval")
     assert rag_cmd.cmd_rag(settings, eval_args) == 0
     summary = capsys.readouterr().out
     assert "命中率" in summary and "MRR" in summary and "通过" in summary
@@ -592,18 +579,7 @@ def test_rag_cli_offline_end_to_end(settings, repo_root, capsys):
 def test_rag_cli_eval_refuses_an_empty_corpus(settings, capsys):
     """没有语料就如实退非零，不假装通过（§8.6 的第三条纪律）。"""
     settings.embed_backend = "hash"
-    args = argparse.Namespace(
-        rag_command="eval",
-        holdout=False,
-        top_k=3,
-        source="",
-        file="",
-        tags="",
-        genres="",
-        pages=1,
-        limit=20,
-        api_key="",
-    )
+    args = _rag_args("eval")
 
     assert rag_cmd.cmd_rag(settings, args) == 1
     assert "语料是空的" in capsys.readouterr().out

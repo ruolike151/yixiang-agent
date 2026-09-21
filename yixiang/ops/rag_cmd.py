@@ -59,6 +59,30 @@ def add_parsers(sub: Any) -> None:
     ingest.add_argument(
         "--since", default="", help="只要这之后的作品（YYYY-MM-DD，手动增量；不做自动追更）"
     )
+    ingest.add_argument(
+        "--sort",
+        choices=("heat", "rank", "score", "match"),
+        default="heat",
+        help="Bangumi 排序（默认 heat；关键词为空时 rank / score 是无效排序）",
+    )
+    ingest.add_argument(
+        "--min-rating",
+        type=float,
+        default=0.0,
+        help="平均分下限（默认 0；>0 时同时写进服务端 filter，客户端再判一次）",
+    )
+    ingest.add_argument(
+        "--min-votes",
+        type=int,
+        default=0,
+        help="评分人数下限（默认 0；服务端没有这个过滤，只能客户端判 rating.total）",
+    )
+    ingest.add_argument(
+        "--want",
+        type=int,
+        default=0,
+        help="目标**实收**条数：过滤 + 去重后到数就停（默认 0 = 只按 --pages 抓）",
+    )
     ingest.add_argument("--api-key", default="", help=f"TMDb API key（默认读环境变量 {TMDB_ENV}）")
     ingest.add_argument(
         "--resume", action="store_true", help="从 meta.ingest_cursor_<source> 接着跑"
@@ -191,6 +215,10 @@ def _ingest(settings: Settings, args: argparse.Namespace) -> int:
                 limit=args.limit,
                 api_key=args.api_key,
                 since=args.since,
+                sort=args.sort,
+                min_rating=args.min_rating,
+                min_votes=args.min_votes,
+                want=args.want,
                 resume=args.resume,
             )
         except Exception as exc:  # 网络 / 接口变动 / 文件缺失：如实说，不假装入库成功
@@ -227,6 +255,10 @@ def _collect(
     limit: int = PAGE_SIZE,
     api_key: str = "",
     since: str = "",
+    sort: str = "heat",
+    min_rating: float = 0.0,
+    min_votes: int = 0,
+    want: int = 0,
     resume: bool = False,
 ) -> list[Any]:
     """按 ``--source`` 取语料（抓取与写库解耦：这一步只读不写）。"""
@@ -245,6 +277,10 @@ def _collect(
                 resume=bool(resume),
                 limit=max(int(limit), 1),
                 since=str(since or "").strip(),
+                sort=str(sort or "heat").strip() or "heat",
+                min_rating=max(float(min_rating or 0.0), 0.0),
+                min_votes=max(int(min_votes or 0), 0),
+                want=max(int(want or 0), 0),
             )
         )
     key = api_key or os.environ.get(TMDB_ENV, "")

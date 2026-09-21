@@ -86,11 +86,28 @@ $ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval --source local --file ev
 top-3 命中率：90.0%（18/20，目标 ≥60%） · MRR 0.792 → 通过
 ```
 
+本机真抓一次（大盘 + 近五年增量两段，2026-09-21；出网需显式设 `HTTPS_PROXY=http://127.0.0.1:7897`）：
+
+```text
+$ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag ingest --source bangumi --sort heat --min-rating 8 --min-votes 500 --pages 25 --want 200
+bangumi：共 200 条 · 新增 200 · 更新 0 · 跳过 0 · 向量 231
+media 表现有 231 部作品。
+$ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag ingest --source bangumi --sort heat --min-rating 7.5 --min-votes 500 --since 2021-09-21 --pages 30 --want 200
+bangumi：共 128 条 · 新增 102 · 更新 0 · 跳过 26 · 向量 333
+media 表现有 333 部作品。
+$ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval
+检索评测（media.jsonl）：20 条查询 · top-3 · 语料 333 部 · 嵌入 可用 · 口味 关（只测相关性）
+top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
+```
+
 | 考卷 | 条数 | 语料 | 嵌入 | top-3 | MRR | 跑在哪 |
 |---|---|---|---|---|---|---|
 | `evals/golden/media.jsonl` | 20 | 31 部 | `hash` 可用 | **90.0%**（18/20） | 0.792 | 每次 PR + CI（门禁） |
 | 同上，**嵌入不可用**（纯 FTS5 降级） | 20 | 31 部 | 降级 | **85.0%**（17/20） | 0.800 | 只用于证明"降级仍可用" |
 | `evals/golden/media_holdout.jsonl` | 10 | 31 部 | `hash` 可用 | **100.0%**（10/10） | 0.867 | 发版前（防调参过拟合） |
+| `evals/golden/media.jsonl`，**真抓两段之后** | 20 | **333 部** | `hash` 可用 | **70.0%**（14/20） | **0.667** | 本机真抓一次（2026-09-21），**不进 CI** |
+
+> 口径说明：**31 部那三行的 90.0% / 0.792 / 85.0% / 100.0% 是 CI 每次跑的门禁数字；333 部那一行是本机真抓一次的结果，两者规模不同、不能互相替代。** `hash` 是假嵌入——语料从 31 部涨到 333 部后排序质量下降（MRR 0.792 → 0.667），但 top-3 仍在 60% 门禁之上；把这条拉回来是 Task 8（真实嵌入）的验收条件。333 部语料下的 6 条 MISS 是：`时间旅行题材`、`名字里带夏天的动画`、`宫崎骏的龙猫`、`不想看打斗的科幻`、`适合全家一起看的动画电影`、`有笑点但不是纯搞笑的犯罪片`（前两条与下面那张表里的是同一类问题）。
 
 两条已知 MISS（都是"用近义说法描述一部片"）：
 

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -34,7 +35,7 @@ class SyncSleep:
         self.calls.append(round(seconds, 6))
 
 
-def _bangumi_page(*ids: int) -> dict:
+def _bangumi_page(*ids: int, score: float = 7.5, votes: int = 5000) -> dict:
     """一页 Bangumi 响应（字段名与 ``/v0/search/subjects`` 的 ``data`` 一致）。"""
     return {
         "data": [
@@ -43,7 +44,8 @@ def _bangumi_page(*ids: int) -> dict:
                 "name": f"Subject {subject_id}",
                 "name_cn": f"条目 {subject_id}",
                 "platform": "TV",
-                "rating": {"score": 7.5},
+                # ``total`` 是评分人数：票数下限只能靠它判（服务端 filter 只认平均分）
+                "rating": {"score": score, "total": votes},
                 "tags": [{"name": "动画"}],
                 "date": f"2023-01-0{index + 1}",
                 "summary": "一句简介",
@@ -110,9 +112,10 @@ def test_two_pages_advance_the_cursor_and_cache_every_page(tmp_path, conn):
     offsets: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content.decode("utf-8"))
-        offsets.append(body["offset"])
-        start = body["offset"] + 1
+        # 分页参数在 query 上，不在 body 里（body 里那份会被接口静默忽略）
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        start = offset + 1
         return httpx.Response(200, json=_bangumi_page(start, start + 1))
 
     client = _client(handler)
@@ -138,7 +141,7 @@ def test_two_pages_advance_the_cursor_and_cache_every_page(tmp_path, conn):
     ]
     assert db.get_meta(conn, ingest.CURSOR_META.format(source="bangumi")) == "40"
     names = sorted(path.name for path in (tmp_path / ingest.RAW_DIRNAME).iterdir())
-    assert names == ["bangumi-all-all-0.json", "bangumi-all-all-20.json"]
+    assert names == ["bangumi-all-all-heat-0.json", "bangumi-all-all-heat-20.json"]
 
 
 def test_resume_continues_from_the_stored_cursor(tmp_path, conn):
@@ -146,9 +149,9 @@ def test_resume_continues_from_the_stored_cursor(tmp_path, conn):
     offsets: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content.decode("utf-8"))
-        offsets.append(body["offset"])
-        return httpx.Response(200, json=_bangumi_page(body["offset"] + 1))
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        return httpx.Response(200, json=_bangumi_page(offset + 1))
 
     first = _client(handler)
     try:
@@ -243,9 +246,310 @@ def test_the_raw_cache_is_utf8_json_so_a_human_can_read_it(tmp_path):
     finally:
         client.close()
 
-    raw = (tmp_path / ingest.RAW_DIRNAME / "bangumi-all-all-0.json").read_bytes()
+    raw = (tmp_path / ingest.RAW_DIRNAME / "bangumi-all-all-heat-0.json").read_bytes()
 
     # 显式写编码：这条断言的字面语义就是"落盘字节是 UTF-8"（UP012 认为默认值可省，
     # 但省掉之后断言的意图就只剩"能编成字节"，所以这里保留参数）
     assert "条目 1".encode("utf-8") in raw  # noqa: UP012
     assert b"\\u6761" not in raw  # ensure_ascii=False
+
+
+def test_the_page_params_travel_in_the_query_string_not_the_body(tmp_path):
+    """分页参数必须走 query（实测：塞 body 会被静默忽略，5 页拿回同一页）。"""
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen.append((str(request.url), request.url.params.get("limit", ""), body))
+        return httpx.Response(200, json=_bangumi_page(1))
+
+    client = _client(handler)
+    try:
+        ingest.fetch_bangumi(data_dir=tmp_path, client=client, sleep=SyncSleep())
+    finally:
+        client.close()
+
+    url, limit, body = seen[0]
+    assert limit == "20"
+    assert "offset=0" in url
+    assert "limit" not in body
+    assert "offset" not in body, "分页参数又被塞回 body 了"
+    assert body["sort"] == "heat", "批量拉取要用 heat；rank 在关键词为空时是个无效排序"
+
+
+def test_a_different_sort_never_reuses_another_sort_cache(tmp_path):
+    """缓存名必须编入 sort：换了排序还在读旧缓存，等于静默换回旧口径。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        calls.append(body["sort"])
+        return httpx.Response(200, json=_bangumi_page(1))
+
+    client = _client(handler)
+    try:
+        ingest.fetch_bangumi(
+            data_dir=tmp_path, client=client, sleep=SyncSleep(), sort="heat"
+        )
+        ingest.fetch_bangumi(
+            data_dir=tmp_path, client=client, sleep=SyncSleep(), sort="rank"
+        )
+    finally:
+        client.close()
+
+    assert calls == ["heat", "rank"], "rank 命中了 heat 写下的缓存"
+    names = sorted(path.name for path in (tmp_path / ingest.RAW_DIRNAME).iterdir())
+    assert names == ["bangumi-all-all-heat-0.json", "bangumi-all-all-rank-0.json"]
+
+
+def test_the_rating_and_vote_floor_is_enforced_on_the_client(tmp_path):
+    """票数下限只能在客户端判：服务端 ``filter.rating`` 只认平均分。
+
+    实测：``sort=score`` 的第一条是"1 票 10 分"的冷门条目——不设票数下限，
+    "高分榜"里会混进没人看过的条目。
+    """
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": 1, "name_cn": "一票满分", "rating": {"score": 10.0, "total": 1}},
+                    {"id": 2, "name_cn": "冷门高分", "rating": {"score": 9.0, "total": 120}},
+                    {"id": 3, "name_cn": "大众高分", "rating": {"score": 8.4, "total": 40575}},
+                    {"id": 4, "name_cn": "大众中分", "rating": {"score": 7.2, "total": 90000}},
+                    {"id": 5, "name_cn": "没有票数", "rating": {"score": 9.5}},
+                ]
+            },
+        )
+
+    client = _client(handler)
+    try:
+        items = ingest.fetch_bangumi(
+            data_dir=tmp_path,
+            client=client,
+            sleep=SyncSleep(),
+            min_rating=8.0,
+            min_votes=500,
+        )
+    finally:
+        client.close()
+
+    assert [item.source_id for item in items] == ["bangumi:3"]
+    # 服务端那道 filter 只是省流量，判定权在客户端
+    assert bodies[0]["filter"]["rating"] == [">=8"]
+
+
+def test_votes_fall_back_to_the_score_distribution_when_total_is_missing(tmp_path):
+    """``rating.count`` 是**分布字典**（``{"10": 6895, …}``），票数要按它求和。
+
+    实测：``rating.total`` 就是分布求和（孤独摇滚 40921）。直接 ``int(count)`` 会
+    把整条记录判成"没有票数"，把够格的条目一起丢掉。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": 1,
+                        "name_cn": "分布够票",
+                        "rating": {"score": 8.2, "count": {"8": 400, "9": 300}},
+                    },
+                    {
+                        "id": 2,
+                        "name_cn": "分布不够票",
+                        "rating": {"score": 8.2, "count": {"10": 7}},
+                    },
+                    {"id": 3, "name_cn": "没有票数", "rating": {"score": 8.2}},
+                ]
+            },
+        )
+
+    client = _client(handler)
+    try:
+        items = ingest.fetch_bangumi(
+            data_dir=tmp_path, client=client, sleep=SyncSleep(), min_votes=500
+        )
+    finally:
+        client.close()
+
+    assert [item.source_id for item in items] == ["bangumi:1"]
+
+
+def test_the_floor_and_since_are_written_into_the_cache_name(tmp_path):
+    """大盘与增量的 offset 会撞车：过滤口径不进文件名，两段就会互相读旧页。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_bangumi_page(1))
+
+    client = _client(handler)
+    try:
+        ingest.fetch_bangumi(
+            data_dir=tmp_path,
+            client=client,
+            sleep=SyncSleep(),
+            min_rating=8.0,
+            min_votes=500,
+        )
+        ingest.fetch_bangumi(
+            data_dir=tmp_path,
+            client=client,
+            sleep=SyncSleep(),
+            min_rating=7.5,
+            min_votes=500,
+            since="2021-09-21",
+        )
+    finally:
+        client.close()
+
+    names = sorted(path.name for path in (tmp_path / ingest.RAW_DIRNAME).iterdir())
+    assert names == [
+        "bangumi-all-2021-09-21-heat-r7.5-v500-0.json",
+        "bangumi-all-all-heat-r8-v500-0.json",
+    ]
+
+
+def test_want_keeps_paging_until_enough_entries_survive_the_floor(tmp_path):
+    """``want`` 数的是**实收**：每页都有被票数下限筛掉的，页数就得往后走。"""
+    offsets: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": offset + 1,
+                        "name_cn": f"合格 {offset}",
+                        "rating": {"score": 8.5, "total": 5000},
+                    },
+                    {
+                        "id": offset + 2,
+                        "name_cn": f"冷门 {offset}",
+                        "rating": {"score": 9.9, "total": 3},
+                    },
+                ]
+            },
+        )
+
+    client = _client(handler)
+    try:
+        items = ingest.fetch_bangumi(
+            data_dir=tmp_path,
+            client=client,
+            sleep=SyncSleep(),
+            pages=10,
+            want=3,
+            min_votes=500,
+        )
+    finally:
+        client.close()
+
+    assert offsets == [0, 20, 40]
+    assert len(items) == 3
+
+
+def test_duplicate_ids_inside_one_fetch_are_collapsed(tmp_path):
+    """深翻时接口会重复吐同一批：同一次抓取里也要按 ``source_id`` 去重。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_bangumi_page(1, 2))
+
+    client = _client(handler)
+    try:
+        items = ingest.fetch_bangumi(
+            data_dir=tmp_path, client=client, sleep=SyncSleep(), pages=3
+        )
+    finally:
+        client.close()
+
+    assert [item.source_id for item in items] == ["bangumi:1", "bangumi:2"]
+
+
+def test_two_segments_merge_without_duplicating_a_subject(tmp_path, conn):
+    """大盘与增量有重叠：合并后同一 ``source_id`` 只占一行，实收按去重后计。"""
+    from yixiang.rag.embed import HashEmbedder
+
+    def classic(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_bangumi_page(1, 2, 3, score=8.5))
+
+    def recent(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_bangumi_page(2, 3, 4, score=7.6))
+
+    classic_client = _client(classic)
+    try:
+        classic_items = ingest.fetch_bangumi(
+            data_dir=tmp_path,
+            conn=conn,
+            client=classic_client,
+            sleep=SyncSleep(),
+            min_rating=8.0,
+            min_votes=500,
+        )
+    finally:
+        classic_client.close()
+
+    recent_client = _client(recent)
+    try:
+        recent_items = ingest.fetch_bangumi(
+            data_dir=tmp_path,
+            conn=conn,
+            client=recent_client,
+            sleep=SyncSleep(),
+            min_rating=7.5,
+            min_votes=500,
+            since="2021-09-21",
+        )
+    finally:
+        recent_client.close()
+
+    embedder = HashEmbedder()
+    first = ingest.ingest_items(conn, classic_items, source="bangumi", embedder=embedder)
+    second = ingest.ingest_items(conn, recent_items, source="bangumi", embedder=embedder)
+
+    assert first.inserted == 3
+    assert second.inserted == 1, "重叠的 2/3 又被当成新条目入库了"
+    assert second.skipped == 2
+    rows = conn.execute("SELECT COUNT(*) AS n FROM media").fetchone()["n"]
+    assert rows == 4
+
+
+def test_collect_passes_the_segment_knobs_through_to_the_fetcher():
+    """``--sort`` / ``--min-rating`` / ``--min-votes`` / ``--want`` 一路透传。"""
+    from types import SimpleNamespace
+
+    from yixiang.ops import rag_cmd
+
+    seen: dict[str, object] = {}
+
+    class StubIngest:
+        @staticmethod
+        def fetch_bangumi(**kwargs):
+            seen.update(kwargs)
+            return []
+
+    rag_cmd._collect(
+        StubIngest,
+        SimpleNamespace(data_dir=Path("data")),
+        None,
+        source="bangumi",
+        pages=25,
+        limit=20,
+        sort="heat",
+        min_rating=8.0,
+        min_votes=500,
+        want=200,
+    )
+
+    assert seen["sort"] == "heat"
+    assert seen["pages"] == 25
+    assert seen["limit"] == 20
+    assert seen["min_rating"] == 8.0
+    assert seen["min_votes"] == 500
+    assert seen["want"] == 200

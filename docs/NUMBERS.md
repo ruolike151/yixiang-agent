@@ -100,6 +100,11 @@ $ YIXIANG_EMBED_BACKEND=hash python -m yixiang rag eval
 top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 ```
 
+语料规模：**31（离线样例）+ 302（Bangumi 真抓两段去重后：大盘 200 + 近五年增量新增 102）= 333 部**。
+那 302 部来自**真网络**（不是 fixture），原始响应按"排序 + 过滤口径"分名落在 `data/raw/`（`data/` 不进库）；
+这条真网络路径（真响应 + 落盘 + 幂等入库）由 `evals/live/test_real_paths.py` 守着，跑法
+`pytest evals/live -m live`，**默认门禁把它整棵目录排除在外**（`-m "not live"`）。
+
 | 考卷 | 条数 | 语料 | 嵌入 | top-3 | MRR | 跑在哪 |
 |---|---|---|---|---|---|---|
 | `evals/golden/media.jsonl` | 20 | 31 部 | `hash` 可用 | **90.0%**（18/20） | 0.792 | 每次 PR + CI（门禁） |

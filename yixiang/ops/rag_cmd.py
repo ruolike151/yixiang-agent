@@ -281,6 +281,8 @@ def _collect(
                 min_rating=max(float(min_rating or 0.0), 0.0),
                 min_votes=max(int(min_votes or 0), 0),
                 want=max(int(want or 0), 0),
+                # 只给 Bangumi 传：TMDb 下面那条调用**不加**，它是另一个出口
+                proxy=str(getattr(settings, "bangumi_proxy", "") or ""),
             )
         )
     key = api_key or os.environ.get(TMDB_ENV, "")

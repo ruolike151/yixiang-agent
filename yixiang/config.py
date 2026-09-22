@@ -111,6 +111,13 @@ class Settings:
     # 只用来读**自己的**收藏（Task 28）。搜索与条目详情免 token，
     # 所以空着也能跑，doctor 只告警、validate() 不报错。
     bangumi_token: str = ""
+    # 只给 Bangumi 出口用的代理。为什么要这一项：本机直连 ``api.bgm.tv:443`` 是
+    # **超时**（8.3s ConnectTimeout，开着 VPN 也一样——VPN 是代理模式、不接管直连），
+    # 而走 ``127.0.0.1:7897`` 上那个代理时全部接口 200。写全局 ``HTTPS_PROXY`` 会让
+    # **所有**出站流量改道（模型端点、TMDb、将来任何一个新接口），粒度太粗，所以收成
+    # 这一项：只喂给 Bangumi 的四条链路（实时搜索 / 条目详情 / 收藏画像 / 批处理抓取）。
+    # 留空 = 老行为一个字节不变（httpx 照旧看环境变量与系统代理）；validate() 不为它报错。
+    bangumi_proxy: str = ""
 
     # ── QQ（P2）──
     qq_enabled: bool = False

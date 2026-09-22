@@ -693,7 +693,8 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 # 所以这里留空，由 search_bangumi 自己返回可行动的错误。
                 "required": [],
             },
-            fn=partial(bangumi.search_bangumi, conn, now),
+            # 出口代理在这一层注入（Task 30）：工具支持 proxy，注册时不传照样等于没配
+            fn=partial(bangumi.search_bangumi, conn, now, proxy=settings.bangumi_proxy),
             side_effect=False,
             timeout_s=30.0,
         )
@@ -727,7 +728,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 },
                 "required": ["subject_id"],
             },
-            fn=bangumi.bangumi_subject,
+            fn=partial(bangumi.bangumi_subject, proxy=settings.bangumi_proxy),
             side_effect=False,
             timeout_s=40.0,
         )

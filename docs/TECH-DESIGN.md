@@ -248,6 +248,7 @@ data/                  # 运行时生成、gitignore：state.db、soul.md、user
 | `YIXIANG_EMBED_BACKEND` | `fastembed` | | `fastembed` / `sentence-transformers` / `api` |
 | `YIXIANG_EMBED_MODEL` | `BAAI/bge-small-zh-v1.5` | | 512 维 |
 | `YIXIANG_DATA_DIR` | `./data` | | 运行时可写目录 |
+| `YIXIANG_BANGUMI_PROXY` | 空 | | **只给 Bangumi** 的出口代理（如 `http://127.0.0.1:7897`）：本机直连 `api.bgm.tv` 超时、而全局 `HTTPS_PROXY` 会连模型端点一起改道时填它；留空 = 老行为（httpx 看环境变量 / 系统代理），模型与 TMDb 永不走这里 |
 | `YIXIANG_QQ_ENABLED` | `0` | | 是否启动 OneBot 反向 WS |
 | `YIXIANG_QQ_LISTEN` | `127.0.0.1:8766` | | 反向 WS 监听地址（8765 留给 Web 控制台，**不要**改回同号） |
 | `YIXIANG_QQ_TOKEN` | 空 | | OneBot access_token（若 NapCat 侧配置了） |

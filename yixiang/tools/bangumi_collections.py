@@ -124,15 +124,19 @@ def fetch_collections(
     pages: int = MAX_PAGES,
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
+    proxy: str = "",
 ) -> list[dict]:
-    """按 ``offset`` 翻页读某个用户的收藏；``user="-"`` 先经 ``/v0/me`` 换成本人用户名。"""
+    """按 ``offset`` 翻页读某个用户的收藏；``user="-"`` 先经 ``/v0/me`` 换成本人用户名。
+
+    ``proxy`` 只作用于这条出口（``YIXIANG_BANGUMI_PROXY``，见 ``_new_client``）。
+    """
     pause = sleep or time.sleep
     page_size = _clamp_int(limit, 1, MAX_LIMIT, MAX_LIMIT)
     token_text = str(token or "").strip()
     who = str(user or "").strip() or SELF_USER
     headers = {"Authorization": f"Bearer {token_text}"} if token_text else {}
     owned = client is None
-    http = client or _new_client()
+    http = client or _new_client(proxy)
     rows: list[dict[str, Any]] = []
     total: int | None = None
     try:
@@ -301,11 +305,13 @@ def sync_taste_profile(
 ) -> str:
     """读自己的收藏 → 生成口味画像；``write=True`` 才写 ``data/user.md`` 的「偏好」段。"""
     token = str(getattr(settings, "bangumi_token", "") or "").strip()
+    # 出口与搜索 / 详情 / 抓取同一条：settings 里配了代理就跟着走（没配 = 老行为）
+    proxy = str(getattr(settings, "bangumi_proxy", "") or "")
     if not token:
         # 不发请求、不落盘：没有 token 时"读自己的收藏"是结构性做不到，不是网络问题
         return error_text("missing_token", "bangumi_token", _MISSING_TOKEN_HINT)
     try:
-        rows = fetch_collections(user, token=token, client=client, sleep=sleep)
+        rows = fetch_collections(user, token=token, client=client, sleep=sleep, proxy=proxy)
     except BangumiError as exc:
         return error_text("bangumi_unavailable", "bangumi_token", f"读收藏失败：{exc}")
     except Exception as exc:  # 兜底：任何没预料到的异常也要变成可行动的错误
@@ -356,8 +362,12 @@ def _write_preferences(settings: Any, liked: list[str], disliked: list[str]) -> 
 
 
 # ------------------------------------------------------------------ 小工具
-def _new_client() -> httpx.Client:
-    return httpx.Client(timeout=TIMEOUT_S, headers={"User-Agent": USER_AGENT})
+def _new_client(proxy: str = "") -> httpx.Client:
+    """新建客户端；``proxy`` 非空才写进 kwargs（留空 = httpx 自己看环境变量，老行为）。"""
+    kwargs: dict[str, Any] = {"timeout": TIMEOUT_S, "headers": {"User-Agent": USER_AGENT}}
+    if str(proxy or "").strip():
+        kwargs["proxy"] = str(proxy).strip()
+    return httpx.Client(**kwargs)
 
 
 def _clamp_int(value: Any, low: int, high: int, default: int) -> int:

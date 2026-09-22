@@ -424,6 +424,7 @@ def fetch_bangumi(
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
     limit: int = PAGE_SIZE,
+    proxy: str = "",
 ) -> list[MediaItem]:
     """抓 Bangumi 动画条目（``/v0/search/subjects``）；单线程 + 限速 + 缓存。
 
@@ -432,6 +433,9 @@ def fetch_bangumi(
     ``heat`` 才是批量拉取的口径。``min_rating`` / ``min_votes`` 是选番的地板
     （服务端 ``filter.rating`` 只认平均分，**票数只能在客户端判**）；``want`` 数的是
     **实收**——过滤 + 去重之后的条数到数就停，``0`` 表示只按 ``pages`` 抓。
+
+    ``proxy`` 只喂给 Bangumi 这一条出口（``YIXIANG_BANGUMI_PROXY``）；``fetch_tmdb``
+    有意**不收**它——TMDb 是另一个出口，别顺手带上。
     """
     tag_list = [str(tag).strip() for tag in tags if str(tag).strip()]
     sort = str(sort or "heat").strip() or "heat"
@@ -463,7 +467,14 @@ def fetch_bangumi(
                 min_votes=floor_votes,
                 offset=current,
             ),
-            _bangumi_fetcher(body, limit=limit, offset=current, client=client, sleep=sleep),
+            _bangumi_fetcher(
+                body,
+                limit=limit,
+                offset=current,
+                client=client,
+                sleep=sleep,
+                proxy=proxy,
+            ),
         )
         for record in payload.get("data") or []:
             if not _bangumi_meets_floor(
@@ -548,6 +559,7 @@ def _bangumi_fetcher(
     offset: int,
     client: Any,
     sleep: Callable[[float], None] | None,
+    proxy: str = "",
 ) -> Callable[[], dict[str, Any]]:
     """绑定好本页参数再交给 ``_cached_json``（避免闭包捕获到循环变量）。
 
@@ -560,6 +572,7 @@ def _bangumi_fetcher(
         params={"limit": limit, "offset": offset},
         client=client,
         sleep=sleep,
+        proxy=proxy,
     )
 
 
@@ -656,10 +669,11 @@ def _post_json(
     params: dict[str, Any] | None = None,
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
+    proxy: str = "",
 ) -> dict[str, Any]:
     """POST 也能带 query 参数：Bangumi 的分页参数**只认 URL**（见 ``_bangumi_fetcher``）。"""
     return _request_json(
-        "POST", url, body=body, params=params, client=client, sleep=sleep
+        "POST", url, body=body, params=params, client=client, sleep=sleep, proxy=proxy
     )
 
 
@@ -681,6 +695,7 @@ def _request_json(
     params: dict[str, Any] | None = None,
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
+    proxy: str = "",
 ) -> dict[str, Any]:
     """一次重试封装的 JSON 请求：最多 ``MAX_RETRIES`` 次，全失败就抛。
 
@@ -691,14 +706,21 @@ def _request_json(
       * 第 3 次尝试前睡 ``2.0s``（``attempt × REQUEST_INTERVAL_S``），失败后再睡 ``1.0s``。
 
     也就是"每次失败固定 1s + 每次重试前 ``attempt × 1s``"，共 5 段睡眠。
+
+    ``proxy`` 只作用于**自己新建**的客户端（``client=`` 传进来时由调用方决定出口）；
+    留空时**不写** ``proxy`` 键，httpx 照旧看环境变量 / 系统代理。
     """
     import httpx
 
     pause = sleep or time.sleep
     owned = client is None
-    http = client or httpx.Client(
-        timeout=15.0, headers={"User-Agent": "yixiang/0.1 (personal agent)"}
-    )
+    kwargs: dict[str, Any] = {
+        "timeout": 15.0,
+        "headers": {"User-Agent": "yixiang/0.1 (personal agent)"},
+    }
+    if str(proxy or "").strip():
+        kwargs["proxy"] = str(proxy).strip()
+    http = client or httpx.Client(**kwargs)
     last: Exception | None = None
     try:
         for attempt in range(MAX_RETRIES):

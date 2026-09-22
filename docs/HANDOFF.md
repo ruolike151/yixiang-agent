@@ -149,6 +149,14 @@ main 长期难以本地化。
 > 这条撞车只在"网关与控制台同时开"时发作，报错却指向"端口被占用"，所以由 `test_doctor.py` 的
 > `test_the_qq_listen_default_does_not_collide_with_the_web_default_port` 钉住默认值。
 
+> ✅ **Bangumi 直连不通已给出配置位**：本机直连 `api.bgm.tv:443` 是**超时**（17.5s 后
+> `timed out`，开着 VPN 也一样——VPN 是代理模式、不接管直连），而设全局 `HTTPS_PROXY=http://127.0.0.1:7897`
+> 会把模型端点与 TMDb 一起改道，粒度太粗。所以新增 `YIXIANG_BANGUMI_PROXY`（`.env.example` 的
+> Bangumi 段），**只喂**四条 Bangumi 链路：实时搜索 / 条目详情 / 收藏画像 / `rag ingest --source bangumi`。
+> 实测走代理搜索 1.08s、详情 0.82s；不填 = 老行为一个字节不变。接线由
+> `evals/deterministic/test_bangumi_proxy.py` 的 8 条用例守着（探针只记 Client 的 kwargs，
+> **一条网络请求都不发**）。查不到"Bangumi 为什么全 500/超时"时先看这一项。
+
 ### 2.2 形态完整、但真机验证程度不一的真实路径
 
 | 项 | 现状 | 影响 |

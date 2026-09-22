@@ -79,12 +79,16 @@ def search_bangumi(
     limit: int = DEFAULT_LIMIT,
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
+    proxy: str = "",
 ) -> str:
     """按标题/别名 + 硬过滤在 Bangumi 上**实时**搜番，返回条目行与检索口径。
 
     ``keyword`` 与 ``tag`` 至少要给一个；两个都不给是**可行动的错误**，不是异常。
     所以 ``keyword`` 必须有默认值：位置必填会让"只按题材找"的调用在进函数体之前
     就 ``TypeError``，下面那句 missing_query 兜底永远走不到（2026-09-22 实测）。
+
+    ``proxy`` 只作用于这一条出口（``YIXIANG_BANGUMI_PROXY``，见 ``_new_client``）；
+    留空时 httpx 照旧看环境变量 / 系统代理。
     """
     text = str(keyword or "").strip()
     tag_text = str(tag or "").strip()
@@ -115,7 +119,14 @@ def search_bangumi(
     params = {"limit": _clamp_limit(limit), "offset": 0}
 
     try:
-        payload = _request(SEARCH_ENDPOINT, body=body, params=params, client=client, sleep=sleep)
+        payload = _request(
+            SEARCH_ENDPOINT,
+            body=body,
+            params=params,
+            client=client,
+            sleep=sleep,
+            proxy=proxy,
+        )
     except Exception as exc:  # 网络 / 状态码 / JSON 解析：都能降级
         return _degrade(conn, now, text or tag_text, exc)
 
@@ -195,6 +206,7 @@ def bangumi_subject(
     with_staff: bool = False,
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
+    proxy: str = "",
 ) -> str:
     """按 id 取一部番的详情（原名 / 别名 / 首播 / 集数 / 评分 / 简介），可选关联条目与职员。"""
     try:
@@ -205,7 +217,7 @@ def bangumi_subject(
         return error_text("bad_value", "subject_id", f"id 必须是正整数，收到 {sid}")
 
     owned = client is None
-    http = client or _new_client()
+    http = client or _new_client(proxy)
     pause = sleep or time.sleep
     try:
         try:
@@ -316,10 +328,19 @@ def _render_staff(rows: Any) -> list[str]:
 
 
 # ------------------------------------------------------------------ HTTP
-def _new_client() -> Any:
+def _new_client(proxy: str = "") -> Any:
+    """新建一个 httpx 客户端；``proxy`` 非空才写进 kwargs。
+
+    **留空时不许写 ``proxy=""``**：老行为是 httpx 自己决定出口（``trust_env=True``
+    会读 ``HTTPS_PROXY`` / 系统代理）。塞一个空串进去等于把这条路堵死，而且没有任何
+    报错会提醒你——"没配代理"和"配了空代理"必须是同一个行为。
+    """
     import httpx
 
-    return httpx.Client(timeout=TIMEOUT_S, headers={"User-Agent": USER_AGENT})
+    kwargs: dict[str, Any] = {"timeout": TIMEOUT_S, "headers": {"User-Agent": USER_AGENT}}
+    if str(proxy or "").strip():
+        kwargs["proxy"] = str(proxy).strip()
+    return httpx.Client(**kwargs)
 
 
 def _request(
@@ -328,6 +349,7 @@ def _request(
     body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
     client: Any = None,
+    proxy: str = "",
     sleep: Callable[[float], None] | None = None,
     attempts: int = MAX_ATTEMPTS,
 ) -> Any:
@@ -339,7 +361,7 @@ def _request(
     """
     pause = sleep or time.sleep
     owned = client is None
-    http = client or _new_client()
+    http = client or _new_client(proxy)
     last: Exception | None = None
     try:
         for attempt in range(max(int(attempts), 1)):

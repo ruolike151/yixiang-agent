@@ -21,16 +21,20 @@ from yixiang.scheduler.jobs import (
     run_job,
     spec_for,
 )
+from yixiang.scheduler.runtime import build_scheduler, install_jobs, serve
 
 __all__ = [
     "JOBS",
     "JobContext",
     "JobSpec",
+    "build_scheduler",
     "configure",
     "context",
     "ensure_runtime",
     "idempotency_key",
+    "install_jobs",
     "reset",
     "run_job",
+    "serve",
     "spec_for",
 ]

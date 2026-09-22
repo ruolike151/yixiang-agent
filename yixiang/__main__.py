@@ -3,8 +3,9 @@
 命令清单（``--help`` 里必须能看到）：chat / web / serve / doctor / rag / ops / eval /
 migrate / memory（记忆运维）/ skills（技能校验）/ brief（按需日报）/ backup（备份与回收）。
 ``web`` 是本机测试前端（只绑 127.0.0.1，标准库实现，见 ``yixiang/web/``）；
-``serve``（QQ + 定时推送，P2）在这个阶段只打印"还没实现"并退非零——**如实告知**比
-假装成功重要，这条在评测脚本里也会被沿用。
+``serve`` 是常驻进程：QQ 网关（OneBot v11 反向 WS）与 APScheduler 定时任务，
+谁开由 ``YIXIANG_QQ_ENABLED`` / ``YIXIANG_SCHEDULER_ENABLED`` 决定（``--qq`` /
+``--scheduler`` 可强制）。两个都没开时它**退 2 并说清该改哪个键**。
 """
 
 from __future__ import annotations
@@ -58,7 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
     web = sub.add_parser("web", help="启动本地 Web 控制台（测试前端，只绑回环地址）")
     web.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1）")
     web.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
-    sub.add_parser("serve", help="启动网关（QQ 属 P2，本阶段未实现）")
+    serve = sub.add_parser("serve", help="常驻：QQ 网关 + 定时任务（按配置开关起）")
+    serve.add_argument("--host", default=None, help="QQ 监听地址（默认取 YIXIANG_QQ_LISTEN）")
+    serve.add_argument("--port", type=int, default=None, help="QQ 监听端口（默认取同一处）")
+    serve.add_argument("--qq", action="store_true", help="强制开 QQ 网关（等价 YIXIANG_QQ_ENABLED=1）")
+    serve.add_argument(
+        "--scheduler", action="store_true", help="强制开调度器（等价 YIXIANG_SCHEDULER_ENABLED=1）"
+    )
     sub.add_parser("doctor", help="七项启动自检")
     sub.add_parser("migrate", help="应用数据库迁移")
     # rag（ingest / reindex / eval）与 brief 的命令实现在 ops/rag_cmd.py，保持这里瘦
@@ -164,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         case "backup":
             return cmd_backup(settings, args)
         case "serve":
-            return _not_yet("serve", "P2（QQ 网关）")
+            return cmd_serve(settings, args)
         case _:  # pragma: no cover - argparse 已挡住未知命令
             parser.error(f"未知命令 {args.command}")
             return 2
@@ -185,6 +192,26 @@ def cmd_web(settings: Settings, args: argparse.Namespace) -> int:
     from yixiang.web import serve
 
     return serve(settings, host=args.host, port=args.port)
+
+
+def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
+    """``yixiang serve``：常驻进程（QQ 网关 + APScheduler，P2）。"""
+    from yixiang.runtime import eventloop
+    from yixiang.scheduler.runtime import serve as serve_forever
+
+    # loop 由入口建、也由入口关：``serve`` 是协程，里面只有 await（没有套娃的 run）
+    try:
+        return eventloop.run(
+            serve_forever(
+                settings,
+                host=args.host,
+                port=args.port,
+                qq=True if args.qq else None,
+                scheduler=True if args.scheduler else None,
+            )
+        )
+    finally:
+        eventloop.shutdown()
 
 
 def cmd_migrate(settings: Settings) -> int:

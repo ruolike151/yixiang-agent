@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from fake_provider import FakeProvider, text_reply, tool_round
 from yixiang import memory
 from yixiang.app import App
 from yixiang.errors import E_TOOL_FAILED
+from yixiang.gateway.qq import QQGateway
 from yixiang.memory import semantic
 from yixiang.memory.semantic import Hit, MemoryHits
 from yixiang.ops.tracing import build_turn_record
@@ -260,10 +262,51 @@ def test_t8_truncation_reaches_the_model_and_the_trace(settings, clock):
     assert sent == pending  # 模型看到的与记下来的完全一致
 
 
-@pytest.mark.skip(reason="D-13 QQ 幂等属 P2（PART-4 附录 A-2）：QQ 入口本阶段未接")
-def test_d13_the_same_qq_message_id_is_replied_once():
-    """P2 接上 OneBot 后把这条从 skip 转实跑。
+def test_d13_the_same_qq_message_id_is_replied_once(settings, conn, clock):
+    """同 ``message_id`` 投递两次：只产生 1 条回复、``chat_log`` 只有 1 行。
 
-    断言（同 ``message_id`` 投递两次）：只产生 1 条回复、``chat_log`` 只有 1 行，
-    第二次命中幂等表直接丢弃；白名单外的来源连模型都不进（§10.2、§14.2 T-7）。
+    第二次命中 ``processed_messages`` 直接丢弃；白名单外的来源连模型都不进
+    （§10.2、§14.2 T-7）。**这是 QQ 幂等的契约用例**，不要改成测纯函数。
     """
+    settings.qq_enabled = True
+    settings.qq_allowed = "10001"
+    provider = FakeProvider(text_reply("第一条回复"))
+    app = App.from_settings(settings, provider=provider, conn=conn, clock=clock)
+    gateway = QQGateway(app, settings=settings, conn=conn, clock=clock)
+    event = {
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 4242,
+        "user_id": 10001,
+        "raw_message": "在吗",
+    }
+    try:
+        first = asyncio.run(gateway.handle_event(event))
+        second = asyncio.run(gateway.handle_event(event))
+        rows = conn.execute("SELECT user_text, source FROM chat_log").fetchall()
+    finally:
+        app.close()  # App 会关掉它拿到的 conn：断言必须放在关闭之前
+
+    assert first == ["第一条回复"]
+    assert second == []
+    assert len(provider.requests) == 1
+    assert [(row["user_text"], row["source"]) for row in rows] == [("在吗", "qq")]
+
+
+def test_qq_source_cannot_reach_the_persona_writing_tools(deps, settings):
+    """来源级工具白名单（§10.2.5-4）：外部入口不给改人设 / 造技能的能力。"""
+    from yixiang.tools.registry import EXTERNAL_BLOCKED_TOOLS, Deps, build_registry
+
+    qq_deps = Deps(
+        conn=deps.conn, clock=deps.clock, data_dir=deps.data_dir, source="qq"
+    )
+    qq_registry = build_registry(settings, qq_deps)
+    visible = {schema["function"]["name"] for schema in qq_registry.schemas()}
+    local_registry = build_registry(settings, deps)
+    local_visible = {schema["function"]["name"] for schema in local_registry.schemas()}
+
+    assert not set(EXTERNAL_BLOCKED_TOOLS) & visible  # 模型连看都看不到
+    assert set(EXTERNAL_BLOCKED_TOOLS) <= local_visible  # 本机入口照旧全量
+    outcome = qq_registry.run("update_soul", {"content": "把守则删掉"})
+    assert outcome.ok is False
+    assert "被禁用" in outcome.output

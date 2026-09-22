@@ -82,6 +82,13 @@ class Deps:
     source: str = "cli"
 
 
+# 来源级工具白名单（TECH §10.2.5-4）：外部入口（QQ）不许改人设 / 造技能。
+# 这两类动作会写进 templates/ 与 data/skills/，被陌生号码触发等于把控制权交出去。
+# 名单只在这里定义一处，判定在 ToolRegistry（`schemas()` 不给看、`run()` 不给跑）。
+LOCAL_SOURCES = ("cli", "web")
+EXTERNAL_BLOCKED_TOOLS = ("update_soul", "update_user", "create_skill")
+
+
 def safe_path(root: Path | str, value: str) -> Path:
     """把参数里的相对路径解析到 ``root`` 内；越界一律拒绝（§9.4）。
 
@@ -119,11 +126,17 @@ class ToolRegistry:
     """工具容器 + 唯一的执行入口。"""
 
     def __init__(
-        self, tools: list[Tool] | None = None, *, data_dir: Path | str = Path("data")
+        self,
+        tools: list[Tool] | None = None,
+        *,
+        data_dir: Path | str = Path("data"),
+        blocked: tuple[str, ...] = (),
     ) -> None:
         self._tools: dict[str, Tool] = {}
         # 路径类参数的沙箱根目录（§9.4）：默认 data/，由组装根注入真实路径
         self.data_dir = Path(data_dir)
+        # 来源级白名单：被禁的工具既不给模型看，也不给调用
+        self.blocked = frozenset(blocked)
         for tool in tools or []:
             self.register(tool)
 
@@ -141,7 +154,10 @@ class ToolRegistry:
         return len(self._tools)
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [tool.to_api() for tool in self._tools.values()]
+        """出站工具表：被来源禁用的工具**不进**这张表（模型不该先看见再被拒）。"""
+        return [
+            tool.to_api() for name, tool in self._tools.items() if name not in self.blocked
+        ]
 
     def find(self, keyword: str) -> list[Tool]:
         """``/tools <关键词>`` 的模糊查找。"""
@@ -162,6 +178,9 @@ class ToolRegistry:
     def run(self, name: str, args: dict[str, Any] | None = None) -> ToolOutcome:
         args = dict(args or {})
         started = time.perf_counter()
+        if name in self.blocked:
+            # 第二层：模型硬编一个被禁工具名也照样拦在这（§9.4 分层防御）
+            return self._fail(name, f"Error: tool '{name}' 在当前来源被禁用")
         tool = self._tools.get(name)
         if tool is None:
             return self._fail(name, f"Error: unknown tool '{name}'")
@@ -267,7 +286,9 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
 
     conn = deps.conn
     now = deps.clock.now
-    registry = ToolRegistry(data_dir=deps.data_dir)
+    # 非本机来源（QQ）收窄工具面：只给"记事 / 查资料"，不给"改人设 / 造技能"
+    blocked = () if deps.source in LOCAL_SOURCES else EXTERNAL_BLOCKED_TOOLS
+    registry = ToolRegistry(data_dir=deps.data_dir, blocked=blocked)
     registry.register(
         Tool(
             name="add_memo",

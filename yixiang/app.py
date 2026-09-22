@@ -170,10 +170,16 @@ class App:
         observer: Observer | None = None,
         stream: bool = True,
         tools: bool = True,
+        registry: ToolRegistry | None = None,
     ) -> TurnResult:
-        """一轮对话的完整链路：loop → 落 chat_log → 写 trace。"""
+        """一轮对话的完整链路：loop → 落 chat_log → 写 trace。
+
+        ``registry`` 显式传入时用它（QQ 这类外部来源会带一份**收窄过**的注册表），
+        否则用 App 自己那份。除此之外没有第二条差别——来源不该改动主链路。
+        """
         active = session or self.session
-        if active is None or self.registry is None or self.provider is None:
+        active_registry = registry or self.registry
+        if active is None or active_registry is None or self.provider is None:
             raise RuntimeError("App 尚未装配完成（缺 session / registry / provider）")
         turn_id = new_turn_id(self.clock)
         active.begin_turn(text, turn_id=turn_id)
@@ -185,9 +191,11 @@ class App:
         clear_rag_warnings()
         decision = await self._gate(user_text, active)
         result = await run_loop(
-            active, self.registry, self.provider, observer, stream=stream, tools=tools
+            active, active_registry, self.provider, observer, stream=stream, tools=tools
         )
-        result = await self._verify_memory_write(active, result, observer, stream, tools)
+        result = await self._verify_memory_write(
+            active, result, observer, stream, tools, registry=active_registry
+        )
         result.turn_id = turn_id
         result.model = result.model or self.settings.model_for("main")
         result.working_memory = active.working_memory()
@@ -241,11 +249,14 @@ class App:
         observer: Observer | None,
         stream: bool,
         tools: bool,
+        *,
+        registry: ToolRegistry | None = None,
     ) -> TurnResult:
         """§7.9 阶段 3：REMEMBER 轮没写记忆就纠错重试一次，仍失败则如实标记。"""
+        active_registry = registry or self.registry
         if _wrote_memory(result):
             return result
-        if active.turn_intent != "REMEMBER" or self.registry is None or self.provider is None:
+        if active.turn_intent != "REMEMBER" or active_registry is None or self.provider is None:
             result.memory_write_failed = _memory_tool_failed(result)
             return result
         # 让重试看得见上一轮的回复：临时塞两条进历史，跑完再撤回
@@ -254,7 +265,7 @@ class App:
         active.extra_contract = MEMORY_RETRY_NOTICE
         try:
             retry = await run_loop(
-                active, self.registry, self.provider, observer, stream=stream, tools=tools
+                active, active_registry, self.provider, observer, stream=stream, tools=tools
             )
         finally:
             del active.history[-2:]

@@ -580,6 +580,62 @@ def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
     assert thread.is_alive() is False
 
 
+def test_upload_accepts_header_name_and_never_overwrites(settings, clock):
+    """粘贴 / 拖拽走的是无表单那条通道，而且同一张截图会被传两次。
+
+    浏览器粘贴进来的图片几乎总是叫 ``image.png``——第二张要是覆盖了第一张，用户
+    会拿着"刚上传的文件"读到上一张的内容，这种错最难查也最难解释。
+    """
+    api = make_api(settings, clock)
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    client = Client(server.url.rstrip("/"))
+    try:
+        status, raw = client.call(
+            "POST",
+            "/api/upload",
+            body=b"# \xe7\xac\xac\xe4\xb8\x80\xe5\xbc\xa0\n",
+            headers={"X-Yixiang-Filename": "image.png"},
+        )
+        assert status == 200, raw
+        first = json.loads(raw)
+        assert first["path"].startswith("uploads/")
+        assert first["name"].endswith("image.png")
+        assert first["hint"] == f'让我读它：read_file(path="{first["path"]}")'
+        assert (settings.data_dir / first["path"]).read_bytes() == b"# \xe7\xac\xac\xe4\xb8\x80\xe5\xbc\xa0\n"
+
+        # 第二张同名截图：新文件落新名字，第一张原封不动
+        status, raw = client.call(
+            "POST",
+            "/api/upload",
+            body=b"# two\n",
+            headers={"X-Yixiang-Filename": "image.png"},
+        )
+        assert status == 200, raw
+        second = json.loads(raw)
+        assert second["name"] != first["name"]
+        assert "-2" in second["name"]
+        assert (settings.data_dir / first["path"]).read_bytes() == b"# \xe7\xac\xac\xe4\xb8\x80\xe5\xbc\xa0\n"
+
+        # 文件名里的路径分隔符在落盘前就被吃掉：uploads/ 外面一个字节都写不出去
+        status, raw = client.call(
+            "POST",
+            "/api/upload",
+            body=b"x",
+            headers={"X-Yixiang-Filename": "../../evil.md"},
+        )
+        assert status == 200, raw
+        escaped = json.loads(raw)
+        assert escaped["path"].startswith("uploads/")
+        assert ".." not in escaped["path"]
+        assert (settings.data_dir / escaped["path"]).is_file()
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)
+
+
 def test_chunked_upload_gets_an_actionable_error_not_a_confusing_one(settings, clock):
     """``Transfer-Encoding: chunked`` 没有 Content-Length。
 

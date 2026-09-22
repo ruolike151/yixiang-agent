@@ -622,6 +622,13 @@ textarea:focus {
   color: var(--color-warn);
 }
 
+/* 拖放高亮：border 与 outline 都用同一个 accent，暗底上也能看清 */
+.card.drop-zone.dropping {
+  border-color: var(--color-accent);
+  outline: 2px dashed var(--color-accent);
+  outline-offset: -4px;
+}
+
 .composer {
   display: flex;
   flex-direction: column;

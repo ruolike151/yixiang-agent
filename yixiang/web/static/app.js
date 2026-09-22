@@ -227,6 +227,8 @@ const store = {
   tools: null,
   skills: null,
   uploads: [],
+  // 输入框草稿：render() 会把整块面板连 textarea 一起换掉，草稿只活在 DOM 上就会丢
+  draft: "",
   streaming: false,
   // 当前这一轮的 job_id 与中断句柄（停止生成要用它们）
   streamJob: "",
@@ -475,15 +477,81 @@ function uploadTray() {
         button("填进输入框", {
           className: "ghost",
           onClick: () => {
+            fillComposer(item.hint);
             const box = document.getElementById("chat-input");
-            if (!box) return;
-            box.value = `${box.value.trim()} ${item.hint}`.trim();
-            box.focus();
+            if (box) box.focus();
           },
         })
       )
     )
   );
+}
+
+/** 往输入框里追加一段文字（并记住草稿）。render() 换掉的是节点，草稿得存在 store 里。 */
+function fillComposer(text) {
+  store.draft = `${store.draft.trim()} ${text}`.trim();
+  const box = document.getElementById("chat-input");
+  if (box) box.value = store.draft;
+}
+
+/** 一次上传：文件选择框、拖拽、粘贴三条路都走这里。
+ *
+ * `input` 传了就把 read_file 调用直接填进输入框——省掉 uploadTray 里那一次多余的点击。
+ * 失败交给 load() 统一弹 toast（413 / 空文件 / bad_multipart 都有自己的说法）。
+ */
+async function uploadFile(file, { input, fallbackName } = {}) {
+  const name = file.name || fallbackName || "upload.bin";
+  let uploaded = null;
+  await load("upload", async () => {
+    const data = new FormData();
+    data.append("file", file, name);
+    uploaded = await api("/api/upload", { method: "POST", formData: data });
+    store.uploads.push(uploaded);
+    if (input) fillComposer(uploaded.hint);
+    toast(`已上传 ${uploaded.name}（${fmtBytes(uploaded.bytes)}）`, "ok");
+  });
+  return uploaded;
+}
+
+/** 把一个容器变成拖放目标：拖进来就是上传，松手后输入框里已经填好 read_file。 */
+function attachDropTarget(node, input) {
+  node.addEventListener("dragover", (event) => {
+    if (!event.dataTransfer) return;
+    event.preventDefault(); // 不拦：浏览器会直接把文件当页面打开，界面状态全丢
+    event.dataTransfer.dropEffect = "copy";
+    node.classList.add("dropping");
+  });
+  node.addEventListener("dragleave", (event) => {
+    // 在子元素之间挪动也会触发 dragleave，relatedTarget 还在容器里就不算走
+    if (node.contains(event.relatedTarget)) return;
+    node.classList.remove("dropping");
+  });
+  node.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    node.classList.remove("dropping");
+    const files = Array.from(event.dataTransfer ? event.dataTransfer.files : []);
+    if (!files.length) {
+      toast("拖进来的东西里没有文件：拖一个文件，别拖文件夹或网址", "bad");
+      return;
+    }
+    for (const file of files) await uploadFile(file, { input });
+    render();
+  });
+}
+
+/** 截图粘贴：只接剪贴板里的**文件**，纯文本粘贴一个字都不拦。 */
+function attachPasteUpload(input) {
+  input.addEventListener("paste", (event) => {
+    const files = Array.from(event.clipboardData ? event.clipboardData.files : []);
+    if (!files.length) return;
+    event.preventDefault(); // 必须同步调：异步里再调已经晚了
+    void (async () => {
+      for (const file of files) {
+        await uploadFile(file, { input, fallbackName: `clipboard-${Date.now()}.png` });
+      }
+      render();
+    })();
+  });
 }
 
 async function refreshSummary() {
@@ -738,6 +806,10 @@ async function renderChat() {
     placeholder: "写一句给以湘。回车发送，Shift+回车换行。",
     "aria-label": "发消息",
   });
+  input.value = store.draft; // render() 换掉的是节点：草稿从 store 里接回来
+  input.addEventListener("input", () => {
+    store.draft = input.value;
+  });
   const fileInput = h("input", {
     type: "file",
     id: "chat-file",
@@ -745,16 +817,8 @@ async function renderChat() {
     hidden: true,
     onchange: async (event) => {
       const files = Array.from(event.target.files || []);
-      event.target.value = "";
-      for (const file of files) {
-        await load("upload", async () => {
-          const data = new FormData();
-          data.append("file", file, file.name);
-          const result = await api("/api/upload", { method: "POST", formData: data });
-          store.uploads.push(result);
-          toast(`已上传 ${result.name}（${fmtBytes(result.bytes)}）`, "ok");
-        });
-      }
+      event.target.value = ""; // 允许连续两次选同一个文件
+      for (const file of files) await uploadFile(file, { input });
       render();
     },
   });
@@ -777,8 +841,10 @@ async function renderChat() {
     const text = input.value.trim();
     if (!text || store.streaming) return;
     input.value = "";
+    store.draft = ""; // 发出去就清草稿：render() 之后不会再把这句话捞回来
     sendMessage(text, { input, submit, stop, scroll });
   };
+  attachPasteUpload(input);
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -812,36 +878,39 @@ async function renderChat() {
     })
   );
 
-  return [
-    head,
+  const card = h(
+    "div",
+    { class: "card drop-zone" },
+    scroll,
     h(
       "div",
-      { class: "card" },
-      scroll,
+      { class: "composer" },
+      input,
       h(
         "div",
-        { class: "composer" },
-        input,
-        h(
-          "div",
-          { class: "row" },
-          button("上传文件", {
-            iconName: "upload",
-            className: "ghost",
-            onClick: () => fileInput.click(),
-          }),
-          fileInput,
-          h("span", {
-            class: "card-note",
-            text: "上传后落在 data/uploads/，模型用 read_file 读它（≤2MB）",
-          }),
-          h("span", { class: "grow" }),
-          stop,
-          submit
-        ),
-        uploadTray()
-      )
-    ),
+        { class: "row" },
+        button("上传文件", {
+          iconName: "upload",
+          className: "ghost",
+          onClick: () => fileInput.click(),
+        }),
+        fileInput,
+        h("span", {
+          class: "card-note",
+          text: "上传后落在 data/uploads/，模型用 read_file 读它（≤2MB）；文件直接拖进来或截图直接粘贴也行",
+        }),
+        h("span", { class: "grow" }),
+        stop,
+        submit
+      ),
+      uploadTray()
+    )
+  );
+  attachDropTarget(card, input);
+
+  return [
+    head,
+    card,
     ...(store.summary.errors.length
       ? [
           h(
@@ -1576,6 +1645,9 @@ async function render() {
 }
 
 async function boot() {
+  // 拖到卡片外面松手：浏览器默认会导航去打开这个文件，整个控制台就没了
+  document.addEventListener("dragover", (event) => event.preventDefault());
+  document.addEventListener("drop", (event) => event.preventDefault());
   renderBrandMark();
   try {
     await refreshSummary();

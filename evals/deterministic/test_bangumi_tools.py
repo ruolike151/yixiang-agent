@@ -151,6 +151,33 @@ def test_search_without_keyword_or_tag_is_an_actionable_error(conn, clock):
     assert "missing_query" in out
 
 
+def test_search_accepts_a_tag_without_a_keyword(conn, clock):
+    """只给 ``tag`` 也必须能搜——模型就是这么调的（"有关机器人的番剧" → ``{"tag": "机器人"}``）。
+
+    2026-09-22 现场：``keyword`` 是位置必填，这个调用在进函数体之前就
+    ``TypeError: missing 1 required positional argument`` 了，函数里那句
+    "keyword 与 tag 至少要给一个"的兜底成了永远走不到的死代码。模型白烧一轮重试。
+    """
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json=_subjects_page(BANGUMI_ID))
+
+    client = _client(handler)
+    try:
+        out = bangumi.search_bangumi(conn, clock.now, tag="机器人", client=client, sleep=SyncSleep())
+    finally:
+        client.close()
+
+    assert not out.startswith("Error"), f"只给 tag 不该报错：{out[:120]}"
+    assert seen[0]["keyword"] == "", "空关键词要显式给空串（ingest 的实测口径）"
+    assert seen[0]["sort"] == "heat", "没有关键词时 match 排不出相关度，只有 heat 能翻条目"
+    assert seen[0]["filter"]["tag"] == ["机器人"]
+    assert "机器人" in out
+    assert "按热度" in out, "没有关键词就不是按相关度排的，别在标题里说反"
+
+
 def test_search_wraps_the_rows_as_external_content(conn, clock):
     """出口唯一：``<external_content source="bangumi">``（§14.3-2）。"""
     client = _client(lambda request: httpx.Response(200, json=_subjects_page(BANGUMI_ID)))

@@ -72,7 +72,7 @@ def persons_url(subject_id: int) -> str:
 def search_bangumi(
     conn: sqlite3.Connection | None,
     now: Callable[[], datetime],
-    keyword: str,
+    keyword: str | None = None,
     tag: str | None = None,
     air_date_from: str | None = None,
     rating_min: float | None = None,
@@ -80,7 +80,12 @@ def search_bangumi(
     client: Any = None,
     sleep: Callable[[float], None] | None = None,
 ) -> str:
-    """按标题/别名 + 硬过滤在 Bangumi 上**实时**搜番，返回条目行与检索口径。"""
+    """按标题/别名 + 硬过滤在 Bangumi 上**实时**搜番，返回条目行与检索口径。
+
+    ``keyword`` 与 ``tag`` 至少要给一个；两个都不给是**可行动的错误**，不是异常。
+    所以 ``keyword`` 必须有默认值：位置必填会让"只按题材找"的调用在进函数体之前
+    就 ``TypeError``，下面那句 missing_query 兜底永远走不到（2026-09-22 实测）。
+    """
     text = str(keyword or "").strip()
     tag_text = str(tag or "").strip()
     if not text and not tag_text:
@@ -92,7 +97,14 @@ def search_bangumi(
             "keyword 与 tag 至少要给一个：按片名找传 keyword（如 '夏日重现'），按题材找传 tag（如 '悬疑'）",
         )
 
-    body: dict[str, Any] = {"keyword": text, "sort": "match", "filter": {"type": [2]}}
+    # 只有 tag 时按题材翻条目：口径与 ``ingest.fetch_bangumi`` 的批量抓取一致
+    # （``00-context.md`` 实测：关键词为空时 ``match`` / ``rank`` / ``score`` 全是陷阱，
+    # ``heat`` 才是"按热度翻页"；`"悬疑"` → total 628 就是这么量出来的）。
+    body: dict[str, Any] = {
+        "keyword": text,
+        "sort": "match" if text else "heat",
+        "filter": {"type": [2]},
+    }
     if tag_text:
         body["filter"]["tag"] = [tag_text]
     if air_date_from:
@@ -114,7 +126,9 @@ def search_bangumi(
             "按题材找请改用 tag 参数，例如 tag='悬疑'）"
         )
     total = payload.get("total") or len(rows)
-    lines = [f"Bangumi 实时检索「{text or tag_text}」的前 {len(rows)} 条（共 {total} 条，按相关度）："]
+    # 排序口径要和上面 body 里的 sort 说的一致：没有关键词时是 heat，不是相关度
+    order = "按相关度" if text else "按热度"
+    lines = [f"Bangumi 实时检索「{text or tag_text}」的前 {len(rows)} 条（共 {total} 条，{order}）："]
     for index, row in enumerate(rows, start=1):
         lines.append(f"{index}. {_render_row(row)}")
     return wrap_external("\n".join(lines), source=EXTERNAL_SOURCE)

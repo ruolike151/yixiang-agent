@@ -334,7 +334,12 @@ class QQGateway:
         mark_handled(self.conn, incoming.message_id, now=self.clock.now())
         if result.error:
             self._audit("model_error", incoming=incoming, detail=str(result.error))
-            return [ERROR_NOTICE]
+            if not result.reply.strip():
+                return [ERROR_NOTICE]
+        # 本轮"有失败"不等于"答案不可用"：loop 已经把失败原因作为 notice 拼在 reply
+        # 末尾（agent.py 的 ``if any(not event.ok ...)`` 那段），有答案就照发。
+        # 工具偶发失败一次、模型换参数重试成功——这时丢掉整条答案只回"没处理成功"，
+        # 是 2026-09-22 实测到的现象。
         return split_reply(result.reply)
 
     # -------------------------------------------------------------- 审计

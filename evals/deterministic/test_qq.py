@@ -12,7 +12,7 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from fake_provider import FakeProvider, text_reply
+from fake_provider import FakeProvider, text_reply, tool_round
 
 from yixiang.app import App
 from yixiang.gateway.qq import (
@@ -164,6 +164,28 @@ def test_a_group_message_from_the_allowlisted_user_is_ignored(settings, conn, cl
         assert asyncio.run(gateway.handle_event(event)) == []
     finally:
         app.close()
+
+
+def test_a_final_answer_survives_a_failed_tool_call(settings, conn, clock):
+    """工具失败过一次、但模型最终给出了答案：QQ 必须把**答案**发出去。
+
+    2026-09-22 的现场：``bangumi_search`` 第一次调用报错，模型换参数重试成功，
+    答案也写完了（trace 里 ``finish_reason=stop``），网关却因为 ``result.error``
+    非空把整条答案丢掉、只回"这一条我没处理成功"。用户看到的现象就是
+    "脚本启动了但消息处理不成功"——这是网关把"本轮有失败"错当成"答案不可用"。
+    """
+    provider = FakeProvider(
+        tool_round(("no_such_tool", {"x": 1})),
+        text_reply("这是答案"),
+    )
+    app, gateway = _gateway(settings, conn, clock, provider)
+    try:
+        replies = asyncio.run(gateway.handle_event(_event(8, 10001)))
+    finally:
+        app.close()
+
+    assert replies, "工具失败一次不该把整条答案吞掉"
+    assert replies[0].startswith("这是答案")
 
 
 def test_flood_from_one_user_is_throttled_with_a_notice(settings, conn, clock):

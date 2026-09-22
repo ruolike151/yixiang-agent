@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from fake_provider import FakeProvider, text_reply
 
 from yixiang import memory
+from yixiang.runtime.models import FixedClock
 from yixiang.scheduler import brief_job, jobs
 
 FIXED_DAY = "2026-09-19"
@@ -80,11 +82,12 @@ def test_idempotency_keys_match_the_frozen_format(clock):
     consolidate = jobs.spec_for("consolidate")
     assert jobs.idempotency_key(consolidate, now) == ""
     assert consolidate is not None and consolidate.deduped is False
-    # 首月的调度表（TECH §10.3）：巩固兜底 23:30 / 汇总 23:50 / 巡检周日 22:00
+    # 首月的调度表（TECH §10.3）：巩固兜底 23:30 / 汇总 23:50 / 巡检周日 22:00 / 晨报 8:00
     assert {spec.name: spec.cron for spec in jobs.JOBS} == {
         "consolidate": "30 23 * * *",
         "usage": "50 23 * * *",
         "verify": "0 22 * * 0",
+        "brief": "0 8 * * *",
     }
 
 
@@ -247,21 +250,49 @@ def test_catchup_briefs_are_labelled():
     assert brief_job.annotate_catchup(body, catchup=False) == body
 
 
-def test_brief_job_stays_out_of_the_schedule():
-    """P2 的东西不进本部分门禁（PART-4 §2）：改这一条之前先读附录 A-1。"""
-    assert brief_job.BRIEF_JOB_NAME not in {spec.name for spec in jobs.JOBS}
+def test_brief_job_is_in_the_schedule_after_p2():
+    """T6 启用（PART-4 附录 A-1）：brief 进表，幂等键模板一个字都不许改。"""
+    names = {spec.name for spec in jobs.JOBS}
+
+    assert brief_job.BRIEF_JOB_NAME in names
+    assert jobs.spec_for("brief") is brief_job.BRIEF_SPEC
     assert brief_job.BRIEF_SPEC.idempotency_key_tmpl == "brief:{date}"
-    with pytest.raises(NotImplementedError):
-        asyncio.run(brief_job.deliver_brief())
+    assert jobs.idempotency_key(brief_job.BRIEF_SPEC, datetime(2026, 9, 19, 8, 0)) == (
+        f"brief:{FIXED_DAY}"
+    )
 
 
-@pytest.mark.skip(reason="D-27 补发属 P2（PART-4 附录 A-1）：投递层未接，本阶段只测纯函数")
-def test_d27_a_missed_brief_is_delivered_once_on_the_next_startup():
-    """P2 启用时把这条从 skip 转实跑：8:00 未运行、9:30 启动 → 补发一次且带标注。
+def test_d27_a_missed_brief_is_delivered_once_on_the_next_startup(
+    scheduled, conn, clock
+):
+    """8:00 未运行、10:00 启动 → 补发一次且带标注；第二次启动 0 条；过窗口 0 条。
 
-    届时接上投递层后的断言：
-
-      · 第一次启动 → 发出 1 条，正文以 ``（补发）`` 开头；
-      · 第二次启动 → 0 条（``scheduled_runs`` 命中 ``brief:YYYY-MM-DD`` + ``ok``）；
-      · 12:00 之后启动 → 0 条（超出 ``YIXIANG_BRIEF_CATCHUP_UNTIL``）。
+    时钟是固定 2026-09-19 10:00（conftest），落在 08:00~12:00 的补发窗口里。
     """
+    settings = scheduled
+    settings.brief_sink = "file"  # 用例里别往 stdout 写字
+    deliveries = Path(settings.data_dir) / "briefs" / f"deliveries-{FIXED_DAY}.md"
+
+    _run(jobs.run_job("brief"))
+    first = deliveries.read_text(encoding="utf-8")
+    assert first.count("## 今日安排") == 1  # 只发了一条
+    assert brief_job.CATCHUP_LABEL in first  # 10:00 启动 = 补发，带标注
+    assert (settings.data_dir / "briefs" / f"{FIXED_DAY}.md").is_file()  # 内容文件照写
+    assert _status(conn, "brief", FIXED_DAY)[0] == "ok"
+
+    _run(jobs.run_job("brief"))  # 第二次启动：幂等键命中，不再发
+    assert deliveries.read_text(encoding="utf-8") == first
+
+    # 12:00 之后：把"今天跑过"的记录清掉，验证是**窗口**在拦，不是幂等键
+    conn.execute("DELETE FROM scheduled_runs WHERE job = 'brief'")
+    conn.commit()
+    jobs.configure(
+        conn,
+        data_dir=settings.data_dir,
+        clock=FixedClock(clock.now().replace(hour=13)),
+        settings=settings,
+        provider=FakeProvider(text_reply("{}")),
+    )
+    _run(jobs.run_job("brief"))
+    assert deliveries.read_text(encoding="utf-8") == first
+    assert "补发窗口" in _status(conn, "brief", FIXED_DAY)[1]

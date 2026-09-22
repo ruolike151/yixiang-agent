@@ -335,6 +335,14 @@ JOBS: list[JobSpec] = [
 ]
 
 
+# 晨报（§10.3.1）：SPEC 定义在 brief_job 里（内容层不 import 调度器），触发层在这里
+# 把它接进表。放在模块**尾部**：brief_job 顶部要 `from yixiang.scheduler.jobs import
+# JobSpec`，先有 JobSpec 再 import 才不会拿到半成品。
+from yixiang.scheduler.brief_job import BRIEF_SPEC as _BRIEF_SPEC  # noqa: E402
+
+JOBS.append(_BRIEF_SPEC)
+
+
 __all__ = [
     "JOBS",
     "STATUS_FAILED",

@@ -117,6 +117,12 @@ class Client:
             return exc.code, exc.read()
 
 
+def content_type_of(client: Client, path: str) -> str:
+    """读一个静态资源真正的 Content-Type（Client.call 只回状态码和体，看不到头）。"""
+    with urllib.request.urlopen(client.base + path, timeout=10) as response:
+        return response.headers.get_content_type()
+
+
 # --------------------------------------------------------------------- 总览
 def test_state_shows_models_counters_and_masks_the_key(settings, clock):
     api = make_api(settings, clock)
@@ -497,6 +503,21 @@ def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
         assert b"<title>" in raw and "控制台".encode() in raw
         assert b":root" in client.call("GET", "/style.css")[1]
         assert b"/api/chat" in client.call("GET", "/app.js")[1]
+
+        # Markdown 渲染器是 ES module：浏览器按 strict MIME 校验，一次都不能退成
+        # application/octet-stream（server.py 的 MIME_TYPES 表里没有 .mjs 就是这个下场）
+        assert content_type_of(client, "/markdown.mjs") == "text/javascript"
+        assert content_type_of(client, "/app.js") == "text/javascript"
+        assert b"renderMarkdown" in client.call("GET", "/markdown.mjs")[1]
+        assert b"export function" in client.call("GET", "/markdown.mjs")[1]
+        assert b'type="module"' in client.call("GET", "/")[1]
+        assert b"renderMarkdown" in client.call("GET", "/app.js")[1]
+        # 手工验收抓到的漏网：只有历史轮次走渲染器，刚发出的那一轮还是
+        # `body.textContent = result.reply`（原始 Markdown），用户先看到一屏
+        # 反引号和星号，刷新才正常。历史 + 流式两条路径都得渲染，钉住。
+        app_js = client.call("GET", "/app.js")[1]
+        assert app_js.count(b"renderMarkdown") >= 3
+        assert b"body.textContent = result.reply" not in app_js
 
         # 静态文件只读：写动词与不存在的页面都如实回错
         status, raw = client.call("POST", "/index.html", body={})

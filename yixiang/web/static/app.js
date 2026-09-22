@@ -10,6 +10,10 @@
 
 "use strict";
 
+// Markdown 渲染器是独立模块（`markdown.mjs`），解析与建节点分开：
+// 它只往 textContent / createTextNode 写数据，第 5 行的那条约束照样成立。
+import { renderMarkdown } from "./markdown.mjs";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const PANELS = [
@@ -419,11 +423,18 @@ function turnToNodes(turn, { withUser = true } = {}) {
       "article",
       { class: "bubble assistant" },
       h("div", { class: "bubble-meta" }, ...meta),
-      h("p", { text: turn.reply || "（这一轮没有正文）" }),
+      // 模型正文按 Markdown 子集渲染；用户气泡与工具输出保持纯文本
+      renderMarkdown(turn.reply || "（这一轮没有正文）", { h }),
       toolChips(turn.tools)
     )
   );
   return nodes;
+}
+
+/** 把一段 Markdown 渲染进已有容器：流式气泡用同一套渲染，不再吐原始记号。 */
+function renderInto(box, text) {
+  box.replaceChildren(...renderMarkdown(text || "", { h }).childNodes);
+  return box;
 }
 
 function chatScroll() {
@@ -516,7 +527,8 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
     h("div", { class: "bubble-meta" }, h("span", { class: "role", text: "you" })),
     h("p", { text })
   );
-  const body = h("p", {});
+  // 正文容器跟历史轮次一样是 div.md（不能是 <p>：渲染器要往里塞 h*/ul/pre 这些块级节点）
+  const body = h("div", { class: "md" });
   const chips = h("div", { class: "chips" });
   const meta = h("div", {
     class: "bubble-meta",
@@ -555,13 +567,11 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
     switch (event.kind) {
       case "text_delta":
         replyText += event.text || "";
-        body.textContent = replyText;
-        body.append(cursor);
+        renderInto(body, replyText).append(cursor);
         break;
       case "text_revoke":
         replyText = "";
-        body.textContent = "";
-        body.append(cursor);
+        renderInto(body, "").append(cursor);
         addChip(h("span", { class: "chip info", text: "这轮要查资料，撤回草稿" }));
         break;
       case "notice":
@@ -663,7 +673,7 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
     meta.textContent = parts.join(" · ");
     if (result.reply) {
       replyText = result.reply;
-      body.textContent = result.reply;
+      renderInto(body, replyText);
     }
     for (const tool of result.tools || []) {
       const chip = pending.get(tool.tool);

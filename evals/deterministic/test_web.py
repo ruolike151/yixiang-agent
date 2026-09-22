@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import socket
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -528,12 +531,14 @@ def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
         status, raw = client.call("POST", "/api/upload", body=b"")
         assert status == 400 and json.loads(raw)["error"] == "bad_multipart"
 
-        # 流式对话：text_delta…→ result → end
+        # 流式对话：start（带 job_id）→ text_delta…→ result → end
         status, raw = client.call("POST", "/api/chat", body={"text": "帮我安排今天"})
         assert status == 200
         events = parse_sse(raw)
         kinds = [event["kind"] for event in events]
-        assert kinds[0] == "iteration"
+        assert kinds[0] == "start"
+        assert kinds[1] == "iteration"
+        assert len(events[0]["job_id"]) == 32
         assert kinds[-2:] == ["result", "end"]
         deltas = "".join(e.get("text", "") for e in events if e["kind"] == "text_delta")
         assert deltas == REPLY
@@ -609,3 +614,234 @@ def test_parse_multipart_reads_fields_and_filenames():
     with pytest.raises(ConsoleError) as exc:
         parse_multipart("multipart/form-data", body)
     assert exc.value.code == "bad_multipart"
+
+
+# --------------------------------------------------------------------- 停止生成
+class HangingProvider:
+    """永远不回的 Provider：给"停止生成"当靶子。
+
+    ``started`` 在**调用真的进来了**之后才 set——用例要等到它，才谈得上"停下来"；
+    不用真睡满：能结束这一轮的唯一方式就是 ``task.cancel()``，所以用例一秒都不用等
+    （§13.6）。``complete`` 直接断言失败：停止之后不该再发起任何新调用。
+    """
+
+    def __init__(self, *, started: threading.Event) -> None:
+        self.started = started
+        self.calls = 0
+
+    async def complete(self, req: Any) -> Any:  # pragma: no cover - 走到这里就是没停住
+        raise AssertionError("停止之后不该再有 complete 调用")
+
+    async def complete_stream(self, req: Any, observer: Any = None) -> Any:
+        self.calls += 1
+        self.started.set()
+        await asyncio.sleep(30)  # 只有取消能让它结束
+        raise AssertionError("这一轮本该被取消掉")
+
+    async def aclose(self) -> None:
+        return None
+
+
+def hanging_api(settings, clock, provider) -> ConsoleAPI:
+    """与 ``make_api`` 同一套路，只是把 Provider 换成一个**不回**的。"""
+    env_file = Path(settings.data_dir).parent / ".env"
+    env_file.write_text("YIXIANG_MAIN_MODEL=deepseek-chat\n", encoding="utf-8")
+    sink = JsonlUsageSink(settings.usage_path, clock=clock)
+
+    def factory(current):
+        return App.from_settings(
+            current, provider=provider, usage_sink=sink, clock=clock
+        )
+
+    return ConsoleAPI(settings, app_factory=factory, env_file=env_file)
+
+
+def _open_chat_stream(host: str, port: int, text: str) -> socket.socket:
+    """发一条 ``/api/chat`` 并把连接**停在读一半**的状态交回来（SSE 是长连接）。"""
+    body = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
+    sock = socket.create_connection((host, port), timeout=10)
+    sock.sendall(
+        b"POST /api/chat HTTP/1.1\r\n"
+        + f"Host: {host}:{port}\r\n".encode()
+        + b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + body
+    )
+    return sock
+
+
+def _read_until(sock: socket.socket, needle: bytes, *, timeout: float = 10.0) -> bytes:
+    """读到出现 ``needle`` 为止（超时或对端关闭就返回已经拿到的部分）。"""
+    sock.settimeout(timeout)
+    raw = b""
+    while needle not in raw:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        raw += chunk
+    return raw
+
+
+def _read_all(sock: socket.socket, *, timeout: float = 10.0) -> bytes:
+    """读到对端关闭（SSE 收尾时会关连接）。"""
+    sock.settimeout(timeout)
+    raw = b""
+    while True:
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+        raw += chunk
+    return raw
+
+
+def _job_id(raw: bytes) -> str:
+    match = re.search(rb'"job_id": "([0-9a-f]{32})"', raw)
+    assert match, f"SSE 里没有 job_id：{raw!r}"
+    return match.group(1).decode()
+
+
+def test_a_running_turn_can_be_stopped_and_still_leaves_a_trace(settings, clock):
+    """「停止生成」= 取消工作线程上那个 task，但这一轮照常落 chat_log 与 trace。
+
+    为什么不能只靠"浏览器断开"：``_stream_chat`` 明确写着断开的连接"这一轮照跑完"，
+    也就是钱照花、工具照调。停止必须打到**跑的那一侧**。
+    """
+    started = threading.Event()
+    provider = HangingProvider(started=started)
+    api = hanging_api(settings, clock, provider)
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    host, port = server.server_address[0], server.server_address[1]
+    client = Client(server.url.rstrip("/"))
+    try:
+        with _open_chat_stream(host, port, "帮我写一篇长文") as sock:
+            head = _read_until(sock, b'"kind": "start"')
+            assert b" 200 " in head.split(b"\r\n")[0]  # SSE 已经开流
+            job_id = _job_id(head)
+            assert started.wait(timeout=10), "这一轮压根没进 Provider"
+            assert provider.calls == 1
+
+            status, raw = client.call("POST", f"/api/chat/{job_id}/cancel")
+            assert status == 200, raw
+            assert json.loads(raw)["cancelled"] is True
+
+            rest = _read_all(sock)
+
+        kinds = [event["kind"] for event in parse_sse(head + rest)]
+        assert kinds[0] == "start"
+        assert kinds[-3:] == ["result", "cancelled", "end"]
+        assert parse_sse(head + rest)[-2]["job_id"] == job_id
+        assert parse_sse(head + rest)[-3]["finish_reason"] == "cancelled"
+
+        # 落盘一致性：这一轮在 chat_log 与 trace 里都看得见（换一条连接查，别碰工作线程那条）
+        with sqlite3.connect(settings.db_path) as check:
+            rows = check.execute(
+                "SELECT user_text, reply_text FROM chat_log ORDER BY id"
+            ).fetchall()
+        assert rows == [("帮我写一篇长文", "（已停止生成）")]
+        traces = sorted(settings.traces_dir.glob("*.jsonl"))
+        assert traces, "trace 没落盘"
+        record = json.loads(traces[-1].read_text(encoding="utf-8").strip().splitlines()[-1])
+        assert record["finish_reason"] == "cancelled"
+        assert record["user_text"] == "帮我写一篇长文"
+
+        # 取消只打死这一轮，不打死工作线程：串行队列还活着（死了这里会挂到超时）
+        status, raw = client.call("GET", "/api/state")
+        assert status == 200, raw
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_cancelling_a_queued_job_never_reaches_the_provider(settings, clock):
+    """排队中的那一轮被停掉：Provider **一次都不该被调用**（钱不能花出去）。"""
+    started = threading.Event()
+    provider = HangingProvider(started=started)
+    api = hanging_api(settings, clock, provider)
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    host, port = server.server_address[0], server.server_address[1]
+    client = Client(server.url.rstrip("/"))
+    try:
+        with _open_chat_stream(host, port, "第一句") as first:
+            first_head = _read_until(first, b'"kind": "start"')
+            assert started.wait(timeout=10)
+            with _open_chat_stream(host, port, "第二句") as second:
+                second_head = _read_until(second, b'"kind": "start"')
+                second_id = _job_id(second_head)
+                assert provider.calls == 1, "第二条不该已经进 Provider"
+
+                status, raw = client.call("POST", f"/api/chat/{second_id}/cancel")
+                assert status == 200, raw
+                assert json.loads(raw)["cancelled"] is True
+
+                second_rest = _read_all(second)
+                assert provider.calls == 1, "被停掉的排队轮次不该碰 Provider"
+                second_kinds = [e["kind"] for e in parse_sse(second_head + second_rest)]
+                assert second_kinds == ["start", "cancelled", "end"]
+
+            # 收尾：第一条也停掉，别让它拖着（30 秒的 sleep 会在取消时立刻结束）
+            status, raw = client.call("POST", f"/api/chat/{_job_id(first_head)}/cancel")
+            assert status == 200, raw
+            _read_all(first)
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)
+    assert provider.calls == 1
+    assert thread.is_alive() is False
+
+
+def test_cancelling_an_unknown_job_is_a_404(settings, clock):
+    """停止一个不存在 / 已经结束的 job：如实回 404，不能静默回一个"停好了"。"""
+    api = make_api(
+        settings, clock, text_reply(REPLY), env_text="YIXIANG_MAIN_MODEL=deepseek-chat\n"
+    )
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    client = Client(server.url.rstrip("/"))
+    try:
+        status, raw = client.call("POST", "/api/chat/0123456789abcdef0123456789abcdef/cancel")
+        assert status == 404
+        assert json.loads(raw)["error"] == "unknown_job"
+        # 不是这条路由的其它 /api/chat/ 路径仍然是 404（别把路由写成前缀通吃）
+        status, raw = client.call("POST", "/api/chat/nope")
+        assert status == 404 and json.loads(raw)["error"] == "not_found"
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)
+
+
+def test_cancelling_twice_is_404_the_second_time(settings, clock):
+    """同一个 job 停两次：第二次是 404 —— 说明"在册"这件事真的被回收了。"""
+    started = threading.Event()
+    provider = HangingProvider(started=started)
+    api = hanging_api(settings, clock, provider)
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    host, port = server.server_address[0], server.server_address[1]
+    client = Client(server.url.rstrip("/"))
+    try:
+        with _open_chat_stream(host, port, "帮我写一篇长文") as sock:
+            head = _read_until(sock, b'"kind": "start"')
+            job_id = _job_id(head)
+            assert started.wait(timeout=10)
+            assert client.call("POST", f"/api/chat/{job_id}/cancel")[0] == 200
+            _read_all(sock)
+        status, raw = client.call("POST", f"/api/chat/{job_id}/cancel")
+        assert status == 404 and json.loads(raw)["error"] == "unknown_job"
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)

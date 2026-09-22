@@ -224,6 +224,11 @@ const store = {
   skills: null,
   uploads: [],
   streaming: false,
+  // 当前这一轮的 job_id 与中断句柄（停止生成要用它们）
+  streamJob: "",
+  abort: null,
+  // 用户刚按过「停止」：读流已经断了，收尾要靠它把 chip 补上
+  stopped: false,
   loading: new Set(),
 };
 
@@ -477,8 +482,31 @@ async function refreshSummary() {
   return store.summary;
 }
 
-async function sendMessage(text, { input, submit, scroll }) {
+/** 停止生成：两件事都要做——断开读流（停止"看"）+ 调取消接口（停止"算"）。 */
+async function stopStreaming() {
+  const jobId = store.streamJob;
+  store.stopped = true; // 读流马上要断：让 sendMessage 收尾时把 chip 补上
+  if (store.abort) {
+    store.abort.abort();
+    store.abort = null;
+  }
+  if (!jobId) return;
+  try {
+    await api(`/api/chat/${jobId}/cancel`, { method: "POST" });
+    toast("已停止这一轮", "ok");
+  } catch (error) {
+    // 这一轮刚好跑完了：不是错误，别弹红
+    if (error.status !== 404) toast(error.message || "停止失败", "bad");
+  }
+}
+
+async function sendMessage(text, { input, submit, stop, scroll }) {
   store.streaming = true;
+  const controller = new AbortController();
+  store.streamJob = "";
+  store.abort = controller;
+  store.stopped = false;
+  if (stop) stop.hidden = false;
   submit.disabled = true;
   input.disabled = true;
 
@@ -512,10 +540,16 @@ async function sendMessage(text, { input, submit, scroll }) {
   let replyText = "";
   let result = null;
   let failure = null;
+  let stopped = false;
 
   const addChip = (node) => {
     chips.append(node);
     return node;
+  };
+  const markStopped = () => {
+    if (stopped) return;
+    stopped = true;
+    addChip(h("span", { class: "chip warn", text: "已停止生成" }));
   };
   const handle = (event) => {
     switch (event.kind) {
@@ -555,6 +589,13 @@ async function sendMessage(text, { input, submit, scroll }) {
         failure = event;
         assistant.classList.add("error");
         break;
+      case "start":
+        // 服务端把这一轮的 job_id 交过来：停止按钮靠它找到"要停谁"
+        store.streamJob = event.job_id || "";
+        break;
+      case "cancelled":
+        markStopped();
+        break;
       case "result":
         result = event;
         break;
@@ -569,6 +610,7 @@ async function sendMessage(text, { input, submit, scroll }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: controller.signal, // 停止时先断开"看"的这一侧
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
@@ -597,12 +639,18 @@ async function sendMessage(text, { input, submit, scroll }) {
       }
     }
   } catch (error) {
-    failure = { message: error.message || String(error) };
-    assistant.classList.add("error");
+    if (error.name === "AbortError") {
+      // 用户按了停止：这一轮由服务端收尾（trace / chat_log 照落），界面不用报错
+      if (store.stopped) markStopped();
+    } else {
+      failure = { message: error.message || String(error) };
+      assistant.classList.add("error");
+    }
   }
 
   cursor.remove();
   assistant.classList.remove("streaming");
+  if (stopped && !result && !failure) meta.textContent = "已停止";
 
   if (result) {
     const tokens = result.usage || {};
@@ -624,7 +672,9 @@ async function sendMessage(text, { input, submit, scroll }) {
         chip.className = `chip ${tool.ok ? "ok" : "bad"}`;
       }
     }
-    if (result.error) {
+    if (result.cancelled) {
+      markStopped();
+    } else if (result.error) {
       assistant.classList.add("error");
       chips.append(h("span", { class: "chip bad", text: `error: ${result.error}` }));
     }
@@ -648,6 +698,10 @@ async function sendMessage(text, { input, submit, scroll }) {
   }
 
   store.streaming = false;
+  store.streamJob = "";
+  store.abort = null;
+  store.stopped = false;
+  if (stop) stop.hidden = true;
   submit.disabled = false;
   input.disabled = false;
   input.focus();
@@ -701,11 +755,19 @@ async function renderChat() {
     title: store.streaming ? "上一轮还在跑" : "发送（回车）",
     onClick: () => fire(),
   });
+  const stop = button("停止", {
+    iconName: "alert",
+    className: "ghost",
+    title: "停止这一轮（已生成的部分与这一轮都会留在历史里）",
+    onClick: () => stopStreaming(),
+  });
+  // 跟着 store.streaming 走：每次 render() 都会重建这个按钮
+  stop.hidden = !store.streaming;
   const fire = () => {
     const text = input.value.trim();
     if (!text || store.streaming) return;
     input.value = "";
-    sendMessage(text, { input, submit, scroll });
+    sendMessage(text, { input, submit, stop, scroll });
   };
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -764,6 +826,7 @@ async function renderChat() {
             text: "上传后落在 data/uploads/，模型用 read_file 读它（≤2MB）",
           }),
           h("span", { class: "grow" }),
+          stop,
           submit
         ),
         uploadTray()

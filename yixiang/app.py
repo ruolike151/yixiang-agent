@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sqlite3
 import time
@@ -25,6 +26,7 @@ from yixiang.rag import configure as configure_rag
 from yixiang.rag import reset as reset_rag
 from yixiang.rag import trace_info as rag_trace_info
 from yixiang.runtime import eventloop
+from yixiang.runtime.eventloop import CancelToken
 from yixiang.runtime.models import (
     Clock,
     Observer,
@@ -42,6 +44,10 @@ from yixiang.tools.registry import Deps, ToolRegistry, build_registry
 
 # 写入类记忆工具：后验校验看的就是这些（§7.9 阶段 3）
 MEMORY_WRITE_TOOLS = ("save_memory", "manage_memory")
+
+# 「停止生成」写进 chat_log 的回复占位：停止是用户主动行为，不是错误，但这一轮
+# 必须留下痕迹——否则用户按了停止就像这句话从没说过（§5.4 的落盘一致性）
+CANCELLED_REPLY = "（已停止生成）"
 
 
 @dataclass
@@ -189,17 +195,32 @@ class App:
 
         # 降级标记只反映"这一轮"：上一轮的 E_EMBED_UNAVAILABLE 不能一直挂着（D-24）
         clear_rag_warnings()
-        decision = await self._gate(user_text, active)
-        result = await run_loop(
-            active, active_registry, self.provider, observer, stream=stream, tools=tools
-        )
-        result = await self._verify_memory_write(
-            active, result, observer, stream, tools, registry=active_registry
-        )
+        decision: gate.GateDecision | None = None
+        cancelled = False
+        try:
+            decision = await self._gate(user_text, active)
+            result = await run_loop(
+                active, active_registry, self.provider, observer, stream=stream, tools=tools
+            )
+            result = await self._verify_memory_write(
+                active, result, observer, stream, tools, registry=active_registry
+            )
+        except asyncio.CancelledError:
+            # 「停止生成」：不再往下跑，但这一轮**必须留痕**（chat_log 与 trace 都要有）
+            # 在这里吞掉 CancelledError 是安全的：上面就是 run_until_complete 的边界
+            # （runtime/eventloop.run），没有别人 await 这个 task；反过来让它冒出去，
+            # 会从 _SerialRunner._loop 带走整条工作线程，此后所有请求都堵死。
+            cancelled = True
+            result = TurnResult(
+                reply=CANCELLED_REPLY,
+                finish_reason="cancelled",
+                error="cancelled",
+                error_detail="用户停止了这一轮",
+            )
         result.turn_id = turn_id
         result.model = result.model or self.settings.model_for("main")
         result.working_memory = active.working_memory()
-        result.gate = decision.as_trace()
+        result.gate = decision.as_trace() if decision else None
         result.intent = {"remember": active.turn_intent == "REMEMBER", "intent": active.turn_intent}
         result.latency_ms["total"] = int((time.perf_counter() - started) * 1000)
 
@@ -217,7 +238,8 @@ class App:
         )
         append_trace(self.settings.traces_dir, record)
         self.last_record = record
-        await self._consolidate()
+        if not cancelled:  # 用户刚说"停"，就别接着花时间跑巩固了
+            await self._consolidate()
         return result
 
     # ------------------------------------------------------------------ 记忆链路
@@ -286,13 +308,15 @@ class App:
                 clock=self.clock,
             )
 
-    def ask(self, text: str, **kwargs: Any) -> TurnResult:
+    def ask(
+        self, text: str, *, token: CancelToken | None = None, **kwargs: Any
+    ) -> TurnResult:
         """同步入口（终端会话 / 脚本 / 演示）：跑在**本线程常驻的 loop** 上。
 
-        不要退回 ``asyncio.run``：它每轮新建并关掉一条 loop，provider 缓存的连接池
-        会在第二轮报 ``Event loop is closed``（见 ``runtime/eventloop.py``）。
+        ``token`` 给 Web 控制台的「停止生成」用：取消由请求线程发起，落在本线程这条
+        loop 上那个 task 上。不要退回 ``asyncio.run``（见 ``runtime/eventloop.py``）。
         """
-        return eventloop.run(self.handle_message(text, **kwargs))
+        return eventloop.run(self.handle_message(text, **kwargs), token=token)
 
     # ------------------------------------------------------------------ 收尾
     def close(self) -> None:

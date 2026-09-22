@@ -28,6 +28,7 @@ from yixiang.config import ENV_PREFIX, Settings, parse_env_text
 from yixiang.memory import core_files, procedural, sync
 from yixiang.memory.core_files import CHAR_LIMITS, MEMORY_MAX_LINES, LimitExceeded
 from yixiang.ops.usage import summarize
+from yixiang.runtime.eventloop import CancelToken
 from yixiang.runtime.models import LoopEvent
 from yixiang.runtime.session import CONTEXT_BUDGET_CHARS, read_core_file
 
@@ -438,8 +439,17 @@ class ConsoleAPI:
         }
 
     # ------------------------------------------------------------------ 对话
-    def chat(self, text: str, emit: Emit | None = None) -> dict[str, Any]:
-        """跑一轮（流式）：事件实时喂给 ``emit``，返回值是这一轮的结果快照。"""
+    def chat(
+        self,
+        text: str,
+        emit: Emit | None = None,
+        *,
+        token: CancelToken | None = None,
+    ) -> dict[str, Any]:
+        """跑一轮（流式）：事件实时喂给 ``emit``，返回值是这一轮的结果快照。
+
+        ``token`` 由 Web 层给：它是「停止生成」唯一的落点（``None`` = 不可取消）。
+        """
         message = (text or "").strip()
         if not message:
             raise ConsoleError("消息是空的：写一句再发送。", code="empty_message")
@@ -460,7 +470,7 @@ class ConsoleAPI:
         try:
             # 走 App.ask（本线程常驻 loop）：每轮新建再关掉 loop 会让 provider 缓存的
             # 连接池在第二轮报 Event loop is closed
-            result = self.app.ask(message, observer=observer, stream=True)
+            result = self.app.ask(message, observer=observer, stream=True, token=token)
         except Exception as exc:  # noqa: BLE001 - 如实回错，不让 500 页面吞掉原因
             raise ConsoleError(f"这一轮没能跑完：{exc}", status=500, code="turn_failed") from exc
         payload = {
@@ -468,6 +478,7 @@ class ConsoleAPI:
             "reply": result.reply,
             "model": result.model,
             "finish_reason": result.finish_reason,
+            "cancelled": result.finish_reason == "cancelled",
             "error": result.error,
             "error_detail": result.error_detail,
             "iterations": result.iterations,

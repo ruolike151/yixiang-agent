@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from uuid import uuid4
 
 from yixiang.config import Settings
 from yixiang.runtime import eventloop
@@ -63,6 +64,13 @@ class _Job:
     done: threading.Event = field(default_factory=threading.Event)
     value: Any = None
     error: BaseException | None = None
+    # 每个 job 一个 id：前端拿它来「停止生成」（POST /api/chat/<job_id>/cancel）
+    job_id: str = field(default_factory=lambda: uuid4().hex)
+    # 取消句柄由调用方建（它知道要绑在哪条 loop 上），cancelled 由 cancel() 置位
+    token: Any = None
+    cancelled: bool = False
+    # 工作线程真的开始跑它了吗：排队中被停掉的 job 要当场了结，不能等队列排到它
+    started: bool = False
 
     def wait(self, timeout: float | None = None) -> _Job:
         self.done.wait(timeout)
@@ -79,6 +87,9 @@ class _SerialRunner:
     def __init__(self, api: ConsoleAPI) -> None:
         self.api = api
         self._queue: queue.Queue[_Job | None] = queue.Queue()
+        # 在跑的与排队的都在册：取消要找的就是它（跑完就摘掉）
+        self._jobs: dict[str, _Job] = {}
+        self._lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._loop, name="yixiang-web-worker", daemon=True
         )
@@ -86,8 +97,34 @@ class _SerialRunner:
 
     def submit(self, fn: Any, *args: Any, **kwargs: Any) -> _Job:
         job = _Job(fn=fn, args=args, kwargs=kwargs)
+        with self._lock:
+            self._jobs[job.job_id] = job
         self._queue.put(job)
         return job
+
+    def cancel(self, job_id: str) -> bool:
+        """停止一个**还没跑完**的调用：排队中的直接丢，跑着的取消它那个 task。
+
+        返回 ``False`` = 这个 id 不在册（跑完了 / 压根没有）。调用方据此回 404——
+        "没什么可停的"必须说出来，静默成功会让前端以为停住了。
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.done.is_set():
+                return False
+            job.cancelled = True
+            if not job.started:
+                # 还排在队列里：当场了结（否则等队列排到它才回话，请求方一直挂着）
+                job.done.set()
+                self._jobs.pop(job_id, None)
+                return True
+        if job.token is not None:
+            job.token.cancel()
+        return True
+
+    def _forget(self, job: _Job) -> None:
+        with self._lock:
+            self._jobs.pop(job.job_id, None)
 
     def call(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
         job = self.submit(fn, *args, **kwargs)
@@ -106,12 +143,19 @@ class _SerialRunner:
                 job = self._queue.get()
                 if job is None:
                     return
+                with self._lock:
+                    if job.cancelled:  # 排队期间就被停掉了：一次都不跑（钱不能花出去）
+                        job.done.set()
+                        self._jobs.pop(job.job_id, None)
+                        continue
+                    job.started = True
                 try:
                     job.value = job.fn(*job.args, **job.kwargs)
-                except Exception as exc:  # noqa: BLE001 - 异常要带回请求线程，不能吞
+                except BaseException as exc:  # noqa: BLE001 - 含 CancelledError：绝不能让工作线程被带走
                     job.error = exc
                 finally:
                     job.done.set()
+                    self._forget(job)
         finally:
             # 这条线程走了，它那条常驻事件循环也归它关（runtime/eventloop.py）
             eventloop.shutdown()
@@ -206,6 +250,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return self._send_json(runner.call(api.skills))
 
         if method == "POST":
+            if path.startswith("/api/chat/") and path.endswith("/cancel"):
+                job_id = path[len("/api/chat/") : -len("/cancel")]
+                if not job_id or "/" in job_id:
+                    raise ConsoleError(
+                        f"没有这个接口：{method} {path}", status=404, code="not_found"
+                    )
+                if not runner.cancel(job_id):
+                    raise ConsoleError(
+                        "这一轮已经结束了（或不存在）：没什么可停的。",
+                        status=404,
+                        code="unknown_job",
+                        payload={"job_id": job_id},
+                    )
+                return self._send_json({"cancelled": True, "job_id": job_id})
             if path == "/api/session/switch":
                 body = self._json_body()
                 session_id = str(body.get("session_id") or body.get("id") or "")
@@ -252,8 +310,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             raise ConsoleError("消息是空的：写一句再发送。", code="empty_message")
 
         events: queue.Queue[dict[str, Any]] = queue.Queue()
-        job = self.server.runner.submit(self.server.api.chat, text, events.put)
+        # 取消句柄：请求线程拿它去取消工作线程上那个 task（跨线程靠 call_soon_threadsafe）
+        token = eventloop.CancelToken()
+        job = self.server.runner.submit(
+            self.server.api.chat, text, events.put, token=token
+        )
+        job.token = token  # 同一个对象：cancel() 找的就是它（在发 start 之前一定已经设好）
         self._begin_sse()
+        # 先把 job_id 交给前端：没有它，「停止」按钮不知道该停谁
+        self._sse_send({"kind": "start", "job_id": job.job_id})
         try:
             while True:
                 try:
@@ -270,6 +335,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             job.wait()
         if job.error is not None:
             self._sse_send(_error_event(job.error))
+        if job.cancelled:
+            self._sse_send({"kind": "cancelled", "job_id": job.job_id})
         self._sse_send({"kind": "end"})
 
     def _begin_sse(self) -> None:

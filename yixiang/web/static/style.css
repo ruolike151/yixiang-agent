@@ -52,6 +52,11 @@
   box-sizing: border-box;
 }
 
+/* hidden 属性必须真的隐藏：.button 的 display 会盖掉浏览器默认的 [hidden]（停止按钮靠它） */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -610,6 +615,11 @@ textarea:focus {
 .chip.info {
   border-color: color-mix(in srgb, var(--color-info) 55%, var(--color-border));
   color: var(--color-info);
+}
+
+.chip.warn {
+  border-color: color-mix(in srgb, var(--color-warn) 55%, var(--color-border));
+  color: var(--color-warn);
 }
 
 .composer {

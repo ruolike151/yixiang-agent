@@ -1152,8 +1152,16 @@ class Tool:
 | `search_media` | P1 | `query, mtype?, year_from?, year_to?` | top-3 带理由 | 只读 |
 | `recommend_media` | P1 | `count=1, mood?` | 推荐 + 理由 | 只读（写日志） |
 | `daily_brief` | P1 | `scope?(today/tomorrow)` | 组装好的推荐文本（今日任务 + 到期备忘 + 1 条推荐） | 只读（写 `data/briefs/` 与 `recommend_log`） |
-| `bilibili_search` | P2 | `keyword` | 标题/UP/链接 | 只读 |
-| `pixiv_download` | P2 | `pid` | 文件路径 | 只读外部 |
+| `read_file` | P1 | `path, max_chars?` | 文本（`<external_content source="file">`，最多 2000 字） | 只读 |
+| `bangumi_search` | P1 | `keyword, tag?, air_date_from?, rating_min?, limit=5` | top-N 条目（id / 原名 / 首播 / 评分 / 标签） | 只读 |
+| `bangumi_subject` | P1 | `subject_id, with_relations?, with_staff?` | 条目详情（可选关联条目 / 主要职员） | 只读 |
+| `bangumi_my_collections` | P1 | `write=false, top=8` | 口味画像（读自己的收藏要 PAT） | 只读（`write=true` 才追加 `user.md`） |
+| `bilibili_search` | P2 | `keyword` | 标题/UP/链接 | 只读（**设计位，尚未落盘**） |
+| `pixiv_download` | P2 | `pid` | 文件路径 | 只读外部（**设计位，尚未落盘**） |
+
+表里的 P1 三行 `bangumi_*` 是 2026-09-21 新增的 live 工具（分工见 §9.5）；`read_file` 是
+Web 控制台上传件的读取出口。**P2 两行是设计位、尚未落盘**——数"现在有几个工具"时以
+`yixiang/tools/registry.py` 的 `build_registry()` 为准（当前 **19** 个）。
 
 两个关键工具的完整 schema（其余按此风格写）：
 
@@ -1199,10 +1207,13 @@ LIST_TODAY = Tool(
 ### 9.3 扩展指南（新工具三步，不改核心链路）
 
 1. `tools/` 下新建文件，实现函数并包成 `Tool`（schema 用 JSON Schema）；
-2. 在 `tools/__init__.py` 的 `build_registry()` 里注册；
-3. 在 `evals/deterministic/` 加至少 1 条**触发断言**（该调时调了）+ 1 条**参数断言**（参数解析正确）。
+2. 在 `tools/registry.py` 的 `build_registry()` 里注册（一处一行，不改核心链路）；
+3. 在 `evals/deterministic/` 加至少 1 条**触发断言**（该调时调了）+ 1 条**参数断言**（参数解析正确）——
+   现成例子见 `test_tools_memo.py`（触发与参数）、`test_bangumi_tools.py`（出网契约用
+   `httpx.MockTransport` 钉死 URL / query / body / 头，**一条请求都不发**）。
 
-DoD：`pytest evals/deterministic/test_tool_trigger.py` 绿 + `yixiang doctor` 能列出新工具。
+DoD：`pytest evals/deterministic -m "not live"` 绿 + `yixiang doctor` 能列出新工具 +
+§9.2 的工具清单表里有一行。
 
 命名规范：`动词_名词`（`add_memo` / `list_today` / `search_media`），避免 `do_stuff` 这类模型无法判断用途的名字。
 
@@ -1213,8 +1224,28 @@ DoD：`pytest evals/deterministic/test_tool_trigger.py` 绿 + `yixiang doctor` �
 | 路径逃逸（工具写文件到任意位置） | 所有路径 `resolve()` 后校验在 `YIXIANG_DATA_DIR` 内，否则拒绝 |
 | 危险工具被外部消息触发 | 工具白名单按来源区分：`pixiv_download` / `create_skill` 仅 `source=cli` 可用，QQ 上禁用 |
 | 删除类操作误伤 | `manage_memory(delete)` 是软删；`finish_memo` 只改状态；不提供物理删除工具 |
-| 外部 API 拖死 loop | 强制 timeout，失败返回错误文本，外部 API 不重试超过 1 次 |
+| 外部 API 拖死 loop | 强制 timeout，失败返回可行动的错误文本；重试次数写在工具自己的常量里（`ingest.MAX_RETRIES = 3`、`bangumi.MAX_ATTEMPTS = 2`），退避后再试，不无限重试 |
 | prompt 注入驱动工具滥用 | 外部内容（QQ 图片文字、网页、B 站标题）一律包裹为数据（§14），且不进入 system 段 |
+
+### 9.5 Bangumi 接入：live 检索与本地 RAG 的分工
+
+番剧有两类问法，走两条路。**这不是"用 live 替掉 RAG"**——两者的强项正好互补：
+
+| 查询类型 | 走谁 | 为什么 |
+|---|---|---|
+| 「有没有叫 X 的番」「《X》评分多少」「2020 后评分 ≥8 的科幻番」 | `bangumi_search` / `bangumi_subject`（live、免 token） | `filter.tag` / `air_date` / `rating` 是**服务端硬过滤**：`filter.tag=["悬疑"]` → 628 条；`air_date >=2020-01-01 + rating >=8` → 175 条。本地语料覆盖不到这些条件 |
+| 「讲时间循环的」「类似《怪物》的」、口味加权、7 天去重 | `search_media` / `recommend_media`（本地语料 + 向量 + taste） | live 的 `keyword` **只匹配标题与别名**（`keyword="悬疑"` → 0 条），题材型问句拿不到结果；golden 集 20 条查询全是题材型 |
+| 「按我的收藏口味推荐」 | `bangumi_my_collections`（**需 `YIXIANG_BANGUMI_TOKEN`**） | 读自己的收藏 `GET /v0/users/-/collections` 不带 token → 404 |
+| 语料扩充 | `rag ingest --source bangumi`（`sort=heat`） | 离线可回归；live 结果随热度漂移，不进 CI |
+
+三条由此定下的纪律：
+
+1. **PAT 只为一件事**：读自己的收藏进口味画像。搜索与条目详情免 token，所以
+   `Settings.bangumi_token` 为空不报错、`doctor` 只告警；
+2. **live 结果不进 PR 门禁**：`sort=heat` 的首条会随时间变，live 用例标 `-m live`，
+   只在 nightly / 手工跑（§13.6）；
+3. **`limit` 上限 20**：`/search/subjects` 在 POST body 里传 `limit` 会被静默压回 20，
+   分页只能走 query（`limit=50` 也只会回 20 条）。
 
 ---
 
@@ -1958,7 +1989,8 @@ QQ 私聊文本（白名单用户）    │  主模型输出        │  用户�
 | 嵌入计算（bge-small-zh-v1.5） | 否，本地 CPU/GPU 推理 |
 | 每轮拼好的 prompt（**含被注入的记忆片段、检索到的语料片段**） | **是**，发给所选模型供应商 |
 | QQ 消息内容 | 是，先经腾讯服务器（这是 QQ 入口的固有代价） |
-| 影视语料元数据 | 是（入库阶段从 Bangumi / TMDb 拉取） |
+| 影视语料元数据（**入库阶段**，一次性） | 是，从 Bangumi / TMDb 拉取并缓存在 `data/raw/` |
+| Bangumi live 检索（**对话阶段**，`bangumi_search` / `bangumi_subject` / `bangumi_my_collections`） | **是**，当场请求 `api.bgm.tv`（读自己的收藏要 PAT；搜索与条目详情免 token） |
 
 README 要直接写出这张表。声称"数据完全本地"而实际上每轮都把记忆片段发给云端模型，是答辩时最容易被戳穿的表述。
 

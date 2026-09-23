@@ -55,7 +55,8 @@ uv run yixiang web        # 打开 http://127.0.0.1:8765/
 | 嵌入计算（bge-small-zh-v1.5，本地 CPU 推理） | **否** |
 | 每轮拼好的 prompt（**含被注入的记忆片段、检索到的语料片段**） | **是**，发给所选模型供应商 |
 | QQ 消息内容（P2 接入后） | 是，先经腾讯服务器 |
-| 影视语料元数据（入库阶段） | 是，从 Bangumi / TMDb 拉取 |
+| 影视语料元数据（**入库阶段**，一次性） | 是，从 Bangumi / TMDb 拉取并缓存在 `data/raw/` |
+| Bangumi live 检索（**对话阶段**，`bangumi_search` / `bangumi_subject` / `bangumi_my_collections`） | **是**，当场请求 `api.bgm.tv`（读自己的收藏要 PAT；搜索与条目详情免 token） |
 
 缩小出网面的路线是明确的：门控与巩固换本地小模型（`.env` 的 `YIXIANG_GATE_MODEL` / `YIXIANG_UTILITY_MODEL` 配置位已就绪）、嵌入已经是本地、检索片段按需注入而不是全量塞入。**先把边界写清楚，再谈缩小**——反过来做，最容易在答辩时被一句话戳穿。
 
@@ -151,7 +152,7 @@ scripts/         demo 剧本与恢复演练脚本
 - **judge 10 条 rubric**：五类各 2 条，`must_have` 与 `must_not_have` 分开写，离线均分 **4.80**（`yixiang eval judge`）；解析失败该条计 0 并留痕；
 - **常驻调度**：巩固兜底 23:30（幂等靠 §7.7.1 水印）、每日汇总 23:50（`usage:YYYY-MM-DD`）、记忆巡检周日 22:00（`verify:YYYY-Www`）；`run_job` 异常隔离——**失败可见，但绝不杀主链路**，留痕在 `data/logs/jobs-*.jsonl`；
 - **备份与恢复**：`VACUUM INTO` 日快照 + `data/` 私有仓提交 + 30 天回收；`scripts/restore_drill.py` 把快照当唯一库源重建一次并逐项对账（表结构 / 行数 / 记忆三方一致性）；
-- **本机测试前端**：`yixiang web` 起一个零依赖的本地控制台（内置标准库 HTTP 服务，只绑 `127.0.0.1:8765`），六个面板分别管对话、历史对话、人设与记忆、模型配置、提示词、QQ 设置；上传的文件落 `data/uploads/`，由第 16 个工具 `read_file` 按需读取，外部内容一律 `<external_content>` 包裹；
+- **本机测试前端**：`yixiang web` 起一个零依赖的本地控制台（内置标准库 HTTP 服务，只绑 `127.0.0.1:8765`），六个面板分别管对话、历史对话、人设与记忆、模型配置、提示词、QQ 设置；上传的文件落 `data/uploads/`，由注册表里的第 19 个工具 `read_file` 按需读取（§9.2 / §9.5 另有三个 Bangumi live 工具），外部内容一律 `<external_content>` 包裹；
 - **文档面**：本 README（含数据边界表）、[`docs/architecture.md`](./docs/architecture.md)、[`scripts/demo-week4.md`](./scripts/demo-week4.md)、三张数字卡 [`docs/NUMBERS.md`](./docs/NUMBERS.md)。
 
 **边界（写在明面上）**：cron 定时晨报推送与唤醒补发、QQ 入口属 P2，PART 4 只预留接口（`scheduler/brief_job.py`），不参与任何门禁。语料入库的**真实抓取**与**真实嵌入模型**需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json` + `YIXIANG_EMBED_BACKEND=hash`。

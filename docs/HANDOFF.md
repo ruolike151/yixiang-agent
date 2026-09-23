@@ -66,7 +66,9 @@ uv run yixiang rag eval                                                 # 真实
 2. 真实嵌入要先下模型（`BAAI/bge-small-zh-v1.5`，fastembed ≈100MB）。**换了嵌入模型/维度，旧向量必须全量重算**，
    启动时会检查 `meta.embed_model` / `embed_dim` 并拒绝启动，提示 `yixiang rag reindex`——这是保护，不是 bug；
 3. README 上写的 **90% 命中率 / MRR 0.792 是 hash 假嵌入 + 31 部语料的数字**，它证明的是"检索链路没坏"，
-   不是"语义检索质量好"。真实数字要等 T1。
+   不是"语义检索质量好"。真抓两段之后（333 部语料）同一份考卷是 **70.0% / MRR 0.667**（仍是 hash 假嵌入），
+   换上真嵌入 `fastembed` 后同一份 333 部语料回到 **90.0% / MRR 0.792**——三个口径都在
+   [`NUMBERS.md`](./NUMBERS.md) 卡 2，引用前先看清是"哪份语料 + 哪张嵌入"。
 
 **我的建议**：先把 31 部的状态当作已交付（够用），把 T1 排进"有时间就做"。但要清楚代价——面试官问
 "你这个抓取真跑过吗"，现在只能答"离线等价入口验过"。这条是**唯一一处形态完整但没上过真网**的代码。
@@ -85,7 +87,7 @@ uv run yixiang rag eval                                                 # 真实
 四个真实的选择点，按踩坑概率排序：
 
 1. **main 必须支持工具调用（function calling）**。工具是主链路的骨架（`add_memo` / `search_media` /
-   `read_file`…共 16 个），模型不会调工具 = 整个 Agent 只剩聊天。⚠️ **`deepseek-reasoner` 在
+   `read_file`…共 19 个），模型不会调工具 = 整个 Agent 只剩聊天。⚠️ **`deepseek-reasoner` 在
    `pricing.py` 的价目表里有，但它不支持工具调用**，换上去主链路会哑掉——**代码里没有任何拦截**，
    这是最容易踩的一个坑。换 main 之前先确认候选模型支持 OpenAI 风格的 `tools` + 流式 `tool_calls` 分片。
 2. **价目表是手工维护的，换模型必须同时改 `yixiang/ops/pricing.py`**。现在是
@@ -161,7 +163,7 @@ main 长期难以本地化。
 
 | 项 | 现状 | 影响 |
 |---|---|---|
-| **真实抓取**（Bangumi / TMDb） | **已跑过**（Task 7）：真网络抓一页并幂等入库，`evals/live/` 里 2 条 `-m live` 用例守着；本机已抓 333 部 | 面试问"真跑过吗"现在答得出；TMDb 那一路仍只验过离线入口 |
+| **真实抓取**（Bangumi / TMDb） | **已跑过**（Task 7 抓一页；Task 26 两段真跑：大盘 `--sort heat --min-rating 8 --min-votes 500 --pages 25 --want 200` + 增量 `--min-rating 7.5 --since 2021-09-21 --pages 30 --want 200`，并集去重后把语料从 31 部抬到 **333 部**）；`evals/live/` 里 2 条 `-m live` 用例守着 | 面试问"真跑过吗"现在答得出，且能给出 333 部那一行的 top-3 **70.0% / MRR 0.667**（hash 口径，数字口径见 §1.1）；TMDb 那一路仍只验过离线入口 |
 | **真实嵌入**（fastembed `bge-small-zh-v1.5`） | **已跑过**（Task 8）：模型落 `~/.cache/fastembed`，333 部语料真嵌入 **90.0% / MRR 0.792**（31 部那行是 `hash` 假嵌入）；CI 仍固定 `YIXIANG_EMBED_BACKEND=hash` | 真实语义指标已回填进 [`NUMBERS.md`](./NUMBERS.md) 卡 2；真模型只在 nightly / 发版前跑 |
 | **judge `--live`** | 只跑过离线基线（均分 4.80）；`data/usage.jsonl` 里**没有一条 `role=judge` 的记录** | "真假模型评分"这条路没验过 |
 | **nightly 工作流** | **不存在**——`.github/workflows/` 下只有 `ci.yml` | README 与 TECH §13.6 都写"live 走 nightly"，实际没有这个定时任务 |

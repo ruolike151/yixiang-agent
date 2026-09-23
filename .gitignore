@@ -31,5 +31,5 @@ Thumbs.db
 docs/superpowers/
 docs/INTERVIEW-PREP.md
 
-# 重写历史前的全量备份包（确认推送无误后可删）
-yixiang-history-backup.bundle
+# 本机历史备份包（含被摘除的旧提交，绝不进仓库）
+*.bundle

@@ -23,7 +23,7 @@ uv run yixiang chat          # ③ 开始对话（流式输出）
 没有 API key 也能验证"跑起来了"——离线入口两条命令：
 
 ```bash
-uv run yixiang doctor        # 六项启动自检：配置 / 目录 / SQLite / 向量扩展 / 模型探活 / 三文件
+uv run yixiang doctor        # 八项启动自检：配置 / 目录 / SQLite / 向量扩展 / 模型探活 / 三文件 / 密钥可恢复性 / Bangumi 收藏 token
 uv run yixiang rag eval      # 检索回归：top-3 命中率 + MRR（无 key 可跑；首次会下 100MB 嵌入模型，
                              #   想零下载就加 YIXIANG_EMBED_BACKEND=hash，那一路是离线假嵌入）
 ```
@@ -37,11 +37,13 @@ CLI 内的斜杠命令：`/help` `/new [名字]` `/history` `/tools` `/trace [n]
 uv run yixiang web        # 打开 http://127.0.0.1:8765/
 ```
 
-六个面板对应六件测试时最常做的事：**对话**（流式，逐字出）、**历史对话**（按会话翻往
+七个面板对应测试时最常做的事：**对话**（流式，逐字出）、**历史对话**（按会话翻往
 来，点一条即切过去）、**人设与记忆**（`soul.md` / `user.md` / `memory.md` 就地改，超限
 一个字节都不写）、**模型配置**（主模型 / api_base / 上限 / 预算，写回 `.env` 并热生效）、
 **提示词**（S1~S8 本轮实况，自查"模型到底看到了什么"）、**QQ 设置**（白名单校验：开了
-网关却没白名单直接拒）。上传的文件落在 `data/uploads/`，模型用 `read_file` 读它。
+网关却没白名单直接拒）、**链路 trace**（本轮迭代 / 工具调用 / tokens / 成本，与
+`yixiang ops show-trace <turn_id>` 同源）。上传的文件落在 `data/uploads/`，模型用
+`read_file` 读它。
 手边没文件可传，用 [`evals/fixtures/web_upload_sample.md`](./evals/fixtures/web_upload_sample.md)
 当样张。
 
@@ -102,7 +104,7 @@ judge 的局限主动交底（TECH §13.4）：P0 用与 main 同族的模型自
 ```bash
 uv run yixiang chat                     # 交互式对话（流式）
 uv run yixiang web                      # 本机 Web 控制台（http://127.0.0.1:8765/）
-uv run yixiang doctor                   # 六项启动自检
+uv run yixiang doctor                   # 八项启动自检
 uv run yixiang migrate                  # 应用数据库迁移
 uv run yixiang brief                    # 按需日报：今日安排 + 1 条影视推荐
 uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 离线入库 31 部
@@ -125,17 +127,19 @@ yixiang/         包本体
   loop/          Agent Loop 与防绕圈护栏
   tools/         工具定义与注册表（memo / plan / 记忆 / 影视）
   memory/        三文件核心记忆、三支柱检索、门控、巩固、人机共治
-  rag/           影视语料：入库 / 检索 / 口味加权 / 评测 / 嵌入
-  gateway/       CLI 与（P2）QQ 网关
+  rag/           影视语料：ingest/（入库）+ retrieve/（检索）+ 口味加权 / 评测 / 嵌入
+  gateway/       入口层：cli.py（REPL）/ qq.py（OneBot v11 反向 WS）/ sinks.py（投递通道）
   web/           Web 控制台：console.py（业务适配）+ server.py（HTTP/SSE/静态文件）+ static/（手写前端，无构建）
-  scheduler/     常驻 job：巩固兜底 / 每日汇总 / 周巡检（+P2 晨报）
+  scheduler/     常驻 job：jobs.py（巩固兜底 / 每日汇总 / 周巡检）+ brief_job.py（晨报）+ runtime.py
   ops/           trace、usage、doctor、explain-search、release_gate、backup
 templates/       soul.md / user.md / memory.md 的初版模板（仓库只放模板）
 data/            运行时数据（gitignore）：三文件、state.db、traces/、usage.jsonl、briefs/、backups/
                  └ 它同时是一个**私有仓**：只版本化三文件 / skills / briefs，永不推远端
-evals/           deterministic/（L1+L2+L3）+ golden/ + judge/ + fixtures/
-docs/            PRODUCT.md、TECH-DESIGN.md、architecture.md、NUMBERS.md、parts/
+evals/           deterministic/（L1+L2+L3）+ live/（`-m live` 真模型）+ golden/ + judge/ + fixtures/
+docs/            PRODUCT.md、TECH-DESIGN.md、architecture.md、NUMBERS.md、HANDOFF.md、
+                 SECRETS-RECOVERY.md、golden-decisions.md、TODO-AFTER-PART-4.md、parts/
 scripts/         demo 剧本与恢复演练脚本
+.github/         workflows/ci.yml（四步门禁）
 ```
 
 ## 当前进度
@@ -152,10 +156,10 @@ scripts/         demo 剧本与恢复演练脚本
 - **judge 10 条 rubric**：五类各 2 条，`must_have` 与 `must_not_have` 分开写，离线均分 **4.80**（`yixiang eval judge`）；解析失败该条计 0 并留痕；
 - **常驻调度**：巩固兜底 23:30（幂等靠 §7.7.1 水印）、每日汇总 23:50（`usage:YYYY-MM-DD`）、记忆巡检周日 22:00（`verify:YYYY-Www`）；`run_job` 异常隔离——**失败可见，但绝不杀主链路**，留痕在 `data/logs/jobs-*.jsonl`；
 - **备份与恢复**：`VACUUM INTO` 日快照 + `data/` 私有仓提交 + 30 天回收；`scripts/restore_drill.py` 把快照当唯一库源重建一次并逐项对账（表结构 / 行数 / 记忆三方一致性）；
-- **本机测试前端**：`yixiang web` 起一个零依赖的本地控制台（内置标准库 HTTP 服务，只绑 `127.0.0.1:8765`），六个面板分别管对话、历史对话、人设与记忆、模型配置、提示词、QQ 设置；上传的文件落 `data/uploads/`，由注册表里的第 19 个工具 `read_file` 按需读取（§9.2 / §9.5 另有三个 Bangumi live 工具），外部内容一律 `<external_content>` 包裹；
+- **本机测试前端**：`yixiang web` 起一个零依赖的本地控制台（内置标准库 HTTP 服务，只绑 `127.0.0.1:8765`），七个面板分别管对话、历史对话、人设与记忆、模型配置、提示词、QQ 设置、链路 trace；上传的文件落 `data/uploads/`，由注册表里的第 19 个工具 `read_file` 按需读取（§9.2 / §9.5 另有三个 Bangumi live 工具），外部内容一律 `<external_content>` 包裹；
 - **文档面**：本 README（含数据边界表）、[`docs/architecture.md`](./docs/architecture.md)、[`scripts/demo-week4.md`](./scripts/demo-week4.md)、三张数字卡 [`docs/NUMBERS.md`](./docs/NUMBERS.md)。
 
-**边界（写在明面上）**：cron 定时晨报推送与唤醒补发、QQ 入口属 P2，PART 4 只预留接口（`scheduler/brief_job.py`），不参与任何门禁。语料入库的**真实抓取**与**真实嵌入模型**需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json` + `YIXIANG_EMBED_BACKEND=hash`。
+**边界（写在明面上）**：cron 定时晨报推送与唤醒补发、QQ 入口都已落地（`gateway/sinks.py` 三个投递通道、`gateway/qq.py` 的 OneBot v11 反向 WS、`scheduler/` 的晨报 job），但**默认关闭**——要开才生效（`YIXIANG_SCHEDULER_ENABLED` / `YIXIANG_QQ_ENABLED`），入口是 `yixiang serve`；它们**不参与任何门禁**。语料入库的**真实抓取**与**真实嵌入模型**需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json` + `YIXIANG_EMBED_BACKEND=hash`。
 
 PART 3 交付时留下的 6 个决策点记在 [`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md)（PART 4 收口后再逐条过；其中 T3「评测关口味」的口径已写进本 README 的评测段与 `docs/NUMBERS.md`）。
 

@@ -19,7 +19,7 @@ uv run yixiang migrate                               # 期望：user_version=1
 uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json
 # 期望：local：共 31 条 · 新增 31 · 更新 0 · 跳过 0 · 向量 31（干净 data 目录）
 #      若库里已有真抓语料，这句会变成"新增 0 · 跳过 31 · 向量 333"——也正常（source_id 幂等）
-uv run yixiang doctor                                # 六项自检全绿再开始讲
+uv run yixiang doctor                                # 八项自检全绿再开始讲
 ```
 
 ## 1. 开场（0:00–0:20，照读）
@@ -44,12 +44,12 @@ uv run python -m yixiang.ops.release_gate
 
 ```text
 All checks passed!                                                    ← ① ruff
-185 passed, 2 skipped, 1 deselected in 6.51s                          ← ② 确定性用例（耗时随负载浮动，约 6~9 秒）
+337 passed, 1 deselected in 9.15s                                     ← ② 确定性用例（耗时随负载浮动，约 8~12 秒）
 校验通过：…\data\skills 下 0 个技能可用                                 ← ③ skills validate
 
 发布门禁：硬门禁 4/4 通过                                              ← ④ release_gate
   ✓ 确定性用例通过率                   100.0% / 阈值 100.0%     [硬门禁]
-      185 passed / 0 failed（pytest 退出码 0）
+      337 passed / 0 failed（pytest 退出码 0）
   ✓ judge 均分                     4.80 / 阈值 4.00       [硬门禁]
       10 条 · 均分 4.80 / 通过线 4.0（offline） · 最低：J-05=4；J-09=4
   ✓ 门控漏检率                        0.0% / 阈值 0.0%       [硬门禁]
@@ -240,7 +240,7 @@ uv run python scripts/restore_drill.py   # 演练：把快照当唯一库源启�
 ```powershell
 $env:YIXIANG_EMBED_BACKEND='hash'; $env:PYTHONUTF8='1'
 uv run ruff check .
-uv run pytest evals/deterministic -m "not live" -rs        # 185 passed, 2 skipped
+uv run pytest evals/deterministic -m "not live" -rs        # 337 passed, 1 deselected
 uv run yixiang eval judge                                  # 4.80（offline）
 uv run yixiang rag eval                                    # hash 口径：75.0% / MRR 0.625（333 部语料）
 uv run python -m yixiang.ops.release_gate                  # 硬门禁 4/4
@@ -254,7 +254,7 @@ uv run python scripts/restore_drill.py                     # 恢复演练通过
 没有语料时 `release_gate` 会自己按离线 fixture 入库再评测（`rag eval --source local --file` 的同一条路径），
 所以**干净环境里第一次跑门禁也能出真实数字**，而不是"没有语料 → 假装通过"。
 
-现场翻车时的动作顺序：① `uv run yixiang doctor` 看六项自检；② `uv run yixiang ops tail` 看今天有没有 trace；
+现场翻车时的动作顺序：① `uv run yixiang doctor` 看八项自检；② `uv run yixiang ops tail` 看今天有没有 trace；
 ③ 实在不行，切到第 9 步的离线五条命令——**它们和在线路径共用同一份代码**，只是把真模型换成假时钟与假 Provider。
 
 ## 10. 加演：Web 控制台（可选，**不计入 3 分钟**）
@@ -267,7 +267,7 @@ uv run python scripts/restore_drill.py                     # 恢复演练通过
 uv run yixiang web            # 只绑 127.0.0.1:8765；标准库实现，无前端构建步骤
 ```
 
-打开 `http://127.0.0.1:8765/`，六栏从左到右，每栏一句话就能讲完：
+打开 `http://127.0.0.1:8765/`，七栏从左到右，每栏一句话就能讲完：
 
 | 栏 | 现场动作 | 想证明什么 |
 |---|---|---|
@@ -277,11 +277,12 @@ uv run yixiang web            # 只绑 127.0.0.1:8765；标准库实现，无前
 | 模型配置 | 看 key 只出掩码；改一个非密配置 | 密钥永不回前端（T-4），改完写回 `.env` 且保留原有注释 |
 | 提示词 | 看 system 段的拼装顺序 | 静态在前、动态在后（TECH §4.5）——前缀缓存能不能命中就看它 |
 | QQ 设置 | 开 QQ、白名单留空 → 保存被拒 | 安全默认值：空白名单 = 拒绝一切外部消息（TECH §3.1） |
+| 链路 trace | 点开最后一轮 turn → 看迭代 / 工具调用 / tokens / 成本 | 与 `yixiang ops show-trace <turn_id>` 同源：终端能看到的，前端不再写第二份 |
 
 > 讲点（一句话）："前端是**手写的、没有构建步骤**的，它只是把已经存在的适配层（`web/console.py`）
 > 接到 HTTP + SSE 上；要讲的东西（门控 / 检索 / 记忆 / 成本）还是终端里那套代码，没有为演示写第二遍逻辑。"
 
 > 上传那条路径也可以顺手演：拖一个 `.md` 进去 → 它走的是 `read_file` 工具的同一份白名单与路径校验，
-> 文件名会被消毒、同名不覆盖（`evals/deterministic/test_web.py` 15 条用例盯着这些边界）。
+> 文件名会被消毒、同名不覆盖（`evals/deterministic/test_web.py` 24 条用例盯着这些边界）。
 
 > 录屏取舍：3 分钟正片用终端就够；加演这一段建议只在**远程面试**、或者对方主动问"有没有界面"时展开。

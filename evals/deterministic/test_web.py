@@ -339,7 +339,7 @@ def test_qq_settings_reject_enabled_without_allowlist(settings, clock):
     initial = api.qq()
     assert initial["fields"]["qq_enabled"] is False
     assert initial["allowed_count"] == 0
-    assert initial["status"] == "已关闭（P2 才接网关）"
+    assert initial["status"] == "已关闭（YIXIANG_QQ_ENABLED 未开）"
 
     with pytest.raises(ConsoleError) as exc:
         api.save_qq({"qq_enabled": True})

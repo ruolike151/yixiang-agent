@@ -6,19 +6,20 @@
 
 ## 0. 一分钟现状
 
-**能跑的**：`yixiang chat`（CLI 流式）/ `yixiang web`（本机六栏控制台）/ `yixiang rag eval`（检索回归）/
-`yixiang doctor`（六项自检）/ `yixiang backup` + 恢复演练。四个 PART 的验收项都在。
+**能跑的**：`yixiang chat`（CLI 流式）/ `yixiang web`（本机七栏控制台，含链路 trace）/ `yixiang rag eval`（检索回归）/
+`yixiang doctor`（八项自检）/ `yixiang serve`（QQ 网关 + 调度器，默认关）/ `yixiang backup` + 恢复演练。四个 PART 的验收项都在。
 
 **门禁**（当前实测）：
 
 ```text
 ruff check .                                  → All checks passed
-pytest evals/deterministic -m "not live" -rs  → 185 passed, 2 skipped, 1 deselected in 6.51s
+pytest evals/deterministic -m "not live" -rs  → 337 passed, 1 deselected in 9.15s
 yixiang skills validate                       → 通过
 python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"全过，可以合并"
 ```
 
-2 条 `skip` 是**设计如此**：D-13（QQ 幂等）、D-27（定时补发）属于 P2，见 §2.1。
+那 1 条 `deselected` 是标了 `-m live` 的真模型用例（`evals/live/`），nightly / 发版前才跑。**已无 `skip`**：
+D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地转成实跑，见 §2.1。
 
 **刚修的一件事**（`4b2883d`）：CLI 与 Web 连续对话时第二句报 `Event loop is closed`。根因是入口每轮
 `asyncio.run()` 新建并关掉 loop，而 provider 缓存的 `httpx.AsyncClient` 连接池绑在创建它的那条 loop 上。
@@ -34,35 +35,36 @@ python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"
 **结论：不需要你手写语料，但需要你拍一次板——"要不要联网跑一次真实入库"。**
 
 先把事实说清楚，这里有个容易误会的地方：RAG 的"资料"不是你写的文档，是 **Bangumi / TMDb 的公开元数据**
-（片名、年份、类型、评分、简介）。抓取管线已经写完了，`yixiang/rag/ingest.py` 里有单线程 + `sleep(1.0)`
-限速 + 退避重试 3 次 + `data/raw/` 缓存 + 断点续跑。**你不需要提供语料，你需要提供的是网络和一次决定。**
+（片名、年份、类型、评分、简介）。抓取管线已经写完了，`yixiang/rag/ingest/`（Task 24 拆包）里有单线程 + `sleep(1.0)`
+限速 + 退避重试 3 次 + `data/raw/` 缓存 + 断点续跑。**你不需要提供语料，那个决定也已经拍过并跑完了。**
 
 当前库里的真实状态（查过 `data/state.db`）：
 
 | 项 | 实际值 |
 |---|---|
-| `media` 表条数 | **31 部** |
-| 来源 | 全部来自 `evals/fixtures/media_sample.json`（`local:001`~`local:030` + 1 条 `local:900` 恶意样本） |
-| 设计目标 | 300~500 部（TECH §8.1） |
-| 真实抓取是否跑过 | **一次都没有**（TODO T1） |
+| `media` 表条数 | **333 部**（31 条离线 fixture + 两段真抓去重后的并集） |
+| 来源 | `evals/fixtures/media_sample.json` 的 31 条（`local:001`~`local:030` + 1 条 `local:900` 恶意样本）+ `rag ingest --source bangumi` 真抓两段 |
+| 设计目标 | 300~500 部（TECH §8.1）——**已进区间** |
+| 真实抓取是否跑过 | **跑过**：Task 7 先抓一页，Task 26 两段真跑（大盘 + 增量，去重后把语料从 31 部抬到 333 部）；`evals/live/` 里 2 条 `-m live` 用例守着 |
 
-两条路，二选一：
+复现方式（两条路，任选）：
 
 ```bash
-# 路 A：保持现状（31 部离线语料）——够讲清检索链路，零成本零风险
+# 路 A：只跑离线 fixture（31 条）——够讲清检索链路，零成本零风险
 uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json
 
-# 路 B：联网拉真实语料（约 5 分钟，Bangumi 免 key）
+# 路 B：联网拉真实语料（本机就是这么做的，约 5 分钟，Bangumi 免 key）
 uv run yixiang rag ingest --source bangumi --tags 悬疑,科幻 --pages 5   # 第一遍：新增
 uv run yixiang rag ingest --source bangumi --tags 悬疑,科幻 --pages 5   # 第二遍：应该全是"跳过"
 uv run yixiang rag eval                                                 # 真实嵌入下的指标
 ```
 
-**如果你选修 T1，有三件事必须先知道**（这是真的会踩的）：
+**真抓之前有三件事必须先知道**（本机踩过了，留给你重跑时对照）：
 
-1. **golden 集 20 条的期望集合是按 31 部语料标注的**。例如「看过《排球少年》还想看运动番」的 `note`
-   写着"离线语料里的运动番只有这三部"。语料换成 500 部后这些假设失效，命中率会变，**不是检索退步**。
-   golden 集纪律是"只增不改"，所以要么先做 T2（复核两条已知 MISS）再跑，要么跑完把结论写进 `note`；
+1. **golden 集 20 条的期望集合是按那 31 部语料标注的**。例如「看过《排球少年》还想看运动番」的 `note`
+   写着"离线语料里的运动番只有这三部"。语料换成 333 部后这些假设失效，命中率会变，**不是检索退步**——
+   本机跑完就是 70.0% / MRR 0.667（hash 口径）。golden 集纪律是"只增不改"，所以要么先做 T2（复核两条已知 MISS）
+   再跑，要么跑完把结论写进 `note`；
 2. 真实嵌入要先下模型（`BAAI/bge-small-zh-v1.5`，fastembed ≈100MB）。**换了嵌入模型/维度，旧向量必须全量重算**，
    启动时会检查 `meta.embed_model` / `embed_dim` 并拒绝启动，提示 `yixiang rag reindex`——这是保护，不是 bug；
 3. README 上写的 **90% 命中率 / MRR 0.792 是 hash 假嵌入 + 31 部语料的数字**，它证明的是"检索链路没坏"，
@@ -70,8 +72,9 @@ uv run yixiang rag eval                                                 # 真实
    换上真嵌入 `fastembed` 后同一份 333 部语料回到 **90.0% / MRR 0.792**——三个口径都在
    [`NUMBERS.md`](./NUMBERS.md) 卡 2，引用前先看清是"哪份语料 + 哪张嵌入"。
 
-**我的建议**：先把 31 部的状态当作已交付（够用），把 T1 排进"有时间就做"。但要清楚代价——面试官问
-"你这个抓取真跑过吗"，现在只能答"离线等价入口验过"。这条是**唯一一处形态完整但没上过真网**的代码。
+**T1 的状态**：联网跑一次真实抓取 + 真实嵌入（Task 7~9、Task 26）**已经完成**，所以面试官问
+"你这个抓取真跑过吗"，答案是"跑过，333 部语料、两段真抓，数字在 §2.2 与 [`NUMBERS.md`](./NUMBERS.md) 卡 2"。
+仍只验过离线入口的是 TMDb 那一路，以及 judge 的 `--live`（见 §2.2）。
 
 ### 1.2 模型的配置选择
 
@@ -142,8 +145,8 @@ main 长期难以本地化。
 
 | 编号 | 事项 | 现状 | 缺口 | 预估 |
 |---|---|---|---|---|
-| T6 | **定时晨报推送** | `scheduler/brief_job.py` 只有接口预留，`deliver_brief()` 是 `# pragma: no cover`；`brief_job` 不在 `scheduler.JOBS` 里 | 要写 `gateway/sinks.py` 三个投递通道（cli / file / toast）+ cron job + 补发算法；D-27 用例现在 `skip` | ~1 天 |
-| — | **QQ 网关** | `yixiang/gateway/qq.py` **不存在**；`yixiang serve` 只打印"还没实现"退非零；`processed_messages` 表已建好但没人写 | NapCat + OneBot v11 反向 WS、白名单、CQ 码、幂等、重连；D-13 用例现在 `skip` | ~2 天 |
+| T6 | **定时晨报推送** | **已落地**（Task 10 / Task 11）：`gateway/sinks.py` 三个投递通道（cli / file / toast）+ `scheduler/brief_job.py` 的 cron job 与补发算法，`brief_job` 已在 `scheduler.JOBS` 里 | 无（D-27 已转实跑）。默认关：`YIXIANG_SCHEDULER_ENABLED=1` 或 `yixiang serve --scheduler` 才开 | ✅ |
+| — | **QQ 网关** | **已落地**（Task 11）：`yixiang/gateway/qq.py` 存在，`yixiang serve` 起反向 WS；`processed_messages` 表有人写了 | 无（D-13 已转实跑）。默认关：`YIXIANG_QQ_ENABLED=1` + 非空 `YIXIANG_QQ_ALLOWED`，或 `yixiang serve --qq` | ✅ |
 | — | **B 站 / Pixiv 工具** | 只在 TECH §9.2 表里出现（`bilibili_search` / `pixiv_download`） | 未实现，可选 | — |
 
 > ✅ QQ 监听与 Web 端口的撞车**已修掉**：`YIXIANG_QQ_LISTEN` 默认改为 `127.0.0.1:8766`
@@ -189,14 +192,19 @@ main 长期难以本地化。
 | `docs/TECH-DESIGN.md` §10.2 | "`gateway/qq.py` **骨架留在目录里**" | "**没有落盘**——空文件证明不了入口可插拔"，改为指向 `YIXIANG_QQ_*` 配置位 / `doctor` 白名单自检 / `brief_job` 接口预留；§1.4 目录树的两行也标了"设计位，尚未落盘" |
 | `docs/TECH-DESIGN.md` §10.3 | "`sinks.py` 定义 `Sink` 协议…P1 只落协议与 cli / file" | 改成"表是**设计**、`sinks.py` 尚未落盘"，并说明按需形态只需 `tools/brief.py` 直接写 `data/briefs/` |
 | `scripts/demo-week4.md` | `162 passed … in 4.51s`（3 处）+ 门禁块 `162 passed / 0 failed` + 成本 `¥0.0000` | `185 passed, 2 skipped, 1 deselected in 6.51s`、`185 passed / 0 failed`、成本行换成实测 `¥0.0150 / 今天 2 轮 ¥0.0236` |
-| `scripts/demo-week4.md` | 全篇没有 Web 控制台一节 | 新增第 10 节**加演**（六栏动作表 + 上传路径 + 讲点），开头标明**不计入 3 分钟** |
+| `scripts/demo-week4.md` | 全篇没有 Web 控制台一节 | 新增第 10 节**加演**（面板动作表 + 上传路径 + 讲点），开头标明**不计入 3 分钟**；后来前端扩到七栏，表里补了"链路 trace"一行 |
 | `docs/PRODUCT.md` §14.2-3、`docs/TECH-DESIGN.md` §17.2-3、N-5 | 同源的"不做 Web dashboard" / "保留 qq.py 骨架" | 都补了"已偏离 / 未落盘"的更正，三处口径与上面一致 |
+
+> 后续进展（2026-09-23）：上表点名的"未落盘 / 骨架"**都已落盘**——`gateway/qq.py`（OneBot v11
+> 反向 WS + 白名单 + 幂等 + 重连）、`gateway/sinks.py`（cli / file / toast 三通道）与
+> `scheduler/`（jobs.py / brief_job.py / runtime.py，晨报 job 已在 `JOBS` 里）。表格里的"原来写 /
+> 现在写"是当时的留档，**不代表当前状态**；当前状态看 §0 / §2.1 / §2.2。
 
 ### 2.5 设计里没写、但迟早会撞上的
 
 - **前缀缓存命中率只有 9.0%**，而成本模型的假设是 ≥60%（TECH §4.5，`PRODUCT.md` 的 ¥0.5/天依赖它）。
   小样本下正常（`ops cost --explain` 会打印这个数），但**没有任何门禁在盯它**——想守住成本目标，这条得进巡检；
-- **语料规模停在 31 部**，与设计目标 300~500 部差一个量级，见 §1.1；
+- **语料规模已到 333 部**（真抓两段，Task 26），落在设计目标 300~500 部区间；剩下的差距只是"还没到上限"，见 §1.1 / §2.2；
 - **judge 的"离线基线自检"没有区分度压力**：10 条里 2 条故意不满分（J-05 / J-09），机制是好的，
   但真正区分度只有 `--live` 才能量，见 §2.2；
 - `data/` 是独立私有仓且 `gitignore`，**备份链路只在本地**，换机器要手动搬 `data/`。
@@ -212,10 +220,10 @@ $env:PYTHONIOENCODING="utf-8"          # Windows 上中文输出不乱码（必�
 
 .venv\Scripts\ruff.exe check .                                        # ① All checks passed
 .venv\Scripts\python.exe -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-                                                                       # ② 185 passed, 2 skipped
+                                                                       # ② 337 passed, 1 deselected
 $env:YIXIANG_EMBED_BACKEND="hash"
 .venv\Scripts\python.exe -m yixiang.ops.release_gate                   # ③ 硬门禁 4/4
-.venv\Scripts\python.exe -m yixiang doctor                             # ④ 六项自检
+.venv\Scripts\python.exe -m yixiang doctor                             # ④ 八项自检
 .venv\Scripts\python.exe -m yixiang rag eval                           # ⑤ top-3 ≥60%（离线口径）
 .venv\Scripts\python.exe -m yixiang memory verify                      # ⑥ 记忆三方对账，无漂移
 .venv\Scripts\python.exe -m yixiang web                                # ⑦ 打开 http://127.0.0.1:8765/
@@ -239,7 +247,8 @@ $env:YIXIANG_EMBED_BACKEND="hash"
 
 ## 5. 想继续往下做，三条最划算的路
 
-1. **补 T1**（联网跑一次真实抓取 + 真实嵌入）——把项目里唯一"没上过真网"的形态补上，顺手回填 README 与 demo 剧本的数字；
-2. **补 T6 + QQ**（约 3 天）——把"入口可插拔"从设计变成事实，D-13 / D-27 两条 `skip` 用例就能转绿；
-3. **Web 三条 P1**（停止生成 / markdown / 拖拽上传）——投入最小、演示时最直观的加分项，
-   尤其是"停止生成"，它是现在唯一一处"卡住只能等"的交互。
+1. ~~**补 T1**（联网跑一次真实抓取 + 真实嵌入）~~——**已做完**（Task 7~9、Task 26）：333 部语料、真嵌入 90.0% / MRR 0.792；
+2. ~~**补 T6 + QQ**（约 3 天）~~——**已做完**（Task 10 / Task 11）：D-13 / D-27 两条 `skip` 用例已转绿；
+3. ~~**Web 三条 P1**（停止生成 / markdown / 拖拽上传）~~——**已做完**（`58db07c` / `ad4d359` / `f6cd1e6`）；
+4. 还没做的：**T2**（golden 两条已知 MISS 定案）、**T4**（`templates/user.md` 偏好写法兼容期）、
+   以及 §2.5 那三条"迟早会撞上"的（前缀缓存命中率进巡检、judge `--live` 跑一次、`data/` 私有仓换机器）。

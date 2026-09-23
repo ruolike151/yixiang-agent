@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--scheduler", action="store_true", help="强制开调度器（等价 YIXIANG_SCHEDULER_ENABLED=1）"
     )
-    sub.add_parser("doctor", help="七项启动自检")
+    sub.add_parser("doctor", help="八项启动自检")
     sub.add_parser("migrate", help="应用数据库迁移")
     # rag（ingest / reindex / eval）与 brief 的命令实现在 ops/rag_cmd.py，保持这里瘦
     rag_cmd.add_parsers(sub)

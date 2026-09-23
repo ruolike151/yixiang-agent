@@ -51,7 +51,7 @@ const PANELS = [
     id: "qq",
     label: "QQ 设置",
     icon: "link",
-    desc: "QQ 网关的开关与白名单（P2 才接网关，配置先落 .env）。",
+    desc: "QQ 网关（OneBot v11 反向 WS）的开关与白名单；空白名单 = 拒绝一切外部消息。",
   },
   {
     id: "traces",

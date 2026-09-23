@@ -434,7 +434,7 @@ class ConsoleAPI:
             "allowed_count": len(allowed),
             "status": _qq_status(settings.qq_enabled, allowed),
             "note": (
-                "P2 才接网关：这里的配置会写进 .env，QQ 入口落地后直接生效。"
+                "这里的配置会写进 .env；QQ 网关由 `yixiang serve` 加载，改完重启该进程生效。"
                 "默认监听 127.0.0.1:8766——8765 留给 Web 控制台，两个都开时不会撞端口。"
             ),
         }
@@ -833,7 +833,7 @@ def _qq_status(enabled: bool, allowed: list[str]) -> str:
         return "配置不合法：开了网关但白名单为空（会被拒绝启动）"
     if allowed:
         return f"已关闭（已存白名单 {len(allowed)} 个，开启即生效）"
-    return "已关闭（P2 才接网关）"
+    return "已关闭（YIXIANG_QQ_ENABLED 未开）"
 
 
 __all__ = [

@@ -91,7 +91,7 @@ flowchart TB
 |---|---|---|---|
 | 业务适配 | `web/console.py` | 把请求翻译成对 `App` 与 `data/` 的调用（人设 / 记忆 / 配置 / QQ / 上传 / 对话） | 不认识 HTTP，不写 JSON，不管 SSE 字节 |
 | 协议 | `web/server.py` | 路由、JSON、SSE、静态文件、multipart 解析 | 不做业务判断——"能不能改 / 超没超上限"全在 `console.py` |
-| 前端 | `web/static/`（手写 js/css） | 六栏面板、逐字渲染 SSE、hash 深链接 | 无构建、无 CDN、不用 `innerHTML` 拼数据 |
+| 前端 | `web/static/`（手写 js/css） | 七栏面板（第 7 栏 = 链路 trace）、逐字渲染 SSE、hash 深链接 | 无构建、无 CDN、不用 `innerHTML` 拼数据 |
 
 三条与主链路同源的纪律：
 
@@ -154,7 +154,7 @@ sequenceDiagram
 
 | 支柱 | 代码 | 管什么 | 明确不管什么 |
 |---|---|---|---|
-| **入口** | `gateway/cli.py`、`web/`（本机控制台）、P2 的 `gateway/` QQ 入口 | 读一行、打流式输出、斜杠命令（`/new` `/history` `/tools` `/trace` `/cost`）；Web 侧还有六栏测试面板与上传件落盘 | 不含任何业务判断；换入口不改业务 |
+| **入口** | `gateway/cli.py`、`gateway/qq.py`（OneBot v11 反向 WS）、`web/`（本机控制台） | 读一行、打流式输出、斜杠命令（`/new` `/history` `/tools` `/trace` `/cost`）；Web 侧还有七栏测试面板与上传件落盘；QQ 侧走白名单 + 幂等 | 不含任何业务判断；换入口不改业务 |
 | **Loop** | `loop/agent.py`、`loop/guard.py` | 迭代上限、防绕圈、工具调用编排、`finish_reason=length` 与坏 JSON 的失败路径 | 不认识"记忆"和"语料"这两个概念 |
 | **记忆** | `memory/` | 三文件核心记忆（原子写 + 上限校验）、三支柱检索（facts / episodes / skills）、检索门控、巩固与 watermark、人机共治、三方对账 | 不做影视语料的入库与推荐 |
 | **RAG 语料** | `rag/` | `source_id` 幂等入库、中文混合检索（FTS5 + 向量 + RRF）、硬过滤 + 口味软加权、7 天去重、golden 回归 | 不写长期记忆（推荐历史写 `recommend_log`，不是 `facts`） |
@@ -184,7 +184,7 @@ sequenceDiagram
 
 同一条纪律的另一面，是**假 Provider 是整个体系的地基**：它让"Agent 的行为"第一次变成可测对象——全量 L1+L2 跑完 ≤30 秒、零成本、零抖动，还能稳定复现真模型难复现的失败路径（超时、`finish_reason=length`、工具参数是坏 JSON）。
 
-当前实测（2026-09-20）：`185 passed, 2 skipped`（2 条属 P2 的 D-13 / D-27，标 `skip`），全量 **6.5 秒**；`-m "not live"` 离线、零成本。原始数据见 [`NUMBERS.md`](./NUMBERS.md)。
+当前实测（2026-09-23）：`337 passed, 1 deselected`（无 `skip`；D-13 / D-27 随 QQ 网关与晨报 job 落地后转实跑），全量 **9.15 秒**（随负载浮动）；`-m "not live"` 离线、零成本。原始数据见 [`NUMBERS.md`](./NUMBERS.md)。
 
 ## 6. 数据落盘地图
 
@@ -204,7 +204,7 @@ sequenceDiagram
 
 ## 7. 边界（写在明面上）
 
-- **P2 的东西不进任何门禁**：定时晨报推送与唤醒补发、QQ 入口、B 站 / Pixiv 工具都只预留接口（`scheduler/brief_job.py`），`release_gate` 不判它们。P2 做完也**不回头改门禁**，`skip` 转为实跑即可；
+- **留在门禁外的入口不进任何门禁**：定时晨报推送与唤醒补发（`scheduler/brief_job.py` + `gateway/sinks.py`）与 QQ 入口（`gateway/qq.py`）都已落地，但默认关闭、`release_gate` 不判它们；B 站 / Pixiv 两个工具仍是设计位。补上这些入口**没回头改门禁**，D-13 / D-27 的 `skip` 直接转成了实跑；
 - **数据边界是诚实的**：每轮拼好的 prompt（含注入的记忆与检索片段）会发给模型供应商，QQ 消息经腾讯，影视语料元数据入库阶段从 Bangumi / TMDb 拉取；**对话阶段调 Bangumi live 工具时也会请求 api.bgm.tv**；三文件 / `state.db` / trace / 备份与嵌入计算不出网。完整表在 [`../README.md`](../README.md) 的"数据边界"一节；
 - **降级优先于不可用**：记忆子系统装配失败仍可聊天（三文件照读、检索缺席）；嵌入拿不到退纯 FTS5 并记 `E_EMBED_UNAVAILABLE`；常驻 job 抛异常只留痕，绝不杀主链路。
 

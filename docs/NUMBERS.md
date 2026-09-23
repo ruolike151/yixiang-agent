@@ -193,49 +193,68 @@ top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 
 ```text
 $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-185 passed, 2 skipped, 1 deselected in 6.51s
+337 passed, 1 deselected in 9.15s
 ```
 
 | 维度 | 数字 | 说明 |
 |---|---|---|
-| 收集总数 | **188** | 含 1 条 `-m live`（真模型用例） |
-| `-m "not live"` 选中 | **187** | 每次 PR + CI 跑的就是这一档 |
-| 通过 | **185** | 通过率 100%（门禁硬指标） |
-| 跳过 | **2** | D-13 QQ 幂等、D-27 定时补发，都属 P2，按设计 `skip` |
+| 收集总数 | **338** | 含 1 条 `-m live`（真模型用例） |
+| `-m "not live"` 选中 | **337** | 每次 PR + CI 跑的就是这一档 |
+| 通过 | **337** | 通过率 100%（门禁硬指标） |
+| 跳过 | **0** | D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地**转成实跑**，不再 `skip` |
 | 排除 | **1** | 标了 `-m live`，nightly / 发版前才跑 |
-| 全量耗时 | **6.51 s** | 离线、零成本、零抖动 |
+| 全量耗时 | **9.15 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
 
-逐文件分布（`-m "not live"` 收集数，合计 187）：
+逐文件分布（`-m "not live"` 收集数，合计 337，36 个文件）：
 
 | 文件 | 条数 | 覆盖 |
 |---|---|---|
-| `test_retrieval.py` | 29 | 入库幂等、FTS 分词、RRF、硬过滤、口味加权、降级、注入包裹 |
-| `test_provider.py` | 19 | 流式解析、超时、`finish_reason=length`、坏 JSON、用量记账 |
+| `test_retrieval.py` | 32 | 入库幂等、FTS 分词、RRF、硬过滤、口味加权、降级、注入包裹 |
+| `test_provider.py` | 26 | 流式解析、超时、`finish_reason=length`、坏 JSON、用量记账 |
+| `test_web.py` | 24 | 七栏控制台：配置/人设/记忆读写、multipart 上传、`read_file` 越界、SSE 分帧、链路 trace 面板 |
 | `test_tools_memo.py` | 17 | 备忘的幂等键 / 到期 / 去重 |
+| `test_bangumi_collections.py` | 16 | Bangumi 收藏 → 口味画像（假 client，不出网） |
 | `test_gate.py` | 16 | 门控规则层、模型层、fail-open、标注集指标 |
-| `test_web.py` | 15 | 六栏控制台：配置/人设/记忆读写、multipart 上传、`read_file` 越界、SSE 分帧 |
-| `test_scheduler.py` | 14 | 三个 job 的幂等、异常隔离、假时钟、P2 skip |
-| `test_security.py` | 13 | 路径逃逸、注入包裹、超长截断、D-13 skip |
+| `test_ingest_fetch.py` | 16 | 抓取的限速 / 退避 / 缓存 / 游标（假 client，不出网） |
+| `test_scheduler.py` | 14 | 四个 job 的幂等、异常隔离、假时钟、补发 |
+| `test_security.py` | 14 | 路径逃逸（D-22）、注入包裹、超长截断、QQ 幂等 |
+| `test_doctor.py` | 13 | 八项自检、离线嵌入后端白名单、8766/8765 端口不撞车 |
+| `test_qq.py` | 13 | QQ 网关：分片、白名单、幂等、重连（D-13） |
+| `test_bangumi_tools.py` | 10 | `bangumi_search` / `bangumi_subject` 的契约与降级 |
 | `test_memory_write.py` | 9 | "记住"硬契约、纠错重试、失败可见 |
+| `test_bangumi_proxy.py` | 8 | 仅 Bangumi 出口走代理，别的链路一字节不碰 |
+| `test_docs_consistency.py` | 8 | doc 口径防漂移：项数 / 栏数 / "还不存在"句 / 目录树 |
 | `test_event_loop.py` | 8 | 一条线程一条常驻 loop：两轮同 loop、收尾关闭、keep-alive 复用 |
+| `test_judge_parse.py` | 8 | judge 判词解析容错 |
+| `test_sinks.py` | 8 | 晨报三通道（cli / file / toast）各自可断言，一次真通知都不弹 |
 | `test_memory_sync.py` | 7 | 三方对账、手改生效、漂移检测 |
+| `test_pricing.py` | 7 | 价目表覆盖、退役模型名守门 |
 | `test_cli_gateway.py` | 5 | 斜杠命令、会话切换、流式渲染 |
-| `test_doctor.py` | 5 | 六项自检、离线嵌入后端白名单 |
+| `test_db.py` | 5 | 迁移（D-26） |
+| `test_docs_bangumi.py` | 5 | Bangumi 接入的文档口径（工具数、§9.2 清单） |
+| `test_embed_contract.py` | 5 | 文档里的模型 / 维度与代码常量一致 |
 | `test_loop_guard.py` | 5 | 迭代上限、防绕圈 |
 | `test_memory_capacity.py` | 5 | 三文件上限与淘汰 |
+| `test_sessions.py` | 5 | 会话改名 / 搜索 / 导出 / 删除 |
 | `test_tools_plan.py` | 5 | 计划工具与工具痕迹折叠 |
-| `test_db.py`、`test_consolidation.py`、`test_release_gate.py` | 4 + 4 + 4 | 迁移（D-26）、巩固三档阈值、门禁判定自身 |
+| `test_consolidation.py` | 4 | 巩固三档阈值与质量门禁 |
+| `test_release_gate.py` | 4 | 门禁判定自身 |
+| `test_backup_secrets.py` | 3 | `.env` 可恢复副本（第 7 项自检的证据） |
+| `test_golden_contract.py` | 3 | golden 集"只增不改"冻结契约 |
 | `test_loop_context.py` | 3 | 上下文预算与裁剪顺序（D-21） |
+| `test_serve.py` | 3 | `yixiang serve` 的接线：APScheduler 挂 JOBS + 两个开关 |
+| `test_judge_live.py` | 2 | judge 的 `--live` 路径（跨用例复用 provider） |
+| `test_markdown_js.py` | 1 | 前端 Markdown 渲染器（`node --test` 挂进 pytest） |
 
 编号覆盖（PART-4 §7 的用例表）：
 
 | 编号 | 内容 | 落在哪 | 状态 |
 |---|---|---|---|
 | D-12 | 推荐去重（连续两次无交集） | `test_retrieval.py` | 绿 |
-| D-13 | QQ 幂等 | `test_security.py` | `skip`（P2） |
+| D-13 | QQ 幂等 | `test_security.py` / `test_qq.py` | 绿（网关落地后转实跑） |
 | D-22 | 路径逃逸 | `test_security.py` | 绿 |
 | D-26 | 迁移到最新 `user_version` | `test_db.py` | 绿 |
-| D-27 | 定时补发 | `test_scheduler.py` | `skip`（P2） |
+| D-27 | 定时补发 | `test_scheduler.py` | 绿（晨报 job 落地后转实跑） |
 | J-01~J-10 | judge 10 条 rubric | `evals/judge/cases.yaml` | 均分 4.80 |
 | — | job 幂等 / 异常隔离 / 假时钟 | `test_scheduler.py` | 绿 |
 | — | 门禁判定与 `pytest` 参数口径 | `test_release_gate.py` | 绿 |

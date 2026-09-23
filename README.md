@@ -1,16 +1,74 @@
 # yixiang（以湘）
 
-本地优先的个人 Agent：**有记忆、有评测、有成本账**——是"连续在用"的助手，不是"跑过一次"的演示。
+**本地优先的个人 Agent：有记忆、有评测、有成本账。**
 
-它和聊天机器人的差别在三条可验证的工程事实：
+它不是一个"跑过一次"的 LLM demo，而是每天在用的助手——这个仓库里每一句"我没有退步"，都指得到一个可复算的数字。
 
-1. **每轮现拼工作记忆**：人格（`soul.md`）+ 用户画像（`user.md`）+ 核心记忆（`memory.md`）+ 检索到的长尾 facts / episodes，由代码决定注入什么，不靠"希望模型记得"；
-2. **每件事都留痕**：工具调用进 `data/traces/`（`ops tail` / `show-trace` 可回放），每次模型调用进 `usage.jsonl`（`ops cost --explain` 打印各段 token 占比）；
-3. **退步会被拦住**：GitHub Actions 四步门禁 + `release_gate` 五项判定（确定性 100% / judge ≥4.0 / 门控漏检 0 / 检索 top-3 ≥60% / 成本告警）。判定逻辑只有一份，不在 YAML 里重写。
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![uv](https://img.shields.io/badge/deps-uv-DE5FE9)
+![no framework](https://img.shields.io/badge/Agent%20Loop-%E8%87%AA%E7%A0%94%EF%BC%8C%E6%97%A0%20LangChain-orange)
+![tests](https://img.shields.io/badge/deterministic%20337%20passed-8~9s-brightgreen)
+![offline](https://img.shields.io/badge/%E7%A6%BB%E7%BA%BF%E5%8F%AF%E9%AA%8C%E8%AF%81-%E6%97%A0%E9%9C%80%20API%20Key-success)
+![cost](https://img.shields.io/badge/%E5%8D%95%E6%97%A5%E6%88%90%E6%9C%AC-%C2%A50.21%E2%80%93%C2%A50.48-blue)
 
-架构与分层纪律见 [`docs/architecture.md`](./docs/architecture.md)，三张数字卡见 [`docs/NUMBERS.md`](./docs/NUMBERS.md)。
+跑在 Windows 10 上的"以湘"：记得我是谁、管学习计划与备忘、基于本地影视语料做按需推荐，全程可观测、可评测、可复算。QQ 入口与定时晨报都已落地，但**默认关闭**。
 
-## 三条命令跑起来
+## 它和"聊天机器人 demo"的差别
+
+三条可验证的工程事实，不是三个形容词：
+
+1. **每轮现拼工作记忆**——人格（`soul.md`）+ 用户画像（`user.md`）+ 核心记忆（`memory.md`）+ 检索到的长尾 facts / episodes，由代码决定注入什么，不靠"希望模型记得"；
+2. **每件事都留痕**——工具调用进 `data/traces/`（`ops tail` / `show-trace` 可回放），每次模型调用进 `usage.jsonl`（`ops cost --explain` 打印各段 token 占比）；
+3. **退步会被拦住**——GitHub Actions 四步门禁 + `release_gate` 五项判定（确定性 100% / judge ≥4.0 / 门控漏检 0 / 检索 top-3 ≥60% / 成本告警）。判定逻辑只有一份，不在 YAML 里重写。
+
+## 全景
+
+四条支柱（入口 / Loop / 记忆 / RAG 语料）+ 一条横切面（评测与运维）。三层纪律撑起这张图：**入口只搬文本**、**能力只从注册表出去**、**组装根只有一个**。
+
+```mermaid
+flowchart LR
+  subgraph E["入口（只搬文本）"]
+    CLI["gateway/cli.py<br/>REPL"]
+    WEB["web/<br/>本机控制台"]
+    QQ["gateway/qq.py<br/>OneBot v11 反向 WS"]
+  end
+
+  APP["app.py<br/>App.handle_message()<br/>唯一组装根"]
+
+  subgraph C["能力层（只经注册表暴露）"]
+    REG["tools/registry.py<br/>白名单 · 路径沙箱 · 截断"]
+    MEM["memory/<br/>三文件 · 三支柱检索<br/>门控 · 巩固 · 对账"]
+    RAG["rag/<br/>幂等入库 · 混合检索<br/>口味软加权 · golden 评测"]
+  end
+
+  subgraph I["基础设施"]
+    LOOP["loop/<br/>Agent Loop · 防绕圈"]
+    PROV["providers.py<br/>OpenAI 兼容 / Fake"]
+    DB["db.py<br/>SQLite + sqlite-vec"]
+    OPS["ops/ · scheduler/ · evals/<br/>trace · usage · doctor<br/>release_gate · backup"]
+  end
+
+  DATA["data/（gitignore）<br/>soul · user · memory · state.db<br/>traces · usage · briefs · backups"]
+
+  CLI --> APP
+  WEB --> APP
+  QQ --> APP
+  APP --> LOOP
+  APP --> MEM
+  LOOP --> REG
+  LOOP --> PROV
+  REG --> MEM
+  REG --> RAG
+  MEM --> DB
+  RAG --> DB
+  APP --> DATA
+  OPS --> DATA
+  OPS --> MEM
+```
+
+一句话读图：`App.handle_message()` 是唯一把"上下文装配 + 检索门控 + Loop + 落盘 + 巩固"串起来的地方，所以"线上跑的那条路"与"用例跑的那条路"是同一条。架构与分层纪律的完整版见 [`docs/architecture.md`](./docs/architecture.md)。
+
+## 快速开始
 
 需要 Python 3.12 与 [uv](https://docs.astral.sh/uv/)（`python -m pip install uv`）：
 
@@ -20,7 +78,7 @@ cp .env.example .env         # ② Windows: Copy-Item .env.example .env；然后
 uv run yixiang chat          # ③ 开始对话（流式输出）
 ```
 
-没有 API key 也能验证"跑起来了"——离线入口两条命令：
+没有 API key 也能验证"真的跑起来了"——两条离线命令，零成本、零外网：
 
 ```bash
 uv run yixiang doctor        # 八项启动自检：配置 / 目录 / SQLite / 向量扩展 / 模型探活 / 三文件 / 密钥可恢复性 / Bangumi 收藏 token
@@ -30,24 +88,65 @@ uv run yixiang rag eval      # 检索回归：top-3 命中率 + MRR（无 key �
 
 CLI 内的斜杠命令：`/help` `/new [名字]` `/history` `/tools` `/trace [n]` `/cost` `/exit`。
 
-不想在终端里翻人设和记忆，就开一个本机前端（只绑 `127.0.0.1`，标准库实现，装不上依赖
-这种事先排除掉）：
+## 三个入口
+
+### 一、CLI（主力）
+
+`yixiang chat` 是日常形态：流式输出、斜杠命令、每轮回复后可查 trace 与成本。
+
+### 二、本机 Web 控制台（七栏）
+
+不想在终端里翻人设和记忆，就开一个本机前端。它只绑 `127.0.0.1`，用标准库实现，没有构建步骤，也装不上依赖这种东西：
 
 ```bash
 uv run yixiang web        # 打开 http://127.0.0.1:8765/
 ```
 
-七个面板对应测试时最常做的事：**对话**（流式，逐字出）、**历史对话**（按会话翻往
-来，点一条即切过去）、**人设与记忆**（`soul.md` / `user.md` / `memory.md` 就地改，超限
-一个字节都不写）、**模型配置**（主模型 / api_base / 上限 / 预算，写回 `.env` 并热生效）、
-**提示词**（S1~S8 本轮实况，自查"模型到底看到了什么"）、**QQ 设置**（白名单校验：开了
-网关却没白名单直接拒）、**链路 trace**（本轮迭代 / 工具调用 / tokens / 成本，与
-`yixiang ops show-trace <turn_id>` 同源）。上传的文件落在 `data/uploads/`，模型用
-`read_file` 读它。
-手边没文件可传，用 [`evals/fixtures/web_upload_sample.md`](./evals/fixtures/web_upload_sample.md)
-当样张。
+七个面板对应测试时最常做的事：
 
-## 数据边界（诚实版本，TECH §14.4）
+| 栏 | 干什么 |
+|---|---|
+| **对话** | 流式逐字出；可中断、可继续 |
+| **历史对话** | 按会话翻往来，可改名 / 搜索 / 导出 / 删除，点一条即切过去 |
+| **人设与记忆** | `soul.md` / `user.md` / `memory.md` 就地改，超限一个字节都不写 |
+| **模型配置** | 主模型 / api_base / 上限 / 预算，写回 `.env` 并热生效（密钥只回掩码） |
+| **提示词** | S1~S8 本轮实况，自查"模型到底看到了什么" |
+| **QQ 设置** | 白名单校验：开了网关却没白名单直接拒 |
+| **链路 trace** | 本轮迭代 / 工具调用 / tokens / 成本，与 `yixiang ops show-trace <turn_id>` 同源 |
+
+上传的文件落在 `data/uploads/`，模型用 `read_file` 读它。手边没文件可传，用 [`evals/fixtures/web_upload_sample.md`](./evals/fixtures/web_upload_sample.md) 当样张。
+
+### 三、QQ（默认关闭）
+
+OneBot v11 反向 WebSocket，配 NapCat 之类的一侧。Windows 上有一键脚本：双击 `启动以湘.bat` 拉起网关并挂上 NapCat，`状态以湘.bat` 只体检不改动，`停止以湘.bat` 只停网关、不动 QQ。脚本里的 NapCat 目录默认是作者本机路径，**换机器要改**（`scripts/qq_assistant.ps1` 顶部 `YIXIANG_NAPCAT_DIR`）。
+
+安全默认是**拒绝一切**：`YIXIANG_QQ_ALLOWED` 为空时任何外部消息都不处理，群消息默认忽略（`YIXIANG_QQ_GROUP_ENABLED=0`），入口本身也要 `YIXIANG_QQ_ENABLED=1` 才生效。
+
+## 它现在能做什么
+
+**记忆**：三文件核心记忆（原子写 + 上限校验：3000 / 4000 / 活跃区 150 行）、三支柱检索（facts 走 FTS5 + 向量 RRF；episodes 只用向量；skills 关键词）、检索门控（规则预过滤 + 小模型判定，fail-open）、人机共治（手改 `memory.md` 重启即生效）、巩固（三档阈值 + watermark，失败不推水印）、"记住"硬契约、`memory {list,show,sync,verify,restore}` 三方对账。
+
+**RAG 语料**：`source_id` 幂等入库（简介没变就跳过且不重嵌入）、中文混合检索（jieba 预分词 + LIKE 兜底 + RRF + 硬过滤 + 口味软加权）、推荐去重（7 天窗口，对话与日报共用）、`ops explain-search` 五段可解释（FTS / 向量 / RRF / 过滤 / 加权）、`rag eval` golden 回归、嵌入不可用时降级纯 FTS5（trace 记 `E_EMBED_UNAVAILABLE`，用户无感）。外部内容一律 `<external_content>` 包裹。
+
+**工具**：注册表里第 19 个具名工具（备忘 / 计划 / 记忆管理 / 影视 / 日报 / `read_file`），路径、SQL、命令一律由代码拼装，不由模型输出拼接——模型可以建议，只有代码做决定。
+
+**评测与运维**：确定性用例、judge 10 条 rubric、检索 golden 回归、发布门禁五项、trace / usage / doctor / backup / 恢复演练、常驻 job（巩固兜底 / 每日汇总 / 周巡检，异常隔离——失败可见，绝不杀主链路）。
+
+## 真实数字
+
+全部实测，且每条都有复算命令（原始数据见 [`docs/NUMBERS.md`](./docs/NUMBERS.md)）。
+
+| 指标 | 值 | 口径 |
+|---|---|---|
+| 离线确定性用例 | **337 passed, 1 deselected**（36 个文件，~9 秒） | `-m "not live"`，离线、零成本、零抖动 |
+| 检索 top-3 命中率（CI 口径） | **90.0%（18/20）· MRR 0.792** | 31 部语料 + `hash` 假嵌入 |
+| 检索 top-3 命中率（真语料 + 真嵌入） | **90.0%（18/20）· MRR 0.792** | 333 部语料 + `bge-small-zh-v1.5` |
+| 嵌入不可用降级 | **85.0%（17/20）** | 纯 FTS5，产品仍然可用 |
+| 门控漏检率 | **0%**（硬门禁） | 20 条"该检索"全命中；误检 10%（容忍 ≤30%） |
+| judge 均分 | 离线 **4.80** / live **4.60**（门线 4.0） | live 的裁判已换到本机 Ollama，边际成本 ¥0 |
+| 单日模型成本 | **¥0.21–0.48**（预算 ¥0.5/天） | 40 轮对话 + 40 次门控 + 5 次巩固 + 1 次日报 |
+
+## 数据边界（诚实版本）
 
 声称"数据完全本地"是不成立的：每轮拼好的 prompt 会发给模型供应商。真实边界如下——
 
@@ -56,7 +155,7 @@ uv run yixiang web        # 打开 http://127.0.0.1:8765/
 | `data/soul.md` / `user.md` / `memory.md`、`state.db`、trace、备份 | **否** |
 | 嵌入计算（bge-small-zh-v1.5，本地 CPU 推理） | **否** |
 | 每轮拼好的 prompt（**含被注入的记忆片段、检索到的语料片段**） | **是**，发给所选模型供应商 |
-| QQ 消息内容（P2 接入后） | 是，先经腾讯服务器 |
+| QQ 消息内容 | 是，先经腾讯服务器 |
 | 影视语料元数据（**入库阶段**，一次性） | 是，从 Bangumi / TMDb 拉取并缓存在 `data/raw/` |
 | Bangumi live 检索（**对话阶段**，`bangumi_search` / `bangumi_subject` / `bangumi_my_collections`） | **是**，当场请求 `api.bgm.tv`（读自己的收藏要 PAT；搜索与条目详情免 token） |
 
@@ -64,7 +163,7 @@ uv run yixiang web        # 打开 http://127.0.0.1:8765/
 
 ## 四层评测与发布门禁
 
-一条纪律：**依赖越多的层跑得越少**（TECH §13.1）。这不是省事，是不让外部 API 的抖动阻塞开发，也不让成本随提交次数线性增长。
+一条纪律：**依赖越多的层跑得越少**。这不是省事，是不让外部 API 的抖动阻塞开发，也不让成本随提交次数线性增长。
 
 | 层 | 内容 | 什么时候跑 | 成本 |
 |---|---|---|---|
@@ -92,32 +191,12 @@ uv run yixiang skills validate                    # 技能文件格式
 | 检索 top-3 命中率 | ≥60% | 硬门禁 |
 | 单轮成本 | ≤日预算 ×1.5 | **只告警**，不阻止合并 |
 
-两条容易踩的口径，明写在这里：
+两条容易踩的口径：
 
-- **检索评测关口味**（`use_taste=False`）：门禁量的是"相关性排序有没有退步"，数字不能随 `user.md` 内容漂移。带口味的排序只出现在 `ops explain-search` 与 `yixiang brief` 里——给人看的解释保留口味；
+- **检索评测关口味**：门禁量的是"相关性排序有没有退步"，数字不能随 `user.md` 内容漂移。带口味的排序只出现在 `ops explain-search` 与 `yixiang brief` 里；
 - **live 用例不进 PR**：外部 API 抖动不该阻塞开发。nightly 与发版前手动 `uv run yixiang eval --live`。
 
-judge 的局限主动交底（TECH §13.4）：P0 用与 main 同族的模型自评，存在偏好偏差。三条缓解同时在场——阈值只当回归警报、可客观判断的部分（工具调没调 / 参数对不对 / 有没有编造）**下沉成确定性断言**、换 judge 模型时重跑全部历史分数再比。
-
-## 命令速查
-
-```bash
-uv run yixiang chat                     # 交互式对话（流式）
-uv run yixiang web                      # 本机 Web 控制台（http://127.0.0.1:8765/）
-uv run yixiang doctor                   # 八项启动自检
-uv run yixiang migrate                  # 应用数据库迁移
-uv run yixiang brief                    # 按需日报：今日安排 + 1 条影视推荐
-uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 离线入库 31 部
-uv run yixiang rag eval                 # golden 集：20 条 + 10 条 holdout（不加 YIXIANG_EMBED_BACKEND=hash 就是真嵌入）
-uv run yixiang ops explain-search "讲时间循环的"    # 五段中间结果：FTS / 向量 / RRF / 过滤 / 加权
-uv run yixiang ops cost --day           # 今日 token 与成本（--explain 打印分段占比）
-uv run yixiang ops tail                 # 实时跟随今天的 trace
-uv run yixiang memory verify            # 记忆三方对账：memory.md / 数据库 / FTS 索引
-uv run yixiang backup                   # state.db 日快照 + data/ 私有仓提交
-uv run yixiang backup gc --keep-days 30 # 回收过期快照（默认保留 30 天）
-uv run python scripts/restore_drill.py  # 恢复演练：快照当唯一库源启动一次并逐项对账
-uv run yixiang --help                   # chat / web / serve / doctor / rag / brief / ops / eval / migrate / memory / skills / backup
-```
+judge 的局限主动交底：用与 main 同族的模型自评，存在偏好偏差。三条缓解同时在场——阈值只当回归警报、可客观判断的部分（工具调没调 / 参数对不对 / 有没有编造）**下沉成确定性断言**、换 judge 模型时重跑全部历史分数再比（已执行过一次：裁判换到本机 `qwen3.5`）。
 
 ## 目录结构
 
@@ -142,26 +221,34 @@ scripts/         demo 剧本与恢复演练脚本
 .github/         workflows/ci.yml（四步门禁）
 ```
 
-## 当前进度
+## 命令速查
 
-**PART 1 基座与 Agent Loop**：CLI 流式对话、`memo` / `plan` 工具、trace 与成本账、FakeProvider 确定性用例。
+```bash
+uv run yixiang chat                     # 交互式对话（流式）
+uv run yixiang web                      # 本机 Web 控制台（http://127.0.0.1:8765/）
+uv run yixiang doctor                   # 八项启动自检
+uv run yixiang migrate                  # 应用数据库迁移
+uv run yixiang brief                    # 按需日报：今日安排 + 1 条影视推荐
+uv run yixiang rag ingest --source local --file evals/fixtures/media_sample.json   # 离线入库 31 部
+uv run yixiang rag eval                 # golden 集：20 条 + 10 条 holdout
+uv run yixiang ops explain-search "讲时间循环的"    # 五段中间结果：FTS / 向量 / RRF / 过滤 / 加权
+uv run yixiang ops cost --day           # 今日 token 与成本（--explain 打印分段占比）
+uv run yixiang ops tail                 # 实时跟随今天的 trace
+uv run yixiang memory verify            # 记忆三方对账：memory.md / 数据库 / FTS 索引
+uv run yixiang backup                   # state.db 日快照 + data/ 私有仓提交
+uv run python scripts/restore_drill.py  # 恢复演练：快照当唯一库源启动一次并逐项对账
+uv run yixiang --help                   # chat / web / serve / doctor / rag / brief / ops / eval / migrate / memory / skills / backup
+```
 
-**PART 2 记忆系统**：三文件核心记忆（原子写 + 上限校验：3000 / 4000 / 活跃区 150 行）、三支柱检索（facts 走 FTS5 + 向量 RRF；episodes 只用向量；skills 关键词）、检索门控（规则预过滤 + 小模型判定，fail-open）、人机共治（手改 `memory.md` 重启即生效）、巩固（三档阈值 + watermark，失败不推水印）、"记住"硬契约、`memory {list,show,sync,verify,restore}`。
+## 边界（写在明面上）
 
-**PART 3 语料与按需推荐**：`source_id` 幂等入库（简介没变就跳过且不重嵌入）、中文混合检索（jieba 预分词 + LIKE 兜底 + RRF + 硬过滤 + 口味软加权）、推荐去重（7 天窗口，对话与日报共用）、三个工具（`search_media` / `recommend_media` / `daily_brief`）、`ops explain-search` 五段可解释、`rag eval` golden 回归、嵌入不可用时降级为纯 FTS5（trace 记 `E_EMBED_UNAVAILABLE`，用户无感）、外部内容一律 `<external_content>` 包裹。
+- **留在门禁外的入口不进任何门禁**：定时晨报与唤醒补发（`scheduler/brief_job.py` + `gateway/sinks.py`）与 QQ 入口（`gateway/qq.py`）都已落地，但默认关闭，`release_gate` 不判它们；B 站 / Pixiv 两个工具仍是设计位；
+- **成本数字是模型算出来的，不是账单跑出来的**：口径与算法都摆出来了，真实账单要等使用一周后才有；
+- **judge 离线分不代表回复质量**：离线只证明题面、解析器与留痕管线没坏，语气与合理性只有 `--live` 能判；
+- **真抓语料与真嵌入需要网络**：离线等价入口是 `--source local --file evals/fixtures/media_sample.json`（31 部）+ `YIXIANG_EMBED_BACKEND=hash`；
+- **降级优先于不可用**：记忆装配失败仍可聊天（三文件照读、检索缺席）；嵌入拿不到退纯 FTS5；常驻 job 抛异常只留痕。
 
-**PART 4 评测·运维·交付**：
-
-- **CI 四步门禁**：`.github/workflows/ci.yml` 按 `ruff` → `pytest -m "not live"` → `skills validate` → `release_gate` 顺序执行，失败即停；嵌入后端固定 `hash`（离线确定性，不下载模型），失败时把 trace / 日志 / 报告作为 artifact 交出来；
-- **judge 10 条 rubric**：五类各 2 条，`must_have` 与 `must_not_have` 分开写，离线均分 **4.80**（`yixiang eval judge`）；解析失败该条计 0 并留痕；
-- **常驻调度**：巩固兜底 23:30（幂等靠 §7.7.1 水印）、每日汇总 23:50（`usage:YYYY-MM-DD`）、记忆巡检周日 22:00（`verify:YYYY-Www`）；`run_job` 异常隔离——**失败可见，但绝不杀主链路**，留痕在 `data/logs/jobs-*.jsonl`；
-- **备份与恢复**：`VACUUM INTO` 日快照 + `data/` 私有仓提交 + 30 天回收；`scripts/restore_drill.py` 把快照当唯一库源重建一次并逐项对账（表结构 / 行数 / 记忆三方一致性）；
-- **本机测试前端**：`yixiang web` 起一个零依赖的本地控制台（内置标准库 HTTP 服务，只绑 `127.0.0.1:8765`），七个面板分别管对话、历史对话、人设与记忆、模型配置、提示词、QQ 设置、链路 trace；上传的文件落 `data/uploads/`，由注册表里的第 19 个工具 `read_file` 按需读取（§9.2 / §9.5 另有三个 Bangumi live 工具），外部内容一律 `<external_content>` 包裹；
-- **文档面**：本 README（含数据边界表）、[`docs/architecture.md`](./docs/architecture.md)、[`scripts/demo-week4.md`](./scripts/demo-week4.md)、三张数字卡 [`docs/NUMBERS.md`](./docs/NUMBERS.md)。
-
-**边界（写在明面上）**：cron 定时晨报推送与唤醒补发、QQ 入口都已落地（`gateway/sinks.py` 三个投递通道、`gateway/qq.py` 的 OneBot v11 反向 WS、`scheduler/` 的晨报 job），但**默认关闭**——要开才生效（`YIXIANG_SCHEDULER_ENABLED` / `YIXIANG_QQ_ENABLED`），入口是 `yixiang serve`；它们**不参与任何门禁**。语料入库的**真实抓取**与**真实嵌入模型**需要网络；离线的等价入口是 `--source local --file evals/fixtures/media_sample.json` + `YIXIANG_EMBED_BACKEND=hash`。
-
-PART 3 交付时留下的 6 个决策点记在 [`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md)（PART 4 收口后再逐条过；其中 T3「评测关口味」的口径已写进本 README 的评测段与 `docs/NUMBERS.md`）。
+PART 3 交付时留下的 6 个决策点记在 [`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md)。
 
 ## 文档
 
@@ -171,5 +258,17 @@ PART 3 交付时留下的 6 个决策点记在 [`docs/TODO-AFTER-PART-4.md`](./d
 | [`docs/TECH-DESIGN.md`](./docs/TECH-DESIGN.md) | 怎么实现：数据流、ADR、冻结接口、安全与成本模型（HOW） |
 | [`docs/architecture.md`](./docs/architecture.md) | 一页看懂：入口 / Loop / 记忆 / RAG / 评测四支柱 + 分层纪律 |
 | [`docs/NUMBERS.md`](./docs/NUMBERS.md) | 三张数字卡（成本 / 命中率 / 用例数）的原始数据与算法 |
+| [`docs/HANDOFF.md`](./docs/HANDOFF.md) | 交接说明：现状、口径与坑位清单 |
+| [`docs/SECRETS-RECOVERY.md`](./docs/SECRETS-RECOVERY.md) | 密钥丢了怎么恢复（`.env` 可恢复副本） |
+| [`docs/golden-decisions.md`](./docs/golden-decisions.md) | 冻结的评测基线：为什么这些答案不许改 |
+| [`docs/TODO-AFTER-PART-4.md`](./docs/TODO-AFTER-PART-4.md) | 还欠的决策点与会话记录 |
 | [`docs/parts/`](./docs/parts/) | 按周切分的 4 个工作包与各自的验收命令 |
 | [`scripts/`](./scripts/) | 每周演示剧本（照读即可，含无网络兜底）与恢复演练脚本 |
+
+## 参考与致谢
+
+四支柱划分（Harness / Loop / Memory / Eval-Ops）与若干关键设计（检索门控、三支柱记忆、trace + 发布门禁）借鉴自 [AI-Engineer-from-scratch](https://github.com/ShenSeanChen) 课程第 12 模块的 hermes 剪枝版（waku-agent）。**核心代码（loop / memory / gateway / provider）自行实现**，以"每一行都能讲清楚"为验收标准；工具与评测借鉴思路后重写。
+
+## 许可
+
+仓库暂未指定开源协议（作者保留权利）。如果你要基于它做二次开发，先开 issue 说一声。

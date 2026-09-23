@@ -26,3 +26,10 @@ evals/judge/reports/
 *.swp
 Thumbs.db
 .DS_Store
+
+# 本机资料：开发计划与执行记录、面试准备稿——只留本机，不随仓库公开
+docs/superpowers/
+docs/INTERVIEW-PREP.md
+
+# 重写历史前的全量备份包（确认推送无误后可删）
+yixiang-history-backup.bundle

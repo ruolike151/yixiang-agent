@@ -27,10 +27,13 @@ $ErrorActionPreference = 'Stop'
 $Port        = 8766
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python      = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
-$NapCatDir   = 'F:\AI工具\NapCat.Shell'
-$NapCatBat   = Join-Path $NapCatDir 'launcher-win10.bat'
 $AuditLog    = Join-Path $ProjectRoot 'data\logs\qq-audit.jsonl'
 $EnvFile     = Join-Path $ProjectRoot '.env'
+
+# NapCat 装在哪台机器上都不一样，所以顺序是：环境变量 → .env → 作者本机默认值。
+# 换机器时不用改脚本：设 YIXIANG_NAPCAT_DIR，或往 .env 里写一行同名配置。
+$NapCatDir   = ''
+$NapCatBat   = ''
 
 # ------------------------------------------------------------------ 输出
 function Write-Head([string]$Text) { Write-Host ''; Write-Host "-- $Text" -ForegroundColor Cyan }
@@ -156,6 +159,12 @@ function Get-EnvValue([string]$Key) {
     }
     return $value
 }
+
+# NapCat 目录解析（必须放在 Get-EnvValue 之后：它要读 .env）
+if (-not $NapCatDir) { $NapCatDir = $env:YIXIANG_NAPCAT_DIR }
+if (-not $NapCatDir) { $NapCatDir = Get-EnvValue 'YIXIANG_NAPCAT_DIR' }
+if (-not $NapCatDir) { $NapCatDir = 'F:\AI工具\NapCat.Shell' }
+$NapCatBat = Join-Path $NapCatDir 'launcher-win10.bat'
 
 function Show-AuditTail([int]$Count) {
     if (-not (Test-Path -LiteralPath $AuditLog)) { Write-Tip '审计日志还没生成'; return }

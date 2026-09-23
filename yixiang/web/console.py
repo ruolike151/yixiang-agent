@@ -27,6 +27,7 @@ from yixiang.app import App
 from yixiang.config import ENV_PREFIX, Settings, parse_env_text
 from yixiang.memory import core_files, procedural, sync
 from yixiang.memory.core_files import CHAR_LIMITS, MEMORY_MAX_LINES, LimitExceeded
+from yixiang.ops.tracing import find_trace, read_traces
 from yixiang.ops.usage import summarize
 from yixiang.runtime.eventloop import CancelToken
 from yixiang.runtime.models import LoopEvent
@@ -293,6 +294,43 @@ class ConsoleAPI:
                 code="empty_session",
             )
         return payload
+
+    # ------------------------------------------------------------------ 链路
+    def traces(self, limit: int = 50) -> dict[str, Any]:
+        """最近的若干轮（默认 50）：只给"一眼能扫"的字段，详情另有接口。"""
+        records = read_traces(self.settings.traces_dir, limit=max(int(limit), 1))
+        rows = [
+            {
+                "turn_id": record.get("turn_id", ""),
+                "ts": record.get("ts", ""),
+                "session": record.get("session", ""),
+                "source": record.get("source", ""),
+                "iterations": record.get("iterations", 1),
+                "tokens": record.get("tokens") or {},
+                "cost_cny": float(record.get("cost_cny") or 0.0),
+                "tools": [str(call.get("tool")) for call in (record.get("tool_calls") or [])],
+                "finish_reason": record.get("finish_reason", ""),
+                "error": record.get("error"),
+                # 检索降级状态（D-24）：前端据此点亮"已降级（纯 FTS5）"那一行
+                "rag": record.get("rag") or {},
+            }
+            for record in records
+        ]
+        return {"count": len(rows), "traces": rows}
+
+    def trace(self, turn_id: str) -> dict[str, Any]:
+        """某一轮的完整记录（字段与 ``yixiang ops show-trace`` 同源）。"""
+        wanted = str(turn_id or "").strip()
+        if not wanted:
+            raise ConsoleError("turn_id 是空的：从列表里点一条。", code="bad_turn")
+        record = find_trace(self.settings.traces_dir, wanted)
+        if record is None:
+            raise ConsoleError(
+                f"找不到这条 trace：{wanted}（可能在别的日期、或这台机器还没聊过）",
+                status=404,
+                code="no_trace",
+            )
+        return record
 
     # ------------------------------------------------------------------ 人设
     def persona(self) -> dict[str, Any]:

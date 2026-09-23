@@ -53,10 +53,17 @@ const PANELS = [
     icon: "link",
     desc: "QQ 网关的开关与白名单（P2 才接网关，配置先落 .env）。",
   },
+  {
+    id: "traces",
+    label: "链路 trace",
+    icon: "activity",
+    desc: "每轮一行：门控做了什么、调了哪些工具、花了多少 token 与钱——面试时照这里讲。",
+  },
 ];
 
 const ICONS = {
   chat: ["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"],
+  activity: ["M22 12h-4l-3 9L9 3l-3 9H2"],
   clock: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 7.5v5l3 2"],
   user: ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"],
   sliders: ["M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3", "M1 14h6M9 8h6M17 16h6"],
@@ -1173,6 +1180,176 @@ async function renderHistory() {
   ];
 }
 
+/* ------------------------------------------------------------------ 链路 */
+function traceRow(row) {
+  const tokens = row.tokens || {};
+  const chips = (row.tools || []).map((name) => h("span", { class: "chip", text: name }));
+  if (((row.rag || {}).embed || "") === "unavailable") {
+    chips.push(h("span", { class: "chip warn", text: "检索已降级（纯 FTS5）" }));
+  }
+  return h(
+    "article",
+    {
+      class: "turn trace-row",
+      onclick: () => navigate("traces", row.turn_id),
+    },
+    h(
+      "div",
+      { class: "row" },
+      h("span", { class: "mono", text: row.turn_id }),
+      h("span", { class: "card-note", text: fmtTime(row.ts) }),
+      row.error ? badge("出错", "bad") : badge(row.finish_reason || "stop", "ok")
+    ),
+    h(
+      "dl",
+      {},
+      h("dt", { text: "会话" }),
+      h("dd", { text: row.session || "—" }),
+      h("dt", { text: "迭代 / tokens" }),
+      h("dd", {
+        text: `${row.iterations} 轮 · ${fmtNumber(tokens.in)} in（${fmtNumber(
+          tokens.cached_in
+        )} cached）/ ${fmtNumber(tokens.out)} out`,
+      }),
+      h("dt", { text: "成本" }),
+      h("dd", { text: `¥${Number(row.cost_cny || 0).toFixed(4)}` })
+    ),
+    chips.length ? h("div", { class: "chips" }, ...chips) : null
+  );
+}
+
+function traceDetail(record) {
+  const tools = record.tool_calls || [];
+  const latency = record.latency_ms || {};
+  const rag = record.rag || {};
+  // 检索降级（D-24）：列表行用 chip 标出来了，点进来也得能看见——不然"这一轮
+  // 的召回是纯 FTS5 的"这句话只在列表上闪一下，详情里反而没有
+  const degraded = (rag.embed || "") === "unavailable";
+  return h(
+    "section",
+    { class: "card" },
+    h(
+      "div",
+      { class: "card-head" },
+      h("h3", { text: "这一轮的完整记录" }),
+      h("span", { class: "card-note", text: record.turn_id || "" })
+    ),
+    h(
+      "dl",
+      {},
+      h("dt", { text: "时间" }),
+      h("dd", { text: fmtTime(record.ts) }),
+      h("dt", { text: "会话 / 来源" }),
+      h("dd", { text: `${record.session || "—"} / ${record.source || "—"}` }),
+      h("dt", { text: "用户" }),
+      h("dd", { text: record.user_text || "" }),
+      h("dt", { text: "模型" }),
+      h("dd", { text: record.model || "" }),
+      h("dt", { text: "耗时" }),
+      h("dd", {
+        text: `模型 ${latency.llm || 0}ms · 工具 ${latency.tools || 0}ms · 总计 ${
+          latency.total || 0
+        }ms`,
+      }),
+      h("dt", { text: "结束原因" }),
+      h("dd", { text: record.finish_reason || "" }),
+      h("dt", { text: "检索" }),
+      h("dd", {
+        text: rag.embed ? (degraded ? "已降级（纯 FTS5）" : `${rag.facts || 0} 条事实`) : "—",
+      })
+    ),
+    h(
+      "div",
+      { class: "card-head" },
+      h("h3", { text: "工具调用" }),
+      h("span", { class: "card-note", text: tools.length ? `${tools.length} 次` : "这一轮没调工具" })
+    ),
+    tools.length
+      ? h(
+          "div",
+          { class: "chips" },
+          ...tools.map((call) =>
+            h("span", {
+              class: `chip ${call.ok ? "ok" : "bad"}`,
+              text: `[${call.iter}] ${call.tool} ${call.ms || 0}ms`,
+              title: JSON.stringify(call.args || {}),
+            })
+          )
+        )
+      : null,
+    degraded
+      ? h(
+          "div",
+          { class: "chips" },
+          h("span", { class: "chip warn", text: "检索已降级（纯 FTS5）" })
+        )
+      : null,
+    h("p", { class: "card-note", text: `回复预览：${record.reply_preview || "（空）"}` }),
+    h("p", {
+      class: "card-note",
+      text: `命令行同款：yixiang ops show-trace ${record.turn_id || ""}`,
+    })
+  );
+}
+
+async function renderTraces() {
+  if (store.arg) {
+    if (!store.trace || store.trace.turn_id !== store.arg) {
+      await load("trace", async () => {
+        store.trace = await api(`/api/trace/${encodeURIComponent(store.arg)}`);
+      });
+    }
+    if (pending(store.trace)) {
+      return [panelHead("链路 trace", PANELS[6].desc), skeleton()];
+    }
+    return [
+      panelHead(
+        "链路 trace",
+        PANELS[6].desc,
+        button("返回列表", {
+          iconName: "clock",
+          className: "ghost",
+          onClick: () => navigate("traces"),
+        })
+      ),
+      traceDetail(store.trace),
+    ];
+  }
+  if (!store.traces) {
+    await load("traces", async () => {
+      store.traces = await api("/api/traces?limit=50");
+    });
+  }
+  if (pending(store.traces)) {
+    return [panelHead("链路 trace", PANELS[6].desc), skeleton()];
+  }
+  const list = h("div", { class: "turns" });
+  if (!store.traces.traces.length) {
+    list.append(h("p", { class: "empty", text: "还没有 trace：先去「对话」聊一句。" }));
+  }
+  for (const row of store.traces.traces) list.append(traceRow(row));
+  return [
+    panelHead(
+      "链路 trace",
+      PANELS[6].desc,
+      button("刷新", {
+        iconName: "refresh",
+        className: "ghost",
+        onClick: () => {
+          store.traces = null;
+          store.trace = null;
+          render();
+        },
+      })
+    ),
+    h("p", {
+      class: "card-note",
+      text: `最近 ${store.traces.count} 轮，点一条看详情；每轮的原文也在 data/traces/。`,
+    }),
+    list,
+  ];
+}
+
 /* ------------------------------------------------------------ 人设与记忆 */
 async function renderPersona() {
   await load("persona", async () => {
@@ -1747,6 +1924,7 @@ const RENDERERS = {
   config: renderConfig,
   prompt: renderPrompt,
   qq: renderQQ,
+  traces: renderTraces,
 };
 
 let renderToken = 0;

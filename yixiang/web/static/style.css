@@ -1045,3 +1045,17 @@ code,
     opacity: 1;
   }
 }
+
+/* ------------------------------------------------------------------ 链路 */
+.trace-row {
+  cursor: pointer;
+}
+
+.trace-row:hover {
+  border-color: var(--color-accent);
+}
+
+.chip.warn {
+  background: var(--color-surface-2);
+  color: var(--color-warn);
+}

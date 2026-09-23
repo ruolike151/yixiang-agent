@@ -263,6 +263,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return self._send_json(runner.call(api.tools))
             if path == "/api/skills":
                 return self._send_json(runner.call(api.skills))
+            if path == "/api/traces":
+                return self._send_json(runner.call(api.traces, _int(query, "limit", 50)))
+            if path.startswith("/api/trace/"):
+                turn_id = path[len("/api/trace/") :]
+                return self._send_json(runner.call(api.trace, turn_id))
 
         if method == "POST":
             if path.startswith("/api/chat/") and path.endswith("/cancel"):
@@ -555,7 +560,10 @@ def serve(
     try:
         out(f"yixiang web 控制台：{server.url}")
         out(f"  {settings.describe()}")
-        out("  只绑本机回环地址；测试用前端共「对话 / 历史 / 人设与记忆 / 模型配置 / 提示词 / QQ 设置」六栏")
+        out(
+            "  只绑本机回环地址；测试用前端共"
+            "「对话 / 历史 / 人设与记忆 / 模型配置 / 提示词 / QQ 设置 / 链路 trace」七栏"
+        )
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         out("\n收到 Ctrl+C，正在关闭…")

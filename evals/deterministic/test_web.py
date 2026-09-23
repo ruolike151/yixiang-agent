@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fake_provider import FakeProvider, text_reply
+from fake_provider import FakeProvider, text_reply, usage
 
 from yixiang.app import App
 from yixiang.config import Settings
@@ -1001,6 +1001,80 @@ def test_cancelling_twice_is_404_the_second_time(settings, clock):
             _read_all(sock)
         status, raw = client.call("POST", f"/api/chat/{job_id}/cancel")
         assert status == 404 and json.loads(raw)["error"] == "unknown_job"
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)
+
+
+# --------------------------------------------------------------------- 链路
+def test_trace_list_and_detail_round_trip(settings, clock):
+    # 剧本里带上模型与 token：列表要显示的"迭代 / tokens / 成本"才有真数字可循
+    api = make_api(
+        settings,
+        clock,
+        text_reply(REPLY, model="deepseek-chat", usage=usage(120, 40, cached=64)),
+    )
+    result = api.chat("今天读什么")
+
+    listing = api.traces()
+    assert listing["count"] == 1
+    row = listing["traces"][0]
+    assert row["turn_id"] == result["turn_id"]
+    assert row["session"] == "web:default"
+    assert row["source"] == "web"
+    assert row["finish_reason"] == "stop"
+    assert row["tools"] == []
+    assert row["tokens"]["out"] > 0
+    assert row["cost_cny"] >= 0.0
+    assert row["error"] in (None, "")
+
+    # 详情比列表多：用户原话、回复预览、模型、工作记忆分段
+    detail = api.trace(result["turn_id"])
+    assert detail["turn_id"] == result["turn_id"]
+    assert detail["user_text"] == "今天读什么"
+    assert detail["reply_preview"] == REPLY
+    assert detail["model"] == "deepseek-chat"
+    assert "s1" in detail["working_memory"]
+
+    with pytest.raises(ConsoleError) as exc:
+        api.trace("  ")
+    assert (exc.value.status, exc.value.code) == (400, "bad_turn")
+
+    with pytest.raises(ConsoleError) as exc:
+        api.trace("t_20260101_000000_dead")
+    assert (exc.value.status, exc.value.code) == (404, "no_trace")
+    assert "找不到" in exc.value.message
+
+
+def test_http_layer_exposes_traces_and_404s_unknown_turn(settings, clock):
+    # 先起服务再聊：``sqlite3`` 的连接归跑它的线程所有，用例线程只当客户端
+    # （在主线程上先 ``api.chat`` 再 ``close_all``，会在 runner 线程上撞 cross-thread）
+    api = make_api(settings, clock, text_reply(REPLY))
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    client = Client(server.url.rstrip("/"))
+    try:
+        status, raw = client.call("POST", "/api/chat", body={"text": "今天读什么"})
+        assert status == 200
+        result = [e for e in parse_sse(raw) if e["kind"] == "result"][-1]
+        turn_id = result["turn_id"]
+
+        status, raw = client.call("GET", "/api/traces?limit=5")
+        assert status == 200
+        listing = json.loads(raw)
+        assert listing["count"] == 1
+        assert listing["traces"][0]["turn_id"] == turn_id
+
+        status, raw = client.call("GET", f"/api/trace/{turn_id}")
+        assert status == 200
+        assert json.loads(raw)["session"] == "web:default"
+
+        # 未知 turn_id：404 是"查无此物"，不是"服务器炸了"
+        status, raw = client.call("GET", "/api/trace/t_20260101_000000_dead")
+        assert status == 404
+        assert json.loads(raw)["error"] == "no_trace"
     finally:
         server.shutdown()
         server.close_all()

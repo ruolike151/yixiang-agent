@@ -397,6 +397,60 @@ def test_history_lists_sessions_and_transcript_is_old_to_new(settings, clock):
     assert exc.value.code == "bad_session"
 
 
+def test_session_rename_search_export_delete(settings, clock):
+    """历史面板的四个动作：改名 / 搜索 / 导出 / 删除（记忆与往来分开）。"""
+    api = make_api(settings, clock, text_reply("R1"), text_reply("R2"))
+
+    api.chat("悬疑小说的线索怎么铺")
+    api.new_session("复习")
+    api.chat("RAG 的召回率怎么算")
+
+    renamed = api.rename_session("web:default", "悬疑笔记")
+    titled = next(s for s in renamed["sessions"] if s["session_id"] == "web:default")
+    assert titled["title"] == "悬疑笔记"
+
+    # 空标题 = 恢复默认（标题会直接进 DOM，顺便把换行也压平）
+    restored = api.rename_session("web:default", "  ")
+    back = next(s for s in restored["sessions"] if s["session_id"] == "web:default")
+    assert back["title"] == "悬疑小说的线索怎么铺"
+
+    # 搜索按正文命中，返回的形状与 /api/sessions 一致（前端好复用）
+    found = api.search_sessions("召回率")
+    assert found["query"] == "召回率"
+    assert [s["session_id"] for s in found["sessions"]] == ["web:20260919-1000-复习"]
+    assert found["current"] == "web:20260919-1000-复习"
+
+    exported = api.export_session("web:default")
+    assert [turn["user"] for turn in exported["turns"]] == ["悬疑小说的线索怎么铺"]
+    assert exported["turns"][0]["reply"] == "R1"
+
+    with pytest.raises(ConsoleError) as exc:
+        api.export_session("web:空的")
+    assert (exc.value.code, exc.value.status) == ("empty_session", 404)
+
+    # 正在用的会话不许删
+    with pytest.raises(ConsoleError) as exc:
+        api.delete_session("web:20260919-1000-复习")
+    assert exc.value.code == "session_in_use"
+
+    api.switch("web:default")
+    removed = api.delete_session("web:20260919-1000-复习")
+    assert removed["removed"] == 1
+    assert [s["session_id"] for s in removed["sessions"]] == ["web:default"]
+
+    # 长期记忆不动：删的是往来，不是记忆
+    store = api.app.session.store
+    store.execute(
+        "INSERT INTO facts(subject, content, source, created_at, updated_at)"
+        " VALUES ('偏好', '喜欢悬疑', 'user', '2026-09-19T10:00:00+08:00',"
+        " '2026-09-19T10:00:00+08:00')"
+    )
+    store.commit()
+    api.switch("web:default")
+    assert api.delete_session("web:20260919-1000-复习")["removed"] == 0
+    assert store.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == 1
+
+
 def test_chat_streams_events_and_reports_the_turn(settings, clock):
     api = make_api(settings, clock, text_reply(REPLY))
 
@@ -564,6 +618,35 @@ def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
         deltas = "".join(e.get("text", "") for e in events if e["kind"] == "text_delta")
         assert deltas == REPLY
         assert events[-2]["reply"] == REPLY
+
+        # 历史面板的四个动作：改名 / 搜索 / 导出 / 删除
+        # （放在聊过一轮之后：这三个动作都是"对着已有会话"做的）
+        status, raw = client.call(
+            "POST",
+            "/api/session/rename",
+            body={"session_id": "web:default", "title": "今天的事"},
+        )
+        assert status == 200, raw
+        assert json.loads(raw)["sessions"][0]["title"] == "今天的事"
+
+        status, raw = client.call("GET", "/api/sessions/search?q=%E4%BB%8A%E5%A4%A9")
+        assert status == 200, raw
+        assert [s["session_id"] for s in json.loads(raw)["sessions"]] == ["web:default"]
+
+        # 路由顺序的守门人：/api/session/<id>/export 排在 /api/session/<id> 前缀分支之前，
+        # 否则 web:default/export 会被当成一个会话 id
+        status, raw = client.call("GET", "/api/session/web:default/export")
+        assert status == 200, raw
+        assert json.loads(raw)["turns"][0]["user"] == "帮我安排今天"
+
+        status, raw = client.call("GET", "/api/session/web:%E6%B2%A1%E6%9C%89/export")
+        assert status == 404 and json.loads(raw)["error"] == "empty_session"
+
+        # 正在用的会话删不掉；不存在的接口如实 404
+        status, raw = client.call("DELETE", "/api/session/web:default")
+        assert status == 400 and json.loads(raw)["error"] == "session_in_use"
+        status, raw = client.call("DELETE", "/api/nope")
+        assert status == 404 and json.loads(raw)["error"] == "not_found"
 
         # 空消息在开流之前就挡掉：前端拿到的是一条干净的 400 JSON
         status, raw = client.call("POST", "/api/chat", body={"text": "  "})

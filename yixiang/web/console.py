@@ -256,6 +256,44 @@ class ConsoleAPI:
             "turns": session.transcript(limit=max(int(limit), 1)),
         }
 
+    def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
+        """改会话名；``title`` 为空 = 恢复默认标题（首条用户消息前 60 字）。"""
+        self.app.session.rename_session(_clean_session_id(session_id), _clean_title(title))
+        return self.sessions()
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        """删一个会话的往来记录（不含长期记忆）。正在用的那个不许删。"""
+        target = _clean_session_id(session_id)
+        if target == self.app.session.session_id:
+            raise ConsoleError(
+                "不能删掉正在用的会话：先切到别的会话再删。",
+                code="session_in_use",
+            )
+        removed = self.app.session.delete_session(target)
+        return self.sessions() | {"removed": removed}
+
+    def search_sessions(self, query: str, limit: int = 30) -> dict[str, Any]:
+        """搜历史会话：形状与 ``sessions()`` 一致，前端可以把结果直接当列表用。"""
+        session = self.app.session
+        text = str(query or "").strip()
+        return {
+            "current": session.session_id,
+            "query": text,
+            "sessions": session.search_sessions(text, limit=max(int(limit), 1)),
+        }
+
+    def export_session(self, session_id: str) -> dict[str, Any]:
+        """导出某个会话的全部往来（前端拼成 Markdown 让浏览器下载）。"""
+        target = _clean_session_id(session_id)
+        payload = self.app.session.export_session(target)
+        if not payload["turns"]:
+            raise ConsoleError(
+                f"会话 {target} 没有任何往来记录，没什么可导出的。",
+                status=404,
+                code="empty_session",
+            )
+        return payload
+
     # ------------------------------------------------------------------ 人设
     def persona(self) -> dict[str, Any]:
         """人设两文件：正文 + 用量（读实体，实体不存在时回落模板并如实标注）。"""
@@ -668,6 +706,12 @@ def _clean_session_id(session_id: str) -> str:
             code="bad_session",
         )
     return text
+
+
+def _clean_title(value: str) -> str:
+    """标题会直接进 DOM 与导出文件的第一行：先把换行 / 连续空格压平（长度由
+    ``SessionManager.rename_session`` 按 TITLE_LIMIT 截断，这里不抄第二个上限）。"""
+    return " ".join(str(value or "").split())
 
 
 def _safe_upload_name(filename: str) -> str:

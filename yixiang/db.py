@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # 迁移 m001：建表 + 建索引（§12.1 的完整 DDL，逐条语句列出便于事务包裹）
 _M001_INIT: tuple[str, ...] = (
@@ -143,7 +143,19 @@ _M001_INIT: tuple[str, ...] = (
     )""",
 )
 
-MIGRATIONS: tuple[tuple[str, ...], ...] = (_M001_INIT,)
+# 迁移 m002：会话自定义标题（§10.1 历史面板的"改名"）。
+# 新开一张表而不是给 chat_log 加列：标题是会话的元数据，不是某一条流水的一部分；
+# 而且加列会碰到已有的 INSERT 语句（只增不改）。
+_M002_SESSION_TITLES: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS session_titles(
+        session_id TEXT PRIMARY KEY,
+        title      TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_session_titles_updated ON session_titles(updated_at)",
+)
+
+MIGRATIONS: tuple[tuple[str, ...], ...] = (_M001_INIT, _M002_SESSION_TITLES)
 
 # D-26 / doctor 用的表清单（含 FTS 虚表）
 EXPECTED_TABLES: tuple[str, ...] = (
@@ -161,6 +173,7 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "embedding_cache",
     "scheduled_runs",
     "processed_messages",
+    "session_titles",
 )
 
 

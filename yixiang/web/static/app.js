@@ -67,6 +67,7 @@ const ICONS = {
   ],
   upload: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M17 8l-5-5-5 5", "M12 3v12"],
   send: ["M22 2 11 13", "M22 2 15 22l-4-9-9-4z"],
+  search: ["M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z", "M20.5 20.5 16 16"],
   refresh: [
     "M23 4v6h-6",
     "M1 20v-6h6",
@@ -217,8 +218,13 @@ const store = {
   arg: "",
   summary: null,
   sessions: null,
+  // 历史面板的搜索框内容：render() 会把面板整块换掉，搜索词得活在 store 上
+  sessionQuery: "",
   transcript: null,
   transcriptSession: "",
+  // Task 16 的 trace 详情面板要用；这一轮只占位，渲染还没接
+  traces: null,
+  trace: null,
   persona: null,
   memoryData: null,
   config: null,
@@ -925,6 +931,74 @@ async function renderChat() {
 }
 
 /* ------------------------------------------------------------------ 历史 */
+/* --------------------------------------------------------------- 历史动作 */
+async function renameSession(session) {
+  const title = window.prompt("给这个会话起个名字（留空 = 恢复默认标题）", session.title || "");
+  if (title === null) return; // 取消：什么都不做
+  await load("rename", async () => {
+    store.sessions = await api("/api/session/rename", {
+      method: "POST",
+      body: { session_id: session.session_id, title },
+    });
+    toast("改好了", "ok");
+    render();
+  });
+}
+
+async function deleteSession(session) {
+  const label = session.title || session.session_id;
+  if (
+    !window.confirm(
+      `删掉「${label}」的 ${session.turns} 轮往来？\n长期记忆（facts / episodes）不会被删。`
+    )
+  ) {
+    return;
+  }
+  await load("delete", async () => {
+    store.sessions = await api(`/api/session/${encodeURIComponent(session.session_id)}`, {
+      method: "DELETE",
+    });
+    toast("已删除这个会话的往来记录", "ok");
+    render();
+  });
+}
+
+async function exportSession(session) {
+  await load("export", async () => {
+    const payload = await api(`/api/session/${encodeURIComponent(session.session_id)}/export`);
+    const blob = new Blob([sessionToMarkdown(payload)], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = h("a", { href: url, download: `${session.session_id}.md` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast("导出好了（看浏览器的下载）", "ok");
+  });
+}
+
+/** 会话 → Markdown：直接给用户存档看的，所以标题层级从 # 开始（不是正文渲染）。 */
+function sessionToMarkdown(payload) {
+  const lines = [`# 会话 ${payload.session_id}`, "", `导出时间：${payload.exported_at}`, ""];
+  for (const turn of payload.turns) {
+    lines.push(`## #${turn.id} · ${turn.at}`, "", `**你**：${turn.user}`, "");
+    lines.push(`**以湘**：${turn.reply || "（空）"}`, "");
+    if (turn.tools && turn.tools.length) lines.push(`工具：${turn.tools.join(", ")}`, "");
+  }
+  return lines.join("\n");
+}
+
+async function searchSessions(query) {
+  store.sessionQuery = query;
+  await load("sessions", async () => {
+    const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
+    store.sessions = await api(`/api/sessions/search${suffix}`);
+    render();
+  });
+}
+
 async function renderHistory() {
   if (!store.sessions) {
     await load("sessions", async () => {
@@ -947,37 +1021,53 @@ async function renderHistory() {
     const active = session.session_id === store.sessions.current;
     list.append(
       h(
-        "button",
-        {
-          class: "session-item",
-          type: "button",
-          "aria-pressed": active ? "true" : "false",
-          onclick: async () => {
-            await load("switch", async () => {
-              const result = await api("/api/session/switch", {
-                method: "POST",
-                body: { session_id: session.session_id },
-              });
-              store.sessions = result;
-              store.transcript = await api(
-                `/api/session/${encodeURIComponent(session.session_id)}?limit=200`
-              );
-              await refreshSummary();
-              render();
-            });
-          },
-        },
-        icon("chat", 16),
+        "div",
+        { class: "session-row" },
         h(
-          "span",
-          { class: "session-body" },
-          h("span", { class: "session-title", text: session.title || "（没有标题）" }),
-          h("span", {
-            class: "session-sub",
-            text: `${session.session_id} · ${session.turns} 轮 · ${fmtTime(session.last_at)}`,
-          })
+          "button",
+          {
+            class: "session-item",
+            type: "button",
+            "aria-pressed": active ? "true" : "false",
+            onclick: async () => {
+              await load("switch", async () => {
+                const result = await api("/api/session/switch", {
+                  method: "POST",
+                  body: { session_id: session.session_id },
+                });
+                store.sessions = result;
+                store.transcript = await api(
+                  `/api/session/${encodeURIComponent(session.session_id)}?limit=200`
+                );
+                await refreshSummary();
+                render();
+              });
+            },
+          },
+          icon("chat", 16),
+          h(
+            "span",
+            { class: "session-body" },
+            h("span", { class: "session-title", text: session.title || "（没有标题）" }),
+            h("span", {
+              class: "session-sub",
+              text: `${session.session_id} · ${session.turns} 轮 · ${fmtTime(session.last_at)}`,
+            })
+          ),
+          active ? badge("当前", "ok") : null
         ),
-        active ? badge("当前", "ok") : null
+        h(
+          "div",
+          { class: "session-tools" },
+          button("改名", { className: "ghost", onClick: () => renameSession(session) }),
+          button("导出", { className: "ghost", onClick: () => exportSession(session) }),
+          button("删除", {
+            className: "ghost danger",
+            title: active ? "正在用的会话不能删" : "删掉这个会话的往来记录",
+            disabled: active,
+            onClick: () => deleteSession(session),
+          })
+        )
       )
     );
   }
@@ -1017,6 +1107,7 @@ async function renderHistory() {
         onClick: () => {
           store.sessions = null;
           store.transcript = null;
+          store.sessionQuery = "";
           render();
         },
       })
@@ -1031,8 +1122,35 @@ async function renderHistory() {
           "div",
           { class: "card-head" },
           h("h3", { text: "会话列表" }),
-          h("span", { class: "card-note", text: "点一条就切过去" })
+          h(
+            "div",
+            { class: "session-search-row" },
+            h("input", {
+              type: "search",
+              class: "session-search",
+              placeholder: "搜标题或正文…",
+              value: store.sessionQuery,
+              onkeydown: (event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void searchSessions(event.target.value.trim());
+                }
+              },
+            }),
+            button("搜索", {
+              iconName: "search",
+              className: "ghost",
+              onClick: () => {
+                const box = document.querySelector(".session-search");
+                void searchSessions(box ? box.value.trim() : "");
+              },
+            })
+          )
         ),
+        h("p", {
+          class: "card-note",
+          text: "点一条就切过去；改名 / 导出 / 删除在每条的右边（正在用的那条不能删）。",
+        }),
         list
       ),
       h(

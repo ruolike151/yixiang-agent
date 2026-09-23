@@ -92,3 +92,31 @@ def test_file_db_is_created_with_parent_dirs_and_wal(tmp_path):
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
     finally:
         conn.close()
+
+
+def test_migration_from_v1_keeps_chat_log_and_adds_session_titles():
+    """v1 老库升到最新：只加表加索引，一行数据都不许动。
+
+    用户手上那个 ``data/state.db`` 现在就是 ``user_version=1``——升级路径要是要求
+    "删库重来"，等于让每个人丢掉自己的聊天记录。
+    """
+    conn = db.connect(":memory:")
+    try:
+        for statement in db.MIGRATIONS[0]:  # 手工停在 v1：这就是用户手上那个库的样子
+            conn.execute(statement)
+        conn.execute("PRAGMA user_version = 1")
+        conn.execute(
+            "INSERT INTO chat_log(session_id, source, user_text, reply_text, tools_json,"
+            " created_at) VALUES ('web:default', 'web', 'Q1', 'R1', '[]', ?)",
+            (CREATED_AT,),
+        )
+        conn.commit()
+
+        assert db.migrate(conn) == db.SCHEMA_VERSION == 2
+        assert "session_titles" in db.table_names(conn)
+        assert [
+            (row["user_text"], row["reply_text"])
+            for row in conn.execute("SELECT user_text, reply_text FROM chat_log").fetchall()
+        ] == [("Q1", "R1")]
+    finally:
+        conn.close()

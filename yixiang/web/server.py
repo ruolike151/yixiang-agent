@@ -183,6 +183,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802
         self._dispatch("PUT")
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - 父类签名
         if self.server.quiet:
             return
@@ -224,12 +227,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return self._send_json(runner.call(api.state))
             if path == "/api/sessions":
                 return self._send_json(runner.call(api.sessions, _int(query, "limit", 30)))
+            if path == "/api/sessions/search":
+                return self._send_json(
+                    runner.call(
+                        api.search_sessions, _one(query, "q"), _int(query, "limit", 30)
+                    )
+                )
             if path == "/api/session":
                 return self._send_json(
                     runner.call(
                         api.transcript, _one(query, "id"), _int(query, "limit", 200)
                     )
                 )
+            # 必须排在下面的 /api/session/ 前缀分支之前：否则 web:default/export
+            # 会被当成一个会话 id 去查往来
+            if path.startswith("/api/session/") and path.endswith("/export"):
+                session_id = path[len("/api/session/") : -len("/export")]
+                return self._send_json(runner.call(api.export_session, session_id))
             if path.startswith("/api/session/"):
                 session_id = path[len("/api/session/") :]
                 return self._send_json(
@@ -273,6 +287,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 name = str(body.get("name") or "").strip()
                 return self._send_json(runner.call(api.new_session, name or None))
+            if path == "/api/session/rename":
+                body = self._json_body()
+                return self._send_json(
+                    runner.call(
+                        api.rename_session,
+                        str(body.get("session_id") or ""),
+                        str(body.get("title") or ""),
+                    )
+                )
             if path == "/api/memory/sync":
                 return self._send_json(runner.call(api.sync_memory))
             if path == "/api/chat":
@@ -298,6 +321,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return self._send_json(runner.call(api.save_config, body))
             if path == "/api/qq":
                 return self._send_json(runner.call(api.save_qq, body))
+
+        if method == "DELETE" and path.startswith("/api/session/"):
+            session_id = path[len("/api/session/") :]
+            return self._send_json(runner.call(api.delete_session, session_id))
 
         raise ConsoleError(f"没有这个接口：{method} {path}", status=404, code="not_found")
 

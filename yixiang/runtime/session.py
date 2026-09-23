@@ -38,6 +38,13 @@ CONTEXT_BUDGET_CHARS = 24_000
 USER_INPUT_LIMIT = 6000
 USER_TRUNCATED_NOTICE = "…（消息过长，已截断）"
 
+# 会话标题上限（它会进历史列表、进导出文件的第一行，不该无限长）
+TITLE_LIMIT = 60
+
+# 导出一次最多带多少轮（比历史窗口大得多，但仍然是有限的：别让一个 10 万轮的会话
+# 把内存和浏览器一起拖死）
+EXPORT_TURN_LIMIT = 10_000
+
 CORE_FILES = ("soul.md", "user.md", "memory.md")
 
 WEEKDAY_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -152,7 +159,7 @@ class SessionManager:
         return self.session_id
 
     def list_sessions(self, limit: int = 20) -> list[dict[str, object]]:
-        """历史会话列表：标题 = 该会话首条用户消息前 60 字（§10.1 ``/history``）。"""
+        """历史会话列表：标题优先取用户改过的，回落该会话首条用户消息前 60 字（§10.1）。"""
         if self.store is None:
             return []
         rows = self.store.execute(
@@ -168,21 +175,120 @@ class SessionManager:
             """,
             (limit,),
         ).fetchall()
-        sessions: list[dict[str, object]] = []
-        for row in rows:
-            first = self.store.execute(
-                "SELECT user_text FROM chat_log WHERE id = ?", (row["first_id"],)
-            ).fetchone()
-            title = (first["user_text"] if first else "") or ""
-            sessions.append(
-                {
-                    "session_id": row["session_id"],
-                    "turns": row["turns"],
-                    "last_at": row["last_at"],
-                    "title": title[:60],
-                }
+        titles = self._title_map()
+        return [self._session_row(row, titles) for row in rows]
+
+    def search_sessions(self, query: str, *, limit: int = 30) -> list[dict[str, object]]:
+        """按标题或正文找会话（子串匹配，大小写不敏感）；空查询 = 列出全部。
+
+        正文两列都查：用户常记得的是"它当时怎么回的"，只搜标题会漏掉一大半。
+        命中的是"哪个会话"，所以行上的 ``turns`` / 默认标题仍然按该会话**全部**往来算
+        （拿筛过的那几行去 ``COUNT(*)``，搜"召回"会把 2 轮的会话显示成 1 轮）。
+        """
+        text = (query or "").strip()
+        if self.store is None:
+            return []
+        if not text:
+            return self.list_sessions(limit=limit)
+        like = f"%{text}%"
+        rows = self.store.execute(
+            """
+            SELECT session_id,
+                   COUNT(*)        AS turns,
+                   MIN(id)         AS first_id,
+                   MAX(created_at) AS last_at
+              FROM chat_log
+             WHERE session_id IN (
+                       SELECT session_id FROM chat_log
+                        WHERE user_text LIKE ? COLLATE NOCASE
+                           OR reply_text LIKE ? COLLATE NOCASE
+                       UNION
+                       SELECT session_id FROM session_titles
+                        WHERE title LIKE ? COLLATE NOCASE)
+             GROUP BY session_id
+             ORDER BY last_at DESC
+             LIMIT ?
+            """,
+            (like, like, like, limit),
+        ).fetchall()
+        titles = self._title_map()
+        return [self._session_row(row, titles) for row in rows]
+
+    def _title_map(self) -> dict[str, str]:
+        """用户改过的标题：一次取回，避免每行一条 SELECT。"""
+        if self.store is None:
+            return {}
+        return {
+            str(row["session_id"]): str(row["title"])
+            for row in self.store.execute(
+                "SELECT session_id, title FROM session_titles"
+            ).fetchall()
+        }
+
+    def _session_row(self, row: sqlite3.Row, titles: dict[str, str]) -> dict[str, object]:
+        """一行会话：``list_sessions`` 与 ``search_sessions`` 共用同一套拼装。"""
+        first = self.store.execute(
+            "SELECT user_text FROM chat_log WHERE id = ?", (row["first_id"],)
+        ).fetchone()
+        default_title = str((first["user_text"] if first else "") or "")[:TITLE_LIMIT]
+        return {
+            "session_id": row["session_id"],
+            "turns": row["turns"],
+            "last_at": row["last_at"],
+            "title": titles.get(str(row["session_id"])) or default_title,
+        }
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        """给会话起个人看得懂的名字；标题传空串 = 删掉自定义标题，回落默认。
+
+        返回 ``False`` 表示"这条会话现在没有自定义标题了"——不是失败：用户把输入框
+        清空再确定，要的就是回到"首条用户消息前 60 字"。
+        """
+        if self.store is None:
+            return False
+        text = str(title or "").strip()[:TITLE_LIMIT]
+        with self.store:
+            if not text:
+                self.store.execute(
+                    "DELETE FROM session_titles WHERE session_id = ?", (session_id,)
+                )
+                return False
+            self.store.execute(
+                """
+                INSERT INTO session_titles(session_id, title, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    title = excluded.title, updated_at = excluded.updated_at
+                """,
+                (session_id, text, to_local_iso(self.clock.now())),
             )
-        return sessions
+        return True
+
+    def delete_session(self, session_id: str) -> int:
+        """删掉一个会话的往来记录，返回删掉多少轮。
+
+        **只删 ``chat_log`` 与该会话的标题**：``facts``（长期记忆）与 ``episodes``
+        （片段）是这个人的记忆本身，不属于某一次会话——删历史不该顺手抹掉
+        "他喜欢悬疑"。要清记忆请走 ``manage_memory`` / ``yixiang memory``。
+        """
+        if self.store is None:
+            return 0
+        with self.store:
+            cursor = self.store.execute(
+                "DELETE FROM chat_log WHERE session_id = ?", (session_id,)
+            )
+            self.store.execute(
+                "DELETE FROM session_titles WHERE session_id = ?", (session_id,)
+            )
+        return int(cursor.rowcount or 0)
+
+    def export_session(self, session_id: str) -> dict[str, object]:
+        """某个会话的全部往来（导出用：正序、全量，不套历史窗口）。"""
+        return {
+            "session_id": session_id,
+            "exported_at": to_local_iso(self.clock.now()),
+            "turns": self._turns(session_id, EXPORT_TURN_LIMIT),
+        }
 
     def source_of(self, session_id: str, default: str = "cli") -> str:
         """某个会话原先的来源标记（Web 控制台切回旧会话时别改写它的 source）。
@@ -205,6 +311,14 @@ class SessionManager:
         ``history_turns`` 轮给模型用，这里要的是"这一整天聊了什么"。
         返回按时间正序（旧 → 新），元素是 ``{id, user, reply, tools, at}``。
         """
+        return self._turns(self.session_id, limit)
+
+    def _turns(self, session_id: str, limit: int) -> list[dict[str, object]]:
+        """某个会话最近 ``limit`` 轮，返回按时间正序（旧 → 新）。
+
+        ``transcript()`` 与 ``export_session()`` 共用这一处取数：同一个"读往来"的
+        口径只该有一份实现，否则导出的顺序迟早和面板上看到的对不上。
+        """
         if self.store is None:
             return []
         rows = self.store.execute(
@@ -214,7 +328,7 @@ class SessionManager:
              WHERE session_id = ?
              ORDER BY id DESC LIMIT ?
             """,
-            (self.session_id, max(int(limit), 1)),
+            (session_id, max(int(limit), 1)),
         ).fetchall()
         return [
             {

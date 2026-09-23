@@ -692,6 +692,49 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+/* 一行会话 = 可点的条目 + 三个动作按钮。按钮不能嵌在按钮里（非法 HTML，
+   浏览器会把内层弹出来），所以横着排。 */
+.session-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+
+.session-row .session-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.session-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  justify-content: center;
+}
+
+.session-tools button {
+  font-size: 12px;
+  padding: 0 var(--space-2);
+  min-height: 22px;
+}
+
+.session-search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.session-search {
+  min-width: 180px;
+  min-height: var(--tap);
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  font-family: var(--font);
+}
+
 .session-item {
   display: flex;
   align-items: center;

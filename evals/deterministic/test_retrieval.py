@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import replace
 
 import pytest
@@ -657,3 +658,39 @@ def test_rag_cli_eval_refuses_an_empty_corpus(settings, capsys):
 
     assert rag_cmd.cmd_rag(settings, args) == 1
     assert "语料是空的" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------- 嵌入超时（Task 24）
+class SleepingEmbedder:
+    """模拟"后端卡住"：``encode`` 睡 3 秒（正常路径上没人等得起）。"""
+
+    model = "hash"
+    dim = DIM
+
+    def encode(self, texts: list[str], batch: int = 32) -> list[list[float]]:  # noqa: ARG002
+        time.sleep(3)
+        return [[0.0] * self.dim for _ in texts]
+
+
+def test_a_stuck_embedder_degrades_within_the_timeout(corpus, conn, clock, settings):
+    """Task 24：嵌入后端卡住 → 在 ``embed_timeout`` 内降级纯 FTS，而不是把整轮拖死。"""
+    settings.embed_timeout = 0.2  # slotted Settings：这个字段由 Task 24 加
+    retrieve.configure(
+        conn,
+        data_dir=settings.data_dir,
+        clock=clock,
+        settings=settings,
+        embedder=SleepingEmbedder(),
+    )
+
+    started = time.monotonic()
+    hits = retrieve.retrieve_media("讲时间循环的", top_k=3, exclude_recent_days=0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5, f"超时没生效：等了 {elapsed:.2f}s"
+    assert hits  # 降级不是失败：照常出结果（D-24 的同一条纪律）
+    info = retrieve.trace_info()
+    assert info["embed"] == "unavailable"
+    assert info["vec_ready"] is False
+    assert E_EMBED_UNAVAILABLE in info["errors"]
+    assert any("超时" in item for item in info["errors"])

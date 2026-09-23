@@ -146,6 +146,9 @@ class Settings:
     tool_retry_max: int = 2
     llm_timeout: float = 60.0
     gate_timeout: float = 8.0
+    # 嵌入后端最长等多久：fastembed 首载要下模型、jieba 首载要建词典，
+    # 卡住时的表现是"整轮对话不动"，必须有个上限（超时即降级纯 FTS，D-24）
+    embed_timeout: float = 20.0
 
     # ── 成本与日志 ──
     budget_cny_per_day: float = 0.5
@@ -206,6 +209,8 @@ class Settings:
             )
         if not 1 <= self.loop_max_iter <= 20:
             errors.append("YIXIANG_LOOP_MAX_ITER 应在 1~20")
+        if not 1 <= self.embed_timeout <= 120:
+            errors.append("YIXIANG_EMBED_TIMEOUT 应在 1~120")
         if self.main_model in NO_TOOL_MODELS:
             errors.append(
                 f"YIXIANG_MAIN_MODEL={self.main_model} 不支持工具调用："

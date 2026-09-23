@@ -23,6 +23,8 @@ import math
 import re
 import sqlite3
 import struct
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -243,18 +245,25 @@ def embed_with_cache(
     *,
     batch: int = 32,
     created_at: str | None = None,
+    timeout: float | None = None,
 ) -> list[list[float]]:
     """带缓存的批量嵌入；``embedder`` 不可用时抛 ``EmbedUnavailable``（上层降级）。
 
     这是幂等入库的核心：``source_id`` 没变 → ``embed_text`` 没变 → 哈希命中 →
     **一次模型推理都不做**（§8.1）。
+
+    ``timeout`` 只包住 ``encode`` 这一段（缓存读写留在调用线程，见
+    ``_run_with_timeout``）；``None`` = 老行为，不设上限。
     """
     if not texts:
         return []
     cache = cached_vectors(conn, texts, embedder.model)
     missing = [text for text in texts if content_hash(text, embedder.model) not in cache]
     if missing:
-        vectors = embedder.encode(missing, batch=batch)
+        if timeout is None:
+            vectors = embedder.encode(missing, batch=batch)
+        else:
+            vectors = _run_with_timeout(timeout, embedder.encode, missing, batch=batch)
         if len(vectors) != len(missing):
             raise EmbedUnavailable(f"嵌入数量不匹配：期望 {len(missing)}，得到 {len(vectors)}")
         store_vectors(
@@ -280,3 +289,35 @@ def _now():
     from datetime import datetime
 
     return datetime.now().astimezone()
+
+
+def _run_with_timeout(
+    timeout: float, fn: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    """在 ``timeout`` 秒内等 ``fn`` 的结果；超时抛 ``EmbedUnavailable``。
+
+    为什么是裸线程而不是 ``ThreadPoolExecutor``：``concurrent.futures`` 在解释器退出时
+    会逐个 join 工作线程（``_python_exit``），后端真卡住时 pytest 收尾会被那条线拖住——
+    超时等于白做。守护线程不会被 join，卡住的那条线随进程一起走。
+
+    线程里**只跑 ``fn``**：``sqlite3.Connection`` 默认 ``check_same_thread=True``
+    （``db.connect`` 没关它），把 conn 带进别的线程会当场 ``ProgrammingError``。
+    所以缓存读写留在调用线程，线程里只有模型推理这一段。
+    """
+    box: list[Any] = []
+    error: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            box.append(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001 —— 后端自己抛的异常照样带回来（D-24 的降级入口）
+            error.append(exc)
+
+    worker = threading.Thread(target=run, name="yixiang-embed", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise EmbedUnavailable(f"嵌入超时（>{timeout:g}s，多半是首载模型或后端卡死）")
+    if error:
+        raise error[0]
+    return box[0]

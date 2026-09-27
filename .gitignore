@@ -30,6 +30,7 @@ Thumbs.db
 # 本机资料：开发计划与执行记录、面试准备稿——只留本机，不随仓库公开
 docs/superpowers/
 docs/INTERVIEW-PREP.md
+面试准备.md
 
 # 本机历史备份包（含被摘除的旧提交，绝不进仓库）
 *.bundle

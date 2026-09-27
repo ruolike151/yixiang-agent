@@ -27,12 +27,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import PNG_1X1
 from fake_provider import FakeProvider, text_reply, usage
 
 from yixiang.app import App
 from yixiang.config import Settings
 from yixiang.memory.core_files import CHAR_LIMITS, MEMORY_MAX_LINES
 from yixiang.ops.usage import JsonlUsageSink
+from yixiang.runtime.media import MAX_INLINE_IMAGE_BYTES
 from yixiang.web import ConsoleAPI, ConsoleError, build_server
 from yixiang.web.console import MAX_UPLOAD_BYTES, mask_secret, render_env
 from yixiang.web.server import parse_multipart
@@ -529,6 +531,170 @@ def test_uploaded_file_is_readable_and_escapes_are_refused(settings, clock):
     escaped = registry.run("read_file", {"path": "../../secret.md"})
     assert escaped.ok is False
     assert "路径越界" in escaped.output
+
+
+def test_upload_cap_moved_past_the_old_two_megabytes(settings, clock):
+    """2MB 是上一版的上限。3MB 的文件现在必须真的落盘（不是"错误文案改小了"）。"""
+    api = make_api(settings, clock)
+
+    result = api.upload("论文.pdf", b"x" * 3_000_000)
+
+    assert result["bytes"] == 3_000_000
+    assert (settings.data_dir / result["path"]).stat().st_size == 3_000_000
+    assert MAX_UPLOAD_BYTES == 30_000_000
+
+
+def test_uploads_are_listed_from_disk_so_a_reload_still_shows_them(settings, clock):
+    """列表必须来自 ``data/uploads/`` 本身。
+
+    只列"本次上传"是删不掉文件的那半个根因：刷新页面后 store 空了，磁盘上的
+    文件还在，界面上连行都没有，自然无从删起。
+    """
+    api = make_api(settings, clock)
+    fresh = api.upload("笔记.md", "第一份".encode())
+    # 上一版控制台留下的文件（不是这一次传的）：也必须出现在列表里
+    leftover = settings.data_dir / "uploads" / "2026-09-01-上次留下的.md"
+    leftover.write_text("上一版留下的", encoding="utf-8")
+
+    listing = api.list_uploads()
+
+    assert [item["name"] for item in listing["items"]] == [
+        "2026-09-19-笔记.md",
+        "2026-09-01-上次留下的.md",
+    ]
+    assert listing["items"][0]["path"] == fresh["path"]
+    assert listing["limit"] == MAX_UPLOAD_BYTES
+    # 两条上限不是一回事：能传 30MB，但只有 8MB 以内模型才真的看到像素
+    assert listing["inline_limit"] == MAX_INLINE_IMAGE_BYTES
+    assert listing["dir"] == str(settings.data_dir / "uploads")
+
+
+def test_a_single_upload_can_be_deleted_and_the_rest_survive(settings, clock):
+    api = make_api(settings, clock)
+    first = api.upload("a.md", b"A")
+    second = api.upload("b.md", b"B")
+
+    result = api.delete_upload(second["name"])
+
+    assert result["deleted"] == second["name"]
+    assert [item["name"] for item in result["items"]] == [first["name"]]
+    assert not (settings.data_dir / second["path"]).exists()
+    assert (settings.data_dir / first["path"]).is_file()
+
+    with pytest.raises(ConsoleError) as exc:
+        api.delete_upload("没有这个.md")
+    assert exc.value.status == 404
+    assert exc.value.code == "upload_not_found"
+
+
+def test_deleting_and_previewing_never_escape_the_uploads_dir(settings, clock):
+    api = make_api(settings, clock)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)  # 还没传过东西时 data/ 可能不存在
+    outside = settings.data_dir / "soul.md"
+    outside.write_text("不该被删", encoding="utf-8")
+
+    with pytest.raises(ConsoleError) as exc:
+        api.delete_upload("../soul.md")
+    assert exc.value.status == 404
+    assert outside.read_text(encoding="utf-8") == "不该被删"
+
+    with pytest.raises(ConsoleError) as exc:
+        api.read_upload("../soul.md")
+    assert exc.value.status == 404
+    assert outside.read_text(encoding="utf-8") == "不该被删"
+
+
+def test_clear_uploads_empties_the_workspace(settings, clock):
+    api = make_api(settings, clock)
+    api.upload("a.md", b"A")
+    api.upload("b.md", b"B")
+
+    result = api.clear_uploads()
+
+    assert result["deleted"] == 2
+    assert result["items"] == []
+    assert list((settings.data_dir / "uploads").iterdir()) == []
+    assert api.clear_uploads()["deleted"] == 0  # 本来就空：0 是结果，不是错误
+
+
+def test_an_image_upload_is_labelled_with_a_preview_url_and_no_read_file_hint(
+    settings, clock
+):
+    """图片和文本走两条路：``read_file`` 读不出图（二进制），图片是"随消息发出去"。"""
+    api = make_api(settings, clock)
+
+    result = api.upload("截图.png", PNG_1X1)
+
+    assert result["kind"] == "image"
+    assert result["mime"] == "image/png"
+    assert result["url"] == f"/api/uploads/{result['name']}/raw"
+    assert result["hint"] == ""  # 图片不该往输入框里填 read_file（它读不了图）
+
+    data, mime = api.read_upload(result["name"])
+    assert data == PNG_1X1
+    assert mime == "image/png"
+
+
+def test_a_text_upload_is_still_a_plain_file_with_the_read_file_hint(settings, clock):
+    api = make_api(settings, clock)
+
+    result = api.upload("笔记.md", "# 笔记".encode())
+
+    assert result["kind"] == "file"
+    assert result["mime"] == ""
+    assert result["hint"] == f'让我读它：read_file(path="{result["path"]}")'
+
+
+def test_chat_attaches_an_uploaded_image_to_this_turn_only(settings, clock):
+    """图片挂在本轮 user 消息上；历史里只留一行"附图："，绝不每轮重发一遍。"""
+    api = make_api(settings, clock, text_reply("看到图了"), text_reply("又一轮"))
+    image = api.upload("截图.png", PNG_1X1)
+
+    api.chat("看看这张图", images=[image["path"]])
+    first = api.app.provider.requests[-1].messages[-1]
+    assert first.role == "user"
+    assert "看看这张图" in first.content
+    assert first.images == [image["path"]]
+    assert image["path"] in first.content  # 附图这一行也进文本：刷新后仍看得见
+
+    api.chat("那第二张呢")
+    second = api.app.provider.requests[-1].messages
+    assert second[-1].content == "那第二张呢"
+    assert second[-1].images is None
+    history_users = [message for message in second if message.role == "user"]
+    assert history_users[0].images is None  # 上一轮的图不随历史重发
+    assert image["path"] in history_users[0].content
+
+
+def test_chat_allows_an_image_only_turn_but_still_refuses_a_truly_empty_one(
+    settings, clock
+):
+    api = make_api(settings, clock, text_reply("看到了"))
+
+    with pytest.raises(ConsoleError) as exc:
+        api.chat("   ")
+    assert exc.value.code == "empty_message"
+
+    image = api.upload("截图.png", PNG_1X1)
+    api.chat("", images=[image["path"]])
+    user = api.app.provider.requests[-1].messages[-1]
+    assert user.images == [image["path"]]
+    assert image["path"] in user.content  # 一个字都没写时，文本位只剩附图那一行
+
+
+def test_chat_refuses_an_image_that_is_not_in_the_workspace(settings, clock):
+    """发一张不存在的图要说清楚：静默丢掉的话，模型"看图"的结论无从核对。"""
+    api = make_api(settings, clock)
+
+    with pytest.raises(ConsoleError) as exc:
+        api.chat("看看这张", images=["uploads/没有这张.png"])
+    assert exc.value.status == 400
+    assert exc.value.code == "bad_image"
+    assert "没有这张.png" in exc.value.message
+
+    with pytest.raises(ConsoleError) as exc:
+        api.chat("看看这张", images=["../soul.md"])
+    assert exc.value.code == "bad_image"
 
 
 # --------------------------------------------------------------------- HTTP
@@ -1075,6 +1241,94 @@ def test_http_layer_exposes_traces_and_404s_unknown_turn(settings, clock):
         status, raw = client.call("GET", "/api/trace/t_20260101_000000_dead")
         assert status == 404
         assert json.loads(raw)["error"] == "no_trace"
+    finally:
+        server.shutdown()
+        server.close_all()
+        thread.join(timeout=5)
+
+
+def test_http_layer_lists_deletes_and_serves_uploaded_images(settings, clock):
+    """上传件在 HTTP 层上的四个新动作：列（刷新后还在）、缩略图、删一个、清空。
+
+    顺带把"只带图不带字"的一轮打穿：前端 ``sendMessage`` 发的就是 ``{text, images}``
+    这个体，它必须在**开流之前**被接住——否则图片轮次会先拿到 200，再被当成空消息。
+    """
+    api = make_api(settings, clock, text_reply("看到图了"))
+    server = build_server(settings, port=0, api=api, quiet=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    client = Client(server.url.rstrip("/"))
+    try:
+        body, content_type = multipart_body("shot.png", PNG_1X1)
+        status, raw = client.call(
+            "POST", "/api/upload", body=body, headers={"Content-Type": content_type}
+        )
+        assert status == 200, raw
+        png = json.loads(raw)
+        assert png["kind"] == "image"
+        assert png["url"] == f"/api/uploads/{png['name']}/raw"
+
+        body, content_type = multipart_body("notes.md", "# 笔记".encode())
+        status, raw = client.call(
+            "POST", "/api/upload", body=body, headers={"Content-Type": content_type}
+        )
+        assert status == 200, raw
+        note = json.loads(raw)
+
+        # 列表来自磁盘：两个都在，按文件名倒序（同一天里 shot > notes）
+        status, raw = client.call("GET", "/api/uploads")
+        assert status == 200, raw
+        listing = json.loads(raw)
+        assert [item["path"] for item in listing["items"]] == [png["path"], note["path"]]
+        assert listing["limit"] == MAX_UPLOAD_BYTES
+
+        # 缩略图：真字节 + 真类型（前端 <img src=item.url> 拿的就是它）
+        status, raw = client.call("GET", png["url"])
+        assert status == 200 and raw == PNG_1X1
+        assert content_type_of(client, png["url"]) == "image/png"
+
+        # 路由顺序的守门人：/api/uploads/<name>/raw 不能被当成一个文件名去查
+        status, raw = client.call("GET", "/api/uploads/nope.png/raw")
+        assert status == 404 and json.loads(raw)["error"] == "upload_not_found"
+
+        # 只带图不带字：合法一轮——"看看这张"这句话本身可以省掉
+        status, raw = client.call(
+            "POST", "/api/chat", body={"text": "", "images": [png["path"]]}
+        )
+        assert status == 200, raw
+        assert [event["kind"] for event in parse_sse(raw)][-2:] == ["result", "end"]
+        assert api.app.provider.requests[-1].messages[-1].images == [png["path"]]
+
+        # 一个字都没有、也没附图，才是空消息
+        status, raw = client.call("POST", "/api/chat", body={"text": "   "})
+        assert status == 400 and json.loads(raw)["error"] == "empty_message"
+
+        # 工作区里没有的图：这一轮报错并说清是哪一张（静默丢掉会让"看图"的结论
+        # 无从核对）。它和 no_api_key 一样是"开流之后才发现的错"，走 SSE 的
+        # error 事件；前端 app.js 的 case "error" 正是接它。
+        status, raw = client.call(
+            "POST", "/api/chat", body={"text": "看图", "images": ["uploads/nope.png"]}
+        )
+        assert status == 200
+        failure = [event for event in parse_sse(raw) if event["kind"] == "error"][-1]
+        assert failure["code"] == "bad_image"
+        assert "nope.png" in failure["message"]
+
+        # 删一个：剩下的还在；不存在的名字如实 404
+        status, raw = client.call("DELETE", f"/api/uploads/{png['name']}")
+        assert status == 200, raw
+        assert json.loads(raw)["deleted"] == png["name"]
+        assert [item["path"] for item in json.loads(raw)["items"]] == [note["path"]]
+
+        status, raw = client.call("DELETE", "/api/uploads/nope.md")
+        assert status == 404 and json.loads(raw)["error"] == "upload_not_found"
+
+        # 清空：/api/uploads/clear 是"清空"，不是"删掉一个叫 clear 的文件"
+        status, raw = client.call("POST", "/api/uploads/clear")
+        assert status == 200, raw
+        assert json.loads(raw)["deleted"] == 1
+        assert json.loads(client.call("GET", "/api/uploads")[1])["items"] == []
+        assert json.loads(client.call("POST", "/api/uploads/clear")[1])["deleted"] == 0
     finally:
         server.shutdown()
         server.close_all()

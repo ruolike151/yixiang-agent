@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import contextlib
-import re
 from collections.abc import Callable, Iterable
 from dataclasses import fields
 from pathlib import Path
@@ -30,13 +29,18 @@ from yixiang.memory.core_files import CHAR_LIMITS, MEMORY_MAX_LINES, LimitExceed
 from yixiang.ops.tracing import find_trace, read_traces
 from yixiang.ops.usage import summarize
 from yixiang.runtime.eventloop import CancelToken
+from yixiang.runtime.media import MAX_INLINE_IMAGE_BYTES, sniff_image_file
 from yixiang.runtime.models import LoopEvent
 from yixiang.runtime.session import CONTEXT_BUDGET_CHARS, read_core_file
+from yixiang.runtime.uploads import (
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_LABEL,
+    UPLOADS_SUBDIR,
+    store_upload,
+)
 
-# 上传件的落点（data/ 之内，工具 read_file 的沙箱里）
-UPLOADS_SUBDIR = "uploads"
-# 单个上传件上限：本地测试够用，又不会让一个 2GB 的文件把内存打爆
-MAX_UPLOAD_BYTES = 2_000_000
+# 取不回类型时的兜底（图片走 sniff_image_file 认出真实类型）
+OCTET_STREAM = "application/octet-stream"
 # 会话 id 长度上限（它会被写进 chat_log 与 trace，不该无限长）
 SESSION_ID_LIMIT = 120
 # Web 控制台自己的默认会话：与 CLI 的 cli:default 分开，source 才不会漂
@@ -489,30 +493,90 @@ class ConsoleAPI:
 
     # ------------------------------------------------------------------ 上传
     def upload(self, filename: str, data: bytes) -> dict[str, Any]:
-        """把上传件落到 ``data/uploads/``，返回相对路径（模型读它用 read_file）。"""
+        """把上传件落到 ``data/uploads/``：图片能随消息发出去，文本用 read_file 读。"""
         if not data:
             raise ConsoleError("文件是空的：选一个非空文件再传。", code="empty_file")
         if len(data) > MAX_UPLOAD_BYTES:
             raise ConsoleError(
-                f"文件 {len(data)} 字节，超过上限 {MAX_UPLOAD_BYTES} 字节（约 2MB）；"
+                f"文件 {len(data)} 字节，超过上限 {MAX_UPLOAD_BYTES} 字节（{MAX_UPLOAD_LABEL}）；"
                 "先截断，或转成更小的 .md / .txt 再传。",
                 status=413,
                 code="too_large",
                 payload={"limit": MAX_UPLOAD_BYTES, "actual": len(data)},
             )
+        # 落盘口径与 QQ 网关共用一份（runtime/uploads.py）：日期打头、同名让位
         directory = self.settings.data_dir / UPLOADS_SUBDIR
-        directory.mkdir(parents=True, exist_ok=True)
-        stamp = self.app.clock.now().strftime("%Y-%m-%d")
-        target = _unique_path(directory, f"{stamp}-{_safe_upload_name(filename)}")
-        target.write_bytes(data)
-        relative = f"{UPLOADS_SUBDIR}/{target.name}"
+        try:
+            target = store_upload(
+                data, directory=directory, filename=filename, now=self.app.clock.now()
+            )
+        except FileExistsError as exc:  # 同一个名字撞了 200 次：名字本身不对劲
+            raise ConsoleError(str(exc), status=409, code="too_many_duplicates") from exc
+        return self._upload_item(target) | {"dir": str(directory)}
+
+    def list_uploads(self) -> dict[str, Any]:
+        """``data/uploads/`` 里**现在**有什么——不是"这一次传了什么"。
+
+        列表必须来自己磁盘：只记在浏览器内存里的话，刷新一次 store 就空了，而
+        磁盘上的文件还在，界面上连一行都没有，用户自然无从删起（工作区只会越堆
+        越满）。按文件名倒序 = 新的在前：上传件一律 ``YYYY-MM-DD-`` 打头，
+        日期本身就是序号，上一版留下的老文件也在同一条队列里。
+        """
+        directory = self.settings.data_dir / UPLOADS_SUBDIR
+        items: list[dict[str, Any]] = []
+        if directory.is_dir():
+            for entry in sorted(directory.iterdir(), key=lambda item: item.name, reverse=True):
+                if not entry.is_file():
+                    continue
+                try:
+                    items.append(self._upload_item(entry))
+                except OSError:
+                    continue  # 刚好被删掉 / 读不到：跳过，别让整个列表 500
+        # ``limit`` 是"能传多大"，``inline_limit`` 是"多大以内模型真能看到像素"：
+        # 两条上限不一样，界面上的说法就得从服务端拿，别在前端各写一遍数字。
         return {
-            "path": relative,
-            "name": target.name,
-            "bytes": len(data),
+            "items": items,
+            "limit": MAX_UPLOAD_BYTES,
+            "inline_limit": MAX_INLINE_IMAGE_BYTES,
             "dir": str(directory),
-            "hint": f'让我读它：read_file(path="{relative}")',
         }
+
+    def delete_upload(self, name: str) -> dict[str, Any]:
+        """删掉一个上传件：返回删掉的名字 + 剩下的列表（界面拿它直接重画）。"""
+        target = self._upload_file(name)
+        try:
+            target.unlink()
+        except OSError as exc:
+            raise ConsoleError(
+                f"删不掉 {target.name}：{exc}（文件可能正被别的程序占用）",
+                status=500,
+                code="delete_failed",
+            ) from exc
+        return {"deleted": target.name, "items": self.list_uploads()["items"]}
+
+    def clear_uploads(self) -> dict[str, Any]:
+        """一键清空 ``data/uploads/``：返回删掉几个（0 是结果，不是错误）。"""
+        directory = self.settings.data_dir / UPLOADS_SUBDIR
+        removed = 0
+        if directory.is_dir():
+            for entry in sorted(directory.iterdir()):
+                if not entry.is_file():
+                    continue
+                try:
+                    entry.unlink()
+                except OSError as exc:
+                    raise ConsoleError(
+                        f"删不掉 {entry.name}：{exc}（文件可能正被别的程序占用）",
+                        status=500,
+                        code="delete_failed",
+                    ) from exc
+                removed += 1
+        return {"deleted": removed, "items": []}
+
+    def read_upload(self, name: str) -> tuple[bytes, str]:
+        """取回一个上传件的字节 + 真实类型（图片缩略图那条路走它）。"""
+        target = self._upload_file(name)
+        return target.read_bytes(), (sniff_image_file(target) or OCTET_STREAM)
 
     # ------------------------------------------------------------------ 对话
     def chat(
@@ -520,14 +584,19 @@ class ConsoleAPI:
         text: str,
         emit: Emit | None = None,
         *,
+        images: Iterable[str] | None = None,
         token: CancelToken | None = None,
     ) -> dict[str, Any]:
         """跑一轮（流式）：事件实时喂给 ``emit``，返回值是这一轮的结果快照。
 
         ``token`` 由 Web 层给：它是「停止生成」唯一的落点（``None`` = 不可取消）。
+
+        ``images`` 是本轮附图（工作区里已经存在的图片路径）。只带图不带字是合法
+        的一轮——"看看这张"这句话本身可以省掉；两样都空才算空消息。
         """
         message = (text or "").strip()
-        if not message:
+        picked = self._pick_images(images)
+        if not message and not picked:
             raise ConsoleError("消息是空的：写一句再发送。", code="empty_message")
         if not self.settings.api_key:
             raise ConsoleError(
@@ -546,7 +615,9 @@ class ConsoleAPI:
         try:
             # 走 App.ask（本线程常驻 loop）：每轮新建再关掉 loop 会让 provider 缓存的
             # 连接池在第二轮报 Event loop is closed
-            result = self.app.ask(message, observer=observer, stream=True, token=token)
+            result = self.app.ask(
+                message, observer=observer, stream=True, token=token, images=picked or None
+            )
         except Exception as exc:  # noqa: BLE001 - 如实回错，不让 500 页面吞掉原因
             raise ConsoleError(f"这一轮没能跑完：{exc}", status=500, code="turn_failed") from exc
         payload = {
@@ -590,6 +661,60 @@ class ConsoleAPI:
             "source": "data" if (root / name).is_file() else "template",
             "over": used > limit,
         }
+
+    def _upload_item(self, target: Path) -> dict[str, Any]:
+        """一个上传件的界面口径：是图就给缩略图地址，是普通文件就给 read_file 提示。
+
+        图和文件走两条路，所以 ``kind`` 由**内容**决定（``sniff_image_file`` 只读
+        文件头）：图片是"随消息发出去"（``read_file`` 读不了二进制，给它那个提示
+        只会让模型拿到一屏乱码），普通文件才是"让模型读它"。
+        """
+        relative = f"{UPLOADS_SUBDIR}/{target.name}"
+        mime = sniff_image_file(target)
+        return {
+            "path": relative,
+            "name": target.name,
+            "bytes": target.stat().st_size,
+            "kind": "image" if mime else "file",
+            "mime": mime,
+            "url": f"/api/uploads/{target.name}/raw",
+            "hint": "" if mime else _read_file_hint(relative),
+        }
+
+    def _upload_file(self, name: str) -> Path:
+        """把界面给的名字收敛成 ``data/uploads/`` 里的一个真实文件。
+
+        只认**纯文件名**：带目录分隔符、``..``、绝对路径的一律按"没有这个文件"回
+        ——越界要在这里就断掉，而不是等 ``Path`` 拼出一个能碰到 ``data/`` 其它地方
+        的路径（``delete_upload`` / ``read_upload`` 都只有这一道门）。
+        """
+        cleaned = str(name or "").strip()
+        if not cleaned or cleaned in {".", ".."} or Path(cleaned).name != cleaned:
+            raise _upload_missing(cleaned)
+        target = self.settings.data_dir / UPLOADS_SUBDIR / cleaned
+        if not target.is_file():
+            raise _upload_missing(cleaned)
+        return target
+
+    def _pick_images(self, images: Iterable[str] | None) -> list[str]:
+        """校验本轮附图并归一成 ``uploads/<name>``：不存在 / 不是图都当场回错。
+
+        静默丢掉一张图比报错更糟：用户以为模型"看过"了，其实它只看到一行路径，
+        于是"看图"的结论无从核对。所以这里宁可 400。
+        """
+        picked: list[str] = []
+        for item in images or ():
+            raw = str(item or "").strip().replace("\\", "/")
+            if raw.startswith(f"{UPLOADS_SUBDIR}/"):
+                raw = raw[len(UPLOADS_SUBDIR) + 1 :]  # 前端可能带上前缀，也可能不带
+            try:
+                target = self._upload_file(raw)
+            except ConsoleError as exc:
+                raise _bad_image(str(item)) from exc
+            if not sniff_image_file(target):
+                raise _bad_image(f"{UPLOADS_SUBDIR}/{target.name}")
+            picked.append(f"{UPLOADS_SUBDIR}/{target.name}")
+        return picked
 
     def _usage_summary(self) -> dict[str, Any]:
         """三文件用量：人设按字符、memory.md 按行（口径与各自的写入口一致）。"""
@@ -752,30 +877,27 @@ def _clean_title(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
-def _safe_upload_name(filename: str) -> str:
-    """把上传文件名收敛成"没有目录、没有路径分隔符、没有怪字符"的一段。"""
-    raw = str(filename or "").replace("\\", "/").split("/")[-1].strip()
-    cleaned = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "-", raw).strip("-_.")
-    if not cleaned:
-        return "upload"
-    if len(cleaned) > 60:  # 保头保尾，中间省略：扩展名不能丢
-        cleaned = f"{cleaned[:44]}-{cleaned[-12:]}"
-    return cleaned
+def _read_file_hint(relative: str) -> str:
+    """普通上传件的提示语：点一下就填进输入框，模型随即用 ``read_file`` 去读。"""
+    return f'让我读它：read_file(path="{relative}")'
 
 
-def _unique_path(directory: Path, base: str) -> Path:
-    """同名不覆盖：第二个变成 ``xxx-2.md``（上传两次同名文件不该丢第一份）。"""
-    candidate = directory / base
-    if not candidate.exists():
-        return candidate
-    stem, dot, ext = base.rpartition(".")
-    if not dot:
-        stem, ext = base, ""
-    for index in range(2, 200):
-        candidate = directory / f"{stem}-{index}{dot}{ext}"
-        if not candidate.exists():
-            return candidate
-    raise ConsoleError(f"{directory} 里同名文件太多，换个文件名再传。", status=409)
+def _upload_missing(name: str) -> ConsoleError:
+    """工作区里没有这个上传件（含越界名字）：404，且不透露 ``data/`` 的布局。"""
+    return ConsoleError(
+        f"工作区里没有这个文件：{name or '（空名字）'}（可能已经被删掉了）",
+        status=404,
+        code="upload_not_found",
+    )
+
+
+def _bad_image(relative: str) -> ConsoleError:
+    """附图不是"工作区里的一张图片"：400，并把是哪一个说出来。"""
+    return ConsoleError(
+        f"发不了这张图：{relative}（只支持工作区里已有的图片，先上传再发送）",
+        status=400,
+        code="bad_image",
+    )
 
 
 def render_env(text: str, updates: dict[str, str]) -> str:
@@ -843,6 +965,7 @@ __all__ = [
     "ConsoleError",
     "DEFAULT_SESSION_ID",
     "MAX_UPLOAD_BYTES",
+    "MAX_UPLOAD_LABEL",
     "PERSONA_FILES",
     "QQ_FIELDS",
     "UPLOADS_SUBDIR",

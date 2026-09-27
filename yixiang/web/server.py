@@ -263,6 +263,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return self._send_json(runner.call(api.tools))
             if path == "/api/skills":
                 return self._send_json(runner.call(api.skills))
+            if path == "/api/uploads":
+                return self._send_json(runner.call(api.list_uploads))
+            # 必须排在 /api/uploads/ 前缀分支之前：uploads/xx.png/raw 是取字节，
+            # 不是"叫 xx.png/raw 的那个文件"
+            if path.startswith("/api/uploads/") and path.endswith("/raw"):
+                name = path[len("/api/uploads/") : -len("/raw")]
+                data, mime = runner.call(api.read_upload, name)
+                return self._send_bytes(data, content_type=mime)
             if path == "/api/traces":
                 return self._send_json(runner.call(api.traces, _int(query, "limit", 50)))
             if path.startswith("/api/trace/"):
@@ -303,6 +311,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 )
             if path == "/api/memory/sync":
                 return self._send_json(runner.call(api.sync_memory))
+            # 也必须排在 DELETE /api/uploads/<name> 之前：clear 是"清空"，不是
+            # "删掉一个叫 clear 的文件"
+            if path == "/api/uploads/clear":
+                return self._send_json(runner.call(api.clear_uploads))
             if path == "/api/chat":
                 return self._stream_chat()
             if path == "/api/upload":
@@ -331,22 +343,33 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             session_id = path[len("/api/session/") :]
             return self._send_json(runner.call(api.delete_session, session_id))
 
+        if method == "DELETE" and path.startswith("/api/uploads/"):
+            name = path[len("/api/uploads/") :]
+            return self._send_json(runner.call(api.delete_upload, name))
+
         raise ConsoleError(f"没有这个接口：{method} {path}", status=404, code="not_found")
 
     # ------------------------------------------------------------- 对话（SSE）
     def _stream_chat(self) -> None:
         body = self._json_body()
-        # 空消息在开流之前就挡掉：这样前端拿到的是一条干净的 400 JSON，而不是
-        # "已经 200 了才告诉我没内容"。
         text = str(body.get("text") or "")
-        if not text.strip():
+        raw_images = body.get("images")
+        images = (
+            [str(item) for item in raw_images if str(item or "").strip()]
+            if isinstance(raw_images, (list, tuple))
+            else None
+        )
+        # 空消息在开流之前就挡掉：这样前端拿到的是一条干净的 400 JSON，而不是
+        # "已经 200 了才告诉我没内容"。只带图不带字是合法的一轮——"看看这张"
+        # 这句话本身可以省掉，所以"有图"也算有内容。
+        if not text.strip() and not images:
             raise ConsoleError("消息是空的：写一句再发送。", code="empty_message")
 
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         # 取消句柄：请求线程拿它去取消工作线程上那个 task（跨线程靠 call_soon_threadsafe）
         token = eventloop.CancelToken()
         job = self.server.runner.submit(
-            self.server.api.chat, text, events.put, token=token
+            self.server.api.chat, text, events.put, images=images, token=token
         )
         job.token = token  # 同一个对象：cancel() 找的就是它（在发 start 之前一定已经设好）
         self._begin_sse()

@@ -239,7 +239,14 @@ const store = {
   prompt: null,
   tools: null,
   skills: null,
-  uploads: [],
+  // 工作区文件（`data/uploads/` 的**服务端**列表：刷新后还在，所以能一行一行删）。
+  // null = 还没拉过，渲染托盘时先显示骨架屏，而不是"空工作区"这个假结论。
+  uploads: null,
+  uploadLimit: 0,
+  // 图片的另一条上限：超过它的图仍能传、仍会记进历史，但模型看不到像素
+  inlineLimit: 0,
+  // 本轮要随消息发出去的图片（点击「附上」加入，发送后清空）
+  attached: [],
   // 输入框草稿：render() 会把整块面板连 textarea 一起换掉，草稿只活在 DOM 上就会丢
   draft: "",
   streaming: false,
@@ -470,33 +477,176 @@ function chatScroll() {
   return box;
 }
 
-function uploadTray() {
-  if (!store.uploads.length) return null;
+/** 工作区文件列表：**服务端**的 `data/uploads/` 里现在有什么。
+ *
+ * 上一版只记在内存里，刷新一次界面就空了、磁盘上的文件却还在——用户看不到行，
+ * 自然也没法删，工作区只会越堆越满。所以列表、删除、清空三个动作都对着服务端。
+ */
+async function refreshUploads() {
+  const data = await api("/api/uploads");
+  store.uploads = data.items || [];
+  store.uploadLimit = data.limit || 0;
+  store.inlineLimit = data.inline_limit || 0;
+  return store.uploads;
+}
+
+/** 上传件的原文地址（<img> 缩略图与它同一条路：/api/uploads/<name>/raw）。 */
+function rawUrl(path) {
+  const name = String(path || "").split("/").pop();
+  return `/api/uploads/${encodeURIComponent(name)}/raw`;
+}
+
+function uploadLimitLabel() {
+  return store.uploadLimit ? `单个上限 ${fmtBytes(store.uploadLimit)}` : "";
+}
+
+/** 输入框下面那行提示。两条上限都由服务端给，别在这里各写一遍数字。 */
+function uploadHint() {
+  const parts = ["文件直接拖进来或截图直接粘贴也行"];
+  if (store.uploadLimit) {
+    parts.push(`单个上限 ${fmtBytes(store.uploadLimit)}`);
+  }
+  parts.push(
+    store.inlineLimit
+      ? `图片会随这一轮发给模型、它能真的看到；单张 ${fmtBytes(store.inlineLimit)} 以上的只留路径`
+      : "图片会随这一轮发给模型，它能真的看到"
+  );
+  parts.push("普通文件落在 data/uploads/，让模型 read_file 读它");
+  return `${parts.join("；")}。`;
+}
+
+/** 附图那一行与后端 ``_with_image_note`` 同一口径：本地与刷新后的历史对得上。 */
+function imageNote(images) {
+  return `（附图：${images.join("、")}）`;
+}
+
+function isAttached(path) {
+  return store.attached.includes(path);
+}
+
+/** 「附上 / 取消附图」：切换一张图是否随下一轮发出去。 */
+function toggleAttach(item, repaint) {
+  store.attached = isAttached(item.path)
+    ? store.attached.filter((path) => path !== item.path)
+    : [...store.attached, item.path];
+  repaint();
+}
+
+async function deleteUpload(item, repaint) {
+  await load("delete-upload", async () => {
+    const result = await api(`/api/uploads/${encodeURIComponent(item.name)}`, {
+      method: "DELETE",
+    });
+    store.uploads = result.items || [];
+    // 刚删掉的那张图不该还挂在待发列表里：否则下一轮会回一个 bad_image
+    store.attached = store.attached.filter((path) => path !== item.path);
+    repaint();
+    toast(`已删除 ${item.name}`, "ok");
+  });
+}
+
+async function clearUploads(repaint) {
+  const count = store.uploads ? store.uploads.length : 0;
+  if (!count) return;
+  if (!window.confirm(`清空 data/uploads/ 里的 ${count} 个文件？删了就找不回来了。`)) return;
+  await load("clear-uploads", async () => {
+    const result = await api("/api/uploads/clear", { method: "POST" });
+    store.uploads = result.items || [];
+    store.attached = [];
+    repaint();
+    toast(`清空了 ${result.deleted} 个文件`, "ok");
+  });
+}
+
+function uploadRow(item, repaint) {
+  const pending = isAttached(item.path);
+  const preview =
+    item.kind === "image"
+      ? h("img", {
+          class: `thumb${pending ? " attached" : ""}`,
+          src: item.url || rawUrl(item.path),
+          alt: item.name,
+          loading: "lazy",
+        })
+      : icon("file", 16);
+  const actions =
+    item.kind === "image"
+      ? [
+          button(pending ? "取消附图" : "附上", {
+            iconName: pending ? "check" : "plus",
+            className: pending ? "primary" : "ghost",
+            title: pending ? "这一轮不带上它" : "让这一轮带上它（模型会真的看到这张图）",
+            onClick: () => toggleAttach(item, repaint),
+          }),
+        ]
+      : [
+          button("填进输入框", {
+            className: "ghost",
+            onClick: () => {
+              fillComposer(item.hint);
+              const box = document.getElementById("chat-input");
+              if (box) box.focus();
+            },
+          }),
+          button("复制 read_file 调用", {
+            iconName: "check",
+            className: "ghost",
+            onClick: () => copyText(item.hint),
+          }),
+        ];
   return h(
     "div",
-    { class: "card" },
-    h("div", { class: "card-head" }, h("h3", { text: "本次已上传" })),
-    ...store.uploads.map((item) =>
-      h(
-        "div",
-        { class: "row" },
-        icon("file", 16),
-        h("span", { class: "grow mono", text: `${item.path} · ${fmtBytes(item.bytes)}` }),
-        button("复制 read_file 调用", {
-          iconName: "check",
-          className: "ghost",
-          onClick: () => copyText(item.hint),
-        }),
-        button("填进输入框", {
-          className: "ghost",
-          onClick: () => {
-            fillComposer(item.hint);
-            const box = document.getElementById("chat-input");
-            if (box) box.focus();
-          },
-        })
-      )
-    )
+    { class: "row upload-row" },
+    preview,
+    h("span", {
+      class: "grow mono upload-name",
+      title: item.path,
+      text: `${item.name} · ${fmtBytes(item.bytes)}`,
+    }),
+    h("span", { class: "badge", text: item.kind === "image" ? "图片" : "文件" }),
+    ...actions,
+    button("删除", {
+      iconName: "alert",
+      className: "ghost",
+      title: `从 data/uploads/ 删掉 ${item.name}`,
+      onClick: () => deleteUpload(item, repaint),
+    })
+  );
+}
+
+function uploadTray(repaint) {
+  if (store.uploads === null) {
+    return h(
+      "div",
+      { class: "card upload-tray" },
+      h("div", { class: "card-head" }, h("h3", { text: "工作区文件" })),
+      h("p", { class: "card-note", text: "正在读 data/uploads/ …" })
+    );
+  }
+  const items = store.uploads;
+  const total = items.reduce((sum, item) => sum + (item.bytes || 0), 0);
+  const note = items.length
+    ? `${items.length} 个 · 共 ${fmtBytes(total)} · ${uploadLimitLabel()}`
+    : `还没有文件 · ${uploadLimitLabel()}`;
+  return h(
+    "div",
+    { class: "card upload-tray" },
+    h(
+      "div",
+      { class: "card-head" },
+      h("h3", { text: "工作区文件" }),
+      h("span", { class: "card-note", text: note }),
+      h("span", { class: "grow" }),
+      items.length
+        ? button("清空", {
+            iconName: "alert",
+            className: "ghost",
+            title: "清空 data/uploads/（一次删掉全部上传件）",
+            onClick: () => clearUploads(repaint),
+          })
+        : null
+    ),
+    ...items.map((item) => uploadRow(item, repaint))
   );
 }
 
@@ -519,9 +669,15 @@ async function uploadFile(file, { input, fallbackName } = {}) {
     const data = new FormData();
     data.append("file", file, name);
     uploaded = await api("/api/upload", { method: "POST", formData: data });
-    store.uploads.push(uploaded);
-    if (input) fillComposer(uploaded.hint);
-    toast(`已上传 ${uploaded.name}（${fmtBytes(uploaded.bytes)}）`, "ok");
+    await refreshUploads();
+    if (uploaded.kind === "image") {
+      // 图片不走 read_file（它读不了二进制）：直接挂进待发列表，发送时随消息发出去
+      if (!isAttached(uploaded.path)) store.attached = [...store.attached, uploaded.path];
+      toast(`已上传 ${uploaded.name}（${fmtBytes(uploaded.bytes)}）：发送时会带上它`, "ok");
+    } else {
+      if (input) fillComposer(uploaded.hint);
+      toast(`已上传 ${uploaded.name}（${fmtBytes(uploaded.bytes)}）`, "ok");
+    }
   });
   return uploaded;
 }
@@ -592,7 +748,7 @@ async function stopStreaming() {
   }
 }
 
-async function sendMessage(text, { input, submit, stop, scroll }) {
+async function sendMessage(text, { input, submit, stop, scroll, images = [], onSent }) {
   store.streaming = true;
   const controller = new AbortController();
   store.streamJob = "";
@@ -602,11 +758,22 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
   submit.disabled = true;
   input.disabled = true;
 
+  const note = images.length ? imageNote(images) : "";
   const userBubble = h(
     "article",
     { class: "bubble user" },
     h("div", { class: "bubble-meta" }, h("span", { class: "role", text: "you" })),
-    h("p", { text })
+    text ? h("p", { text }) : null,
+    // 附图直接摆出来：这一轮模型看到的到底是哪几张，发出去之前就看得见
+    images.length
+      ? h(
+          "div",
+          { class: "row" },
+          ...images.map((path) =>
+            h("img", { class: "thumb attached", src: rawUrl(path), alt: path })
+          )
+        )
+      : null
   );
   // 正文容器跟历史轮次一样是 div.md（不能是 <p>：渲染器要往里塞 h*/ul/pre 这些块级节点）
   const body = h("div", { class: "md" });
@@ -653,7 +820,15 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
       case "text_revoke":
         replyText = "";
         renderInto(body, "").append(cursor);
-        addChip(h("span", { class: "chip info", text: "这轮要查资料，撤回草稿" }));
+        addChip(
+          h("span", {
+            class: "chip info",
+            text:
+              event.reason === "truncated"
+                ? "到输出上限了，关掉思考重说一遍…"
+                : "这轮要查资料，撤回草稿",
+          })
+        );
         break;
       case "notice":
         addChip(h("span", { class: "chip", text: event.text || "" }));
@@ -700,7 +875,7 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, images }), // 图片只在这一轮发出去，不进历史
       signal: controller.signal, // 停止时先断开"看"的这一侧
     });
     if (!response.ok || !response.body) {
@@ -775,7 +950,9 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
     if (store.transcript) {
       store.transcript.turns.push({
         id: result.turn_id,
-        user: text,
+        // 附图那一行跟后端 ``_with_image_note`` 同一口径：本地这一轮与刷新后
+        // 从磁盘读回来的历史要长得一模一样，否则刷新一次"带了哪张图"就没了。
+        user: [text, note].filter(Boolean).join("\n"),
         reply: replyText,
         tools: result.tools || [],
         at: new Date().toISOString(),
@@ -787,6 +964,10 @@ async function sendMessage(text, { input, submit, stop, scroll }) {
     if (!replyText) body.remove();
     chips.append(h("p", { class: "field-error", text: failure.message || "未知错误" }));
   }
+
+  // 附图只发这一轮：成功了就把待发列表清掉。失败时留着——再按一次发送就能重试，
+  // 不用回工作区把每张图重新点一遍「附上」。
+  if (onSent && !failure) onSent();
 
   store.streaming = false;
   store.streamJob = "";
@@ -812,6 +993,8 @@ async function renderChat() {
       store.transcriptSession = store.transcript.session_id;
     });
   }
+  // 工作区列表来自服务端：只差这一次拉取，刷新之后文件还在、行也还在
+  if (store.uploads === null) await load("uploads", refreshUploads);
   const scroll = chatScroll();
   const input = h("textarea", {
     id: "chat-input",
@@ -850,12 +1033,29 @@ async function renderChat() {
   });
   // 跟着 store.streaming 走：每次 render() 都会重建这个按钮
   stop.hidden = !store.streaming;
+  // 托盘自己一格 DOM：删一个文件不该把整块面板（连同正在流式的气泡与滚动位置）
+  // 一起重画——所以给它一个只换自己的重绘口。
+  const traySlot = h("div", { class: "tray-slot" });
+  const repaintTray = () => traySlot.replaceChildren(uploadTray(repaintTray));
+  repaintTray();
   const fire = () => {
     const text = input.value.trim();
-    if (!text || store.streaming) return;
+    const images = [...store.attached];
+    // 只带图不带字是合法的一轮："看看这张"这句话本身可以省掉
+    if ((!text && !images.length) || store.streaming) return;
     input.value = "";
     store.draft = ""; // 发出去就清草稿：render() 之后不会再把这句话捞回来
-    sendMessage(text, { input, submit, stop, scroll });
+    sendMessage(text, {
+      input,
+      submit,
+      stop,
+      scroll,
+      images,
+      onSent: () => {
+        store.attached = [];
+        repaintTray(); // 缩略图上的「取消附图」要跟着变回「附上」
+      },
+    });
   };
   attachPasteUpload(input);
   input.addEventListener("keydown", (event) => {
@@ -908,15 +1108,12 @@ async function renderChat() {
           onClick: () => fileInput.click(),
         }),
         fileInput,
-        h("span", {
-          class: "card-note",
-          text: "上传后落在 data/uploads/，模型用 read_file 读它（≤2MB）；文件直接拖进来或截图直接粘贴也行",
-        }),
+        h("span", { class: "card-note", text: uploadHint() }),
         h("span", { class: "grow" }),
         stop,
         submit
       ),
-      uploadTray()
+      traySlot
     )
   );
   attachDropTarget(card, input);

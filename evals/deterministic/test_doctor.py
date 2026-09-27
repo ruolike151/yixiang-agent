@@ -104,6 +104,22 @@ def test_validate_accepts_the_offline_hash_backend_but_not_a_typo(tmp_path, repo
     assert [e for e in typo.validate() if "EMBED_BACKEND" in e]
 
 
+def test_output_ceiling_default_is_roomy_and_typos_are_rejected(tmp_path, repo_root):
+    """``YIXIANG_MAX_TOKENS`` 的默认值与校验。
+
+    默认值 2048 是实测撞线过的那个数（一句"鉴赏这张封面"就能写满），所以这里钉住
+    新默认值：它必须比"正常一次长回答"宽，否则默认配置本身就是个故障。
+    """
+    default = no_key_settings(tmp_path, repo_root)
+    assert default.max_tokens == 8192
+    assert [e for e in default.validate() if "MAX_TOKENS" in e] == []
+
+    # 上限是**人填的**：0、负数、把 KB 当成 token 都是常见手滑，必须当场报错。
+    for bad in (0, -1, 255, 65537):
+        typo = no_key_settings(tmp_path, repo_root, max_tokens=bad)
+        assert [e for e in typo.validate() if "MAX_TOKENS" in e], f"{bad} 应该被拦下"
+
+
 def test_doctor_check_six_fails_when_a_core_file_is_over_the_limit(tmp_path, repo_root):
     """PART-2 §1：doctor 要证明三文件"上限内"，不是只证明"存在"。"""
     settings = no_key_settings(tmp_path, repo_root)

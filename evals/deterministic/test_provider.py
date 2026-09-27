@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from base64 import b64encode as b64
 
 import httpx
 import pytest
-from conftest import TURN_ID
+from conftest import PNG_1X1, TURN_ID
 from fake_provider import (
     SleepRecorder,
     completion_body,
@@ -32,6 +33,7 @@ from yixiang.errors import E_LLM_AUTH, E_LLM_BAD_REQUEST, E_LLM_TIMEOUT, Provide
 from yixiang.ops.pricing import PRICES
 from yixiang.ops.usage import CollectingUsageSink, JsonlUsageSink, iter_lines
 from yixiang.providers import OpenAICompatibleProvider
+from yixiang.runtime.media import MAX_INLINE_IMAGE_BYTES
 from yixiang.runtime.models import (
     ProviderRequest,
     collecting_observer,
@@ -56,7 +58,7 @@ def provider_for(settings, steps, *, usage_sink=None):
     return provider, bodies, recorder
 
 
-def request_for(settings, *, role: str = "main") -> ProviderRequest:
+def request_for(settings, *, role: str = "main", thinking_disabled: bool = False) -> ProviderRequest:
     return ProviderRequest(
         role=role,
         system=list(SYSTEM),
@@ -64,6 +66,7 @@ def request_for(settings, *, role: str = "main") -> ProviderRequest:
         turn_id=TURN_ID,
         session_id="cli:test",
         timeout=1.0,
+        thinking_disabled=thinking_disabled,
     )
 
 
@@ -187,6 +190,20 @@ def test_a_no_think_model_gets_reasoning_effort_none(settings):
     # ② 云端那条一个字节都不许多带（开关只按**模型名**命中，不按角色）
     assert bodies[1]["model"] == "deepseek-flash"
     assert "reasoning_effort" not in bodies[1]
+
+
+def test_a_request_can_turn_thinking_off_without_a_model_name_on_the_list(settings):
+    """关思考不止名单一条路：撞线重问时 loop 按**这一次请求**关（不按模型名判）。
+
+    名单管的是"这台机器上这个模型永远别思考"，这条管的是"这一发别思考"——同一个
+    deepseek-flash，默认那发不带参数、重问那发带 ``reasoning_effort="none"``。
+    """
+    settings.no_think_models = ""
+    provider, bodies, _ = provider_for(settings, [completion_body("好")])
+    run_complete(provider, request_for(settings, role="main", thinking_disabled=True))
+
+    assert bodies[0]["model"] == "deepseek-flash"
+    assert bodies[0]["reasoning_effort"] == "none"
 
 
 def test_no_think_patterns_tolerate_blanks_and_a_trailing_wildcard(settings):
@@ -430,3 +447,102 @@ def test_loop_stops_a_half_written_stream_without_touching_history(
     # 增量只进内存：半截回复绝不落 chat_log / 历史（§5.4 落盘一致性）
     assert session.history == []
     assert conn.execute("SELECT COUNT(*) FROM chat_log").fetchone()[0] == 0
+
+
+# ------------------------------------------------------------------ 本轮附图
+def test_an_attached_image_goes_out_as_multimodal_content_parts(settings):
+    """本轮附图 → ``content`` 不再是字符串，而是「文本 + 一张 data URI 的图」。
+
+    判据是**文件内容**（文件头）而不是扩展名：``截图.bin`` 里是真 PNG，就发得出去；
+    ``image.png`` 里其实是文本，就和"压根没这张文件"一样被跳过——硬塞进 content
+    parts 只会让模型收到坏数据（那个文件交给 ``read_file`` 读才是对的）。
+    """
+    uploads = settings.data_dir / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    (uploads / "截图.bin").write_bytes(PNG_1X1)
+    (uploads / "image.png").write_text("其实是文本", encoding="utf-8")
+
+    provider, bodies, _ = provider_for(settings, [completion_body("看到了")])
+    request = ProviderRequest(
+        role="main",
+        system=list(SYSTEM),
+        messages=[
+            user_message(
+                "看看这张", ["uploads/截图.bin", "uploads/image.png", "uploads/没这张.png"]
+            )
+        ],
+        turn_id=TURN_ID,
+        session_id="cli:test",
+        timeout=1.0,
+    )
+    run_complete(provider, request)
+
+    parts = bodies[0]["messages"][1]["content"]
+    assert parts[0] == {"type": "text", "text": "看看这张"}
+    images = [part for part in parts if part["type"] == "image_url"]
+    assert len(images) == 1  # 认出来的只有那一张真的
+    assert images[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    # data URI 里就是文件的原始字节（模型拿到的确实是那张图）
+    assert images[0]["image_url"]["url"].split(",", 1)[1] == b64(PNG_1X1).decode()
+
+
+def test_one_bad_image_does_not_break_the_rest_of_the_turn(settings):
+    """带过文本的 user 消息、以及一张都不认得的消息，都退化成原来的字符串形态。"""
+    provider, bodies, _ = provider_for(settings, [completion_body("好")])
+    request = ProviderRequest(
+        role="main",
+        system=list(SYSTEM),
+        messages=[user_message("看看这张", ["uploads/没这张.png"])],
+        turn_id=TURN_ID,
+        session_id="cli:test",
+        timeout=1.0,
+    )
+    run_complete(provider, request)
+    # 文本里那行"（附图：…）"仍在，模型照样知道有这张图、在哪儿
+    assert bodies[0]["messages"][1] == {"role": "user", "content": "看看这张"}
+
+
+def test_an_image_outside_the_data_dir_is_never_read(settings):
+    """``../`` 之类的相对路径不许把 ``data/`` 之外的文件读进请求体。"""
+    outside = settings.data_dir.parent / "secret.png"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(PNG_1X1)
+
+    provider, bodies, _ = provider_for(settings, [completion_body("好")])
+    request = ProviderRequest(
+        role="main",
+        system=list(SYSTEM),
+        messages=[user_message("看看", ["../secret.png"])],
+        turn_id=TURN_ID,
+        session_id="cli:test",
+        timeout=1.0,
+    )
+    run_complete(provider, request)
+
+    assert bodies[0]["messages"][1] == {"role": "user", "content": "看看"}
+    assert b"base64" not in json.dumps(bodies[0], ensure_ascii=False).encode()
+
+
+def test_an_oversized_image_is_sent_as_text_only(settings):
+    """超过内联上限的图不塞进请求体：这一轮只发文本 + 那一行"（附图：…）"。
+
+    这是刻意的取舍——base64 之后体积再涨三分之一，一张几十 MB 的图会让这一轮
+    的请求体和上下文一起失控；发送端宁可少一张像素，也不让整轮跑不动。
+    """
+    uploads = settings.data_dir / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    big = uploads / "大图.png"
+    big.write_bytes(PNG_1X1 + b"\0" * MAX_INLINE_IMAGE_BYTES)
+
+    provider, bodies, _ = provider_for(settings, [completion_body("好")])
+    request = ProviderRequest(
+        role="main",
+        system=list(SYSTEM),
+        messages=[user_message("看看这张大图", ["uploads/大图.png"])],
+        turn_id=TURN_ID,
+        session_id="cli:test",
+        timeout=1.0,
+    )
+    run_complete(provider, request)
+
+    assert bodies[0]["messages"][1] == {"role": "user", "content": "看看这张大图"}

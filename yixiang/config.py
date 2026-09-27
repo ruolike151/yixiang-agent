@@ -93,10 +93,13 @@ class Settings:
     judge_api_base: str = ""
     judge_api_key: str = ""
     # 关掉"思考模式"的模型名单（逗号分隔，支持 `qwen3.5-*` 这样的后缀通配）。
-    # 为什么需要它：本地大模型默认先把思考过程写进几十上百个 token 的 ``reasoning``，
-    # 在 OpenAI 兼容端点上**唯一生效**的开关是请求体里的 ``reasoning_effort="none"``
-    # （实测：``chat_template_kwargs={"enable_thinking": false}`` 与 ``think=false``
-    # 都不透传，那条 prompt 用掉 512 个 max_tokens 仍然一个字都没吐出来）。
+    # 为什么需要它：会思考的模型先把思考过程写进 ``reasoning``，**而它和正文共用同一个
+    # ``max_tokens`` 预算**——不关的话上限会被思考吃光、``content`` 为空。在 OpenAI
+    # 兼容端点上**唯一生效**的开关是请求体里的 ``reasoning_effort="none"``（实测：
+    # ``chat_template_kwargs={"enable_thinking": false}`` 与 ``think=false`` 都不透传；
+    # ``thinking={"type":"disabled"}`` 只是不返回 reasoning_content，token 照烧）。
+    # 本机建议把云端那家也写进去：``deepseek-*``（deepseek-flash 实测会把 8192 个
+    # token 全花在思考上，正文一个字没吐）。
     # 留空 = 谁都不关（老行为）。
     no_think_models: str = ""
 
@@ -145,6 +148,13 @@ class Settings:
     loop_max_iter: int = 8
     tool_retry_max: int = 2
     llm_timeout: float = 60.0
+    # 单次回复的输出上限（token）。2048 那个默认值实测撑不住正常需求：一句"鉴赏一下
+    # 这张封面"就能把 2048 写满。改成 8192 之后**还是**被截断，才挖到真正的病根：
+    # 会思考的模型把 ``reasoning`` 也算进这同一个预算（2026-09-27 直连探针：10000
+    # token 全花在思考上，正文一个字没吐）。所以它是"正文 + 思考"的**总额**，不是
+    # 文档里那个"最大输出长度"；真正写多长由模型自己决定，它不会为了凑满而硬写。
+    # loop 侧另有一道保险：撞线先自动关掉思考重问一次（§5.1 的 length 分支）。
+    max_tokens: int = 8192
     gate_timeout: float = 8.0
     # 嵌入后端最长等多久：fastembed 首载要下模型、jieba 首载要建词典，
     # 卡住时的表现是"整轮对话不动"，必须有个上限（超时即降级纯 FTS，D-24）
@@ -209,6 +219,9 @@ class Settings:
             )
         if not 1 <= self.loop_max_iter <= 20:
             errors.append("YIXIANG_LOOP_MAX_ITER 应在 1~20")
+        # 下限 256：再小连一句完整的话都放不下，撞线必然发生，等于把配置写成了故障。
+        if not 256 <= self.max_tokens <= 65536:
+            errors.append("YIXIANG_MAX_TOKENS 应在 256~65536")
         if not 1 <= self.embed_timeout <= 120:
             errors.append("YIXIANG_EMBED_TIMEOUT 应在 1~120")
         if self.main_model in NO_TOOL_MODELS:

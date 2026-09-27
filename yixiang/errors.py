@@ -22,7 +22,7 @@ E_EMBED_UNAVAILABLE = "E_EMBED_UNAVAILABLE"
 USER_MESSAGES: dict[str, str] = {
     E_LLM_TIMEOUT: "我这边超时了，请再说一次",
     E_LLM_AUTH: "我的模型配置有问题，需要你检查 .env",
-    E_LLM_TRUNCATED: "回答被截断了，我分两段说",
+    E_LLM_TRUNCATED: "（回答比较长，我分两段说；回一句「继续」我接着说下面的）",
     E_LLM_BAD_REQUEST: "我这边调用模型出错了（参数问题），请再试一次",
     E_TOOL_FAILED: "这个操作失败了：{detail}",
     E_MEMORY_WRITE: "抱歉，这条我没记住（{detail}）",

@@ -49,7 +49,12 @@ class CliObserver:
                 self.printed = True
             case "text_revoke":
                 self.revoked = True
-                self.out.write("\n（这轮要查资料，撤回上面的草稿）\n")
+                note = (
+                    "（到输出上限了，关掉思考重说一遍）"
+                    if event.data.get("reason") == "truncated"
+                    else "（这轮要查资料，撤回上面的草稿）"
+                )
+                self.out.write(f"\n{note}\n")
                 self.out.flush()
             case "notice":
                 self.out.write(f"  · {event.data.get('text', '')}\n")

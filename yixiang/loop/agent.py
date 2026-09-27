@@ -13,12 +13,14 @@ from __future__ import annotations
 import json
 import re
 import time
+from typing import Any
 
 from yixiang.errors import E_LLM_TRUNCATED, E_TOOL_FAILED, ProviderError, user_message
 from yixiang.loop.guard import Guard
 from yixiang.providers import ChatModel
 from yixiang.runtime.models import (
     LoopEvent,
+    Message,
     ModelReply,
     NullObserver,
     Observer,
@@ -56,6 +58,9 @@ async def run_loop(
     guard = Guard(max_iter=limit, tool_retry_max=settings.tool_retry_max)
     messages = session.assemble()
     schemas = registry.schemas() if tools else None
+    # 名单里已经关掉思考的模型（``YIXIANG_NO_THINK_MODELS``）：它们撞线就是真的写太长，
+    # 再"关一次思考"重问没有意义（参数一个字节都不会变），只会白花一次调用。
+    thinking_already_off = settings.thinking_disabled_for(settings.model_for("main"))
 
     events: list[ToolEvent] = []
     usage = Usage()
@@ -64,20 +69,11 @@ async def run_loop(
     reply, model, finish_reason = "", "", "stop"
     error: str | None = None
     detail: str | None = None
+    retried_without_thinking = False
 
     for iteration in range(1, limit + 1):
         observe(LoopEvent("iteration", {"iteration": iteration}))
-        request = ProviderRequest(
-            role="main",
-            system=session.system_blocks(),
-            messages=messages,
-            tools=schemas,
-            temperature=0.0,
-            timeout=settings.llm_timeout,
-            stream=stream,
-            turn_id=session.turn_id,
-            session_id=session.session_id,
-        )
+        request = _main_request(session, messages, schemas, stream=stream)
         try:
             answer = await _ask(provider, request, observe, stream=stream)
         except ProviderError as exc:
@@ -94,8 +90,45 @@ async def run_loop(
             if answer.error:
                 error, detail = answer.error, "流式回复中断，已把已输出内容作为最终回复"
             elif finish_reason == "length":
-                error, finish_reason = E_LLM_TRUNCATED, "length"
-                reply = user_message(E_LLM_TRUNCATED)
+                # 撞上输出上限（``max_tokens``）。**先别急着告诉用户"被截断了"**：
+                # 第一嫌疑是会思考的模型把 ``reasoning`` 也算进同一个预算——2026-09-27
+                # 直连探针实测：同一句 prompt，10000 个 token 全花在思考上、正文一个字
+                # 都没吐出来。所以这里自动关掉思考重问一次，第二轮正常收尾就静默换成
+                # 完整答案（用户只看到草稿被撤回、答案重说了一遍）。
+                #
+                # 重问只做一次（``retried_without_thinking``）+ 名单里已关思考的不做
+                # （``thinking_already_off``）：撞两次还接着重问，就是拿用户的钱硬顶。
+                if not thinking_already_off and not retried_without_thinking:
+                    retried_without_thinking = True
+                    retry = await _ask_without_thinking(
+                        provider,
+                        _main_request(session, messages, schemas, stream=stream, no_think=True),
+                        observe,
+                        stream=stream,
+                        printed=len(reply) if stream else 0,
+                    )
+                else:
+                    retry = None
+                if retry is not None:
+                    llm_ms += retry.latency_ms
+                    usage = usage.merge(retry.usage)
+                    model = retry.model or model
+                    if retry.text.strip() and not retry.error and not retry.wants_tools:
+                        # 重说的那一版更长更完整，就发它（第一版已经撤回了）
+                        reply, finish_reason = retry.text, retry.finish_reason or "stop"
+                        if finish_reason != "length":
+                            break
+                # 关思考之后仍然撞线：**已经写出来的部分照发**，把"被截断了"接在末尾。
+                # 两条理由：① 流式早就把这半篇推给用户了，收尾时凭空收回等于"我看见了
+                # 又没了"——2026-09-27 实测到的现象；② 与下面工具失败那条分支同一个口径：
+                # 原因拼在答案后面，而不是用一句文案顶掉整条答案。
+                error = E_LLM_TRUNCATED
+                notice = user_message(E_LLM_TRUNCATED)
+                reply = f"{reply.strip()}\n\n{notice}" if reply.strip() else notice
+                detail = (
+                    f"输出达到上限（max_tokens={request.max_tokens}）"
+                    + ("，已关掉思考重问一次" if retried_without_thinking and retry else "")
+                )
             break
 
         messages.append(assistant_message(answer.text, answer.tool_calls))
@@ -176,6 +209,53 @@ async def _ask(
     if stream:
         return await provider.complete_stream(request, observe)
     return await provider.complete(request)
+
+
+def _main_request(
+    session: SessionManager,
+    messages: list[Message],
+    schemas: list[dict[str, Any]] | None,
+    *,
+    stream: bool,
+    no_think: bool = False,
+) -> ProviderRequest:
+    """主对话的请求（上限、超时、记账字段都在这里对齐 §3 / §4.1）。"""
+    settings = session.settings
+    return ProviderRequest(
+        role="main",
+        system=session.system_blocks(),
+        messages=messages,
+        tools=schemas,
+        temperature=0.0,
+        timeout=settings.llm_timeout,
+        max_tokens=settings.max_tokens,
+        stream=stream,
+        thinking_disabled=no_think,
+        turn_id=session.turn_id,
+        session_id=session.session_id,
+    )
+
+
+async def _ask_without_thinking(
+    provider: ChatModel,
+    request: ProviderRequest,
+    observe: Observer,
+    *,
+    stream: bool,
+    printed: int,
+) -> ModelReply | None:
+    """撞线后的重问：关掉思考再问一遍同一个问题。
+
+    ``printed`` > 0 说明第一轮那半篇已经流式推给用户了 → 先发 ``text_revoke`` 撤回它，
+    不然用户看到的是两版答案首尾相接。重问本身失败（网络 / 鉴权）返回 ``None``：
+    第一轮那半篇仍然有价值，不能跟着陪葬。
+    """
+    if printed:
+        observe(LoopEvent("text_revoke", {"chars": printed, "reason": "truncated"}))
+    try:
+        return await _ask(provider, request, observe, stream=stream)
+    except ProviderError:
+        return None
 
 
 def _first_failure(events: list[ToolEvent]) -> str:

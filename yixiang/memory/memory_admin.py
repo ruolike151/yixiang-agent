@@ -14,12 +14,15 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from yixiang.memory import core_files, episodic, procedural, semantic, sync
 from yixiang.memory.core_files import (
     CONFIRM_SECTION,
+    MANUAL_SECTION,
+    MEMORY_MAX_LINES,
     SOUL_LEARNED_MARKER,
     SOUL_MAX,
     USER_MAX,
@@ -27,6 +30,10 @@ from yixiang.memory.core_files import (
 )
 
 SEARCH_LIMIT = 8
+
+# edit 只开放三个精确动作；整份 rewrite 刻意不做（§7.4 人机共治）
+EDIT_OPS = ("add", "replace", "remove")
+ID_MATCH_RE = re.compile(r"^\[\s*(\d+)\s*\]$")
 
 
 # ------------------------------------------------------------------ 路径/文本
@@ -86,8 +93,11 @@ def manage_memory(
     query: str = "",
     content: str = "",
     subject: str = "",
+    op: str = "",
+    match: str = "",
+    section: str = "",
 ) -> str:
-    """工具实现：``search`` / ``update`` / ``delete`` / ``restore`` 四个动作。"""
+    """工具实现：``search`` / ``update`` / ``delete`` / ``restore`` / ``edit``。"""
     match (action or "").strip().lower():
         case "search" | "list":
             return _search(kind=kind, query=query)
@@ -97,10 +107,14 @@ def manage_memory(
             return _delete(id)
         case "restore":
             return _restore(id)
+        case "edit":
+            return _edit(op, section=section, content=content, match=match)
         case "":
-            return _error("action 必填：search / update / delete / restore")
+            return _error("action 必填：search / update / delete / restore / edit")
         case other:
-            return _error(f"不支持的 action={other!r}，只接受 search / update / delete / restore")
+            return _error(
+                f"不支持的 action={other!r}，只接受 search / update / delete / restore / edit"
+            )
 
 
 def _search(*, kind: str = "", query: str = "", limit: int = SEARCH_LIMIT) -> str:
@@ -196,6 +210,132 @@ def _restore(fact_id: int | None) -> str:
     store.restore(int(fact_id), vector=semantic._embed_one(str(row["content"])))
     _write_back()
     return _ok({"id": int(fact_id), "action": "restore"})
+
+
+# ---------------------------------------------- edit：用户点名的 memory.md 正文
+def _edit(op: str = "", *, section: str = "", content: str = "", match: str = "") -> str:
+    """用户明确要求时才动 ``memory.md`` 正文：只做 add / replace / remove。
+
+    刻意不做整份 rewrite——整份重排、合并、改写交给人在编辑器里做（§7.4 人机共治），
+    工具只提供三个能被定位、能被校验、能被回滚的精确动作。走的是既有的
+    ``parse_memory_md`` / ``insert_lines`` / ``remove_lines`` + 原子写，
+    写完立刻 ``sync_memory_md`` 让 facts 跟着文件走（带 id 的行被删 = 软删，
+    ``manage_memory(action='restore')`` 还能捞回来）。
+    """
+    op = (op or "").strip().lower()
+    if op not in EDIT_OPS:
+        return _error(
+            f"不支持的 op={op!r}：edit 只接受 add / replace / remove；"
+            "整份 rewrite 请人工编辑 memory.md（工具不做）"
+        )
+    path = core_files.ensure_memory_file(_data_dir(), template_dir=_templates_dir())
+    doc = core_files.parse_memory_md(path.read_text(encoding="utf-8"))
+    if op == "add":
+        return _edit_add(doc, section=section, content=content)
+    hits, error = _match_entries(doc, match)
+    if error:
+        return error
+    if len(hits) > 1:
+        listing = "\n".join(f"  {hit.index + 1}: {hit.render()}" for hit in hits)
+        return _error(
+            f"match={match.strip()!r} 命中 {len(hits)} 行，不能猜着改一行；"
+            f"请给更长的原文片段：\n{listing}"
+        )
+    entry = hits[0]
+    if op == "remove":
+        return _edit_remove(doc, entry)
+    return _edit_replace(doc, entry, content=content)
+
+
+def _edit_add(doc: core_files.MemoryDoc, *, section: str = "", content: str = "") -> str:
+    """往指定段末尾加一行；命中的若是事实段，紧接着同步导入成新 fact 并把 id 写回文件。"""
+    content = (content or "").strip()
+    if not content:
+        return _error("content 不能为空：给出要往记忆文件里加的那一行内容")
+    target = (section or "").strip() or MANUAL_SECTION
+    line = content if content.startswith("- ") else f"- {content}"
+    lines = core_files.insert_lines(list(doc.lines), target, [line])
+    error = _commit_memory_lines(lines)
+    if error:
+        return error
+    sync.sync_memory_md(semantic.context().conn)
+    return _ok({"op": "add", "section": target, "id": _fact_id_for(target, content)})
+
+
+def _edit_replace(doc: core_files.MemoryDoc, entry: core_files.MemoryEntry, *, content: str) -> str:
+    """按定位结果换掉这一行的正文：带 id 的条目 id 不变，库里那条跟着改。"""
+    content = (content or "").strip()
+    if content.startswith("- "):
+        content = content[2:].strip()
+    if not content:
+        return _error("content 不能为空：给出替换后的正文（只换这一行）")
+    lines = list(doc.lines)
+    lines[entry.index] = core_files.format_entry(entry.fact_id, content, entry.pinned)
+    error = _commit_memory_lines(lines)
+    if error:
+        return error
+    sync.sync_memory_md(semantic.context().conn)
+    return _ok({"op": "replace", "id": entry.fact_id, "line": entry.index + 1})
+
+
+def _edit_remove(doc: core_files.MemoryDoc, entry: core_files.MemoryEntry) -> str:
+    """删掉这一行：带 id 的条目在库里变成软删（可 restore），手写行只是文件级删除。"""
+    lines = core_files.remove_lines(list(doc.lines), {entry.index})
+    error = _commit_memory_lines(lines)
+    if error:
+        return error
+    sync.sync_memory_md(semantic.context().conn)
+    return _ok({"op": "remove", "id": entry.fact_id, "line": entry.index + 1})
+
+
+def _match_entries(
+    doc: core_files.MemoryDoc, match: str
+) -> tuple[list[core_files.MemoryEntry], str]:
+    """定位要改的那一行：``[12]`` 按 fact_id 找，其余按正文子串找。
+
+    两个拒绝口径：没命中 → 让模型去 search 核对原文；命中多行 → 报出全部候选，
+    绝不猜一行改掉（猜错的代价是丢掉一条人写的记忆）。
+    """
+    raw = (match or "").strip()
+    if not raw:
+        return [], _error("match 必填：给一段原文片段，或 [id] 形式的条目号")
+    id_match = ID_MATCH_RE.match(raw)
+    if id_match:
+        fact_id = int(id_match.group(1))
+        hits = [entry for entry in doc.entries if entry.fact_id == fact_id]
+        if not hits:
+            return [], _error(
+                f"记忆文件里没有 [{fact_id}] 这一条；"
+                "先用 manage_memory(action=\"search\") 核对 id"
+            )
+        return hits, ""
+    hits = [entry for entry in doc.entries if raw in entry.content]
+    if not hits:
+        return [], _error(
+            f"记忆文件里没有包含 {raw!r} 的行；"
+            "先用 manage_memory(action=\"search\") 看准原文，或改给 [id]"
+        )
+    return hits, ""
+
+
+def _commit_memory_lines(lines: list[str]) -> str:
+    """原子写 + 上限校验：超限整份拒绝、文件一个字节不动；成功返回空串。"""
+    try:
+        core_files.write_core_file(_data_dir(), "memory.md", "\n".join(lines))
+    except LimitExceeded as exc:
+        return _error(f"{exc}；请人工精简 memory.md（上限 {MEMORY_MAX_LINES} 行）")
+    return ""
+
+
+def _fact_id_for(section: str, content: str) -> int | None:
+    """同步后回读文件，把刚导入那条的 id 找回来（手写笔记段永远是 None）。"""
+    if section in core_files.NON_FACT_SECTIONS:
+        return None
+    text = (_data_dir() / "memory.md").read_text(encoding="utf-8")
+    for entry in core_files.parse_memory_md(text).entries:
+        if entry.fact_id is not None and entry.section == section and entry.content == content:
+            return entry.fact_id
+    return None
 
 
 # ------------------------------------------------------------------ update_soul

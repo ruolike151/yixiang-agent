@@ -31,12 +31,22 @@ def manage_memory(
     query: str = "",
     content: str = "",
     subject: str = "",
+    op: str = "",
+    match: str = "",
+    section: str = "",
 ) -> str:
-    """搜索 / 更新 / 删除 / 恢复记忆条目。"""
+    """搜索 / 更新 / 删除 / 恢复记忆条目；``edit`` 在用户点名时改 ``memory.md`` 正文。"""
     if not memory.is_configured():
         return _NOT_CONFIGURED
     return memory_admin.manage_memory(
-        action, id=id, query=query, content=content, subject=subject
+        action,
+        id=id,
+        query=query,
+        content=content,
+        subject=subject,
+        op=op,
+        match=match,
+        section=section,
     )
 
 

@@ -13,13 +13,13 @@ from fake_provider import FakeProvider, text_reply, tool_round
 
 from yixiang import memory
 from yixiang.app import App
-from yixiang.memory import consolidate, core_files, memory_admin, semantic
-from yixiang.runtime.session import detect_intent
+from yixiang.memory import consolidate, core_files, memory_admin, semantic, sync
+from yixiang.runtime.session import SessionManager, detect_intent
 
 
 @pytest.fixture
 def mem(settings, conn, clock):
-    """装配记忆子系统（假嵌入），用例结束清掉全局上下文。"""
+    """装配记忆子系统（假嵌入）+ 落一份 ``memory.md``；用例结束清全局上下文。"""
     memory.configure(
         conn,
         data_dir=settings.data_dir,
@@ -27,6 +27,8 @@ def mem(settings, conn, clock):
         settings=settings,
         embedder=semantic.HashEmbedder(),
     )
+    # App 启动时会做这一步（``_configure_memory``）：data/memory.md 一定存在
+    core_files.ensure_memory_file(settings.data_dir, template_dir=settings.templates_dir)
     yield memory.current()
     memory.reset()
 
@@ -206,3 +208,188 @@ def test_n2_soul_limit_is_narrowed_to_3000(settings, conn, clock, mem):
     assert core_files.SOUL_MAX == 3000
     assert out.startswith("Error") and "3000" in out
     assert soul.read_text(encoding="utf-8") == before
+
+
+# ------------------------------------------- 由用户触发的 memory.md 正文编辑（§7.4 人机共治）
+def _edit(registry, **args) -> str:
+    return registry.execute("manage_memory", {"action": "edit", **args})
+
+
+def _memory_md(settings) -> str:
+    return (settings.data_dir / "memory.md").read_text(encoding="utf-8")
+
+
+def _with_manual(text: str, *lines: str) -> str:
+    """往 ``## 手写笔记`` 段里塞几行——这一段没有 id、不入库，是纯人肉区。"""
+    return text.replace("## 手写笔记", "\n".join(["## 手写笔记", *lines]))
+
+
+def test_edit_add_appends_line_to_manual_section(registry, settings, conn, mem):
+    """手写笔记段没有 id、不落 facts：除了改文件，没有别的路能往里写。"""
+    out = json.loads(
+        _edit(registry, op="add", section="手写笔记", content="体检报告放在抽屉第二层")
+    )
+
+    assert out["ok"] is True and out["op"] == "add"
+    assert "- 体检报告放在抽屉第二层" in _memory_md(settings)
+    assert _facts(conn) == 0
+
+
+def test_edit_add_into_fact_section_imports_new_fact(registry, settings, conn, mem):
+    """往事实段落加行 = 新增一条事实：同步导入后把新 id 回写进文件。"""
+    out = json.loads(_edit(registry, op="add", section="偏好", content="用户喜欢在雨天听爵士"))
+
+    assert out["ok"] is True and out["id"] == 1
+    assert _facts(conn) == 1
+    assert "- [1] 用户喜欢在雨天听爵士" in _memory_md(settings)
+
+
+def test_edit_replace_keeps_id_and_updates_fact(registry, settings, conn, mem):
+    """按原文片段替换：条目换正文但 id 不变，库里那条跟着变（不是插一条新的）。"""
+    created = json.loads(
+        registry.execute("save_memory", {"subject": "偏好", "content": "用户喜欢看 NBA"})
+    )
+
+    out = json.loads(
+        _edit(registry, op="replace", match="用户喜欢看 NBA", content="用户喜欢看 NBA 和 CBA")
+    )
+
+    assert out["ok"] is True and out["id"] == created["id"]
+    assert f"- [{created['id']}] 用户喜欢看 NBA 和 CBA" in _memory_md(settings)
+    row = conn.execute(
+        "SELECT content, deleted FROM facts WHERE id = ?", (created["id"],)
+    ).fetchone()
+    assert row["content"] == "用户喜欢看 NBA 和 CBA"
+    assert row["deleted"] == 0 and _facts(conn) == 1
+
+
+def test_edit_remove_soft_deletes_fact_and_line(registry, settings, conn, mem):
+    """按 id 删行：文件里那行消失，库里那条约等于软删（还能 restore 捞回来）。"""
+    created = json.loads(
+        registry.execute("save_memory", {"subject": "偏好", "content": "用户喜欢看 NBA"})
+    )
+
+    out = json.loads(_edit(registry, op="remove", match=f"[{created['id']}]"))
+
+    assert out["ok"] is True and out["id"] == created["id"]
+    assert "用户喜欢看 NBA" not in _memory_md(settings)
+    deleted = conn.execute(
+        "SELECT deleted FROM facts WHERE id = ?", (created["id"],)
+    ).fetchone()[0]
+    assert deleted == 1
+
+
+def test_edit_remove_deletes_manual_line_without_fact(registry, settings, conn, mem):
+    """用户截图里的场景：手写笔记那几行没有 id，只有文件级编辑删得掉。"""
+    path = settings.data_dir / "memory.md"
+    path.write_text(_with_manual(_memory_md(settings), "- 临时想法"), encoding="utf-8")
+
+    out = json.loads(_edit(registry, op="remove", match="临时想法"))
+
+    assert out["ok"] is True and out["id"] is None
+    assert "临时想法" not in _memory_md(settings)
+    assert _facts(conn) == 0
+
+
+def test_edit_rejects_ambiguous_match(registry, settings, mem):
+    """一句话命中两行：拒绝并把候选报出来，绝不猜一行改掉。"""
+    path = settings.data_dir / "memory.md"
+    path.write_text(
+        _with_manual(_memory_md(settings), "- 悬疑小说看完了", "- 悬疑剧也看完了"),
+        encoding="utf-8",
+    )
+    before = _memory_md(settings)
+
+    out = _edit(registry, op="remove", match="悬疑")
+
+    assert out.startswith("Error")
+    assert "悬疑小说看完了" in out and "悬疑剧也看完了" in out
+    assert _memory_md(settings) == before
+
+
+def test_edit_rejects_missing_match(registry, settings, mem):
+    before = _memory_md(settings)
+
+    out = _edit(registry, op="remove", match="根本不存在的句子")
+
+    assert out.startswith("Error")
+    assert _memory_md(settings) == before
+
+
+def test_edit_rejects_unknown_op(registry, settings, mem):
+    """整份重写（rewrite）这一版刻意不做：op 只开放三个精确动作。"""
+    before = _memory_md(settings)
+
+    out = _edit(registry, op="rewrite", content="整份换掉")
+
+    assert out.startswith("Error") and "rewrite" in out
+    assert _memory_md(settings) == before
+
+
+def test_edit_add_requires_content(registry, settings, mem):
+    before = _memory_md(settings)
+
+    out = _edit(registry, op="add", section="手写笔记")
+
+    assert out.startswith("Error") and "content" in out
+    assert _memory_md(settings) == before
+
+
+def test_edit_rejects_over_limit_without_touching_file(registry, settings, mem):
+    """150 行是硬线：再加一行整份拒绝，文件一个字节都不动（D-15 口径）。"""
+    path = settings.data_dir / "memory.md"
+    path.write_text(
+        "\n".join(
+            [
+                "# Memory",
+                "",
+                core_files.MEMORY_FORMAT_MARKER,
+                "",
+                "## 手写笔记",
+                *["- 填充行" for _ in range(145)],
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = _memory_md(settings)
+    assert core_files.active_line_count(before) == core_files.MEMORY_MAX_LINES
+
+    out = _edit(registry, op="add", section="手写笔记", content="再加一行")
+
+    assert out.startswith("Error") and "150" in out
+    assert _memory_md(settings) == before
+
+
+def test_edit_leaves_file_and_db_in_sync(registry, settings, conn, mem):
+    """编辑后立刻同步：sha256 收敛，下次启动不会再把这次改动重放一遍。"""
+    registry.execute("save_memory", {"subject": "偏好", "content": "用户喜欢看 NBA"})
+
+    _edit(registry, op="replace", match="NBA", content="用户喜欢看 NBA 直播")
+
+    assert "用户喜欢看 NBA 直播" in _memory_md(settings)
+    assert sync.should_sync(conn) is False
+    assert (settings.data_dir / sync.HASH_FILE).is_file()
+
+
+def test_detect_intent_marks_memory_file_edit_by_rules():
+    """纯规则打标：点名要改记忆文件才打，只是提到 memory.md 不算。"""
+    assert detect_intent("把 memory.md 里那条重复的删掉") == "MEMORY_EDIT"
+    assert detect_intent("整理一下记忆文件") == "MEMORY_EDIT"
+    assert detect_intent("记住我喜欢悬疑小说") == "REMEMBER"  # 既有打标不受影响
+    assert detect_intent("我这边 memory.md 还是原来的") == ""
+
+
+def test_memory_edit_contract_is_injected_only_on_user_request(settings, conn, clock, mem):
+    """契约只在用户点名要改时注入，且写明"只在回复里列清单等于没改"。"""
+    asked = SessionManager(settings, store=conn, session_id="cli:test", clock=clock)
+    asked.begin_turn("把 memory.md 里那条重复的删掉")
+
+    contract = asked.turn_contract_block()
+
+    assert 'manage_memory(action="edit"' in contract
+    assert "只在回复里列" in contract
+
+    chatty = SessionManager(settings, store=conn, session_id="cli:test", clock=clock)
+    chatty.begin_turn("我这边 memory.md 还是原来的")
+    assert chatty.turn_contract_block() == ""

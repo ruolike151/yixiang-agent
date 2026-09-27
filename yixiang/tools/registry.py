@@ -462,6 +462,9 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
             description=(
                 "管理长期记忆：search 找（返回带 id 的列表）/ update 改 / delete 删 / restore 恢复。"
                 "update 与 delete 需要先用 search 拿 id，只给 id 不要猜。"
+                "edit 是直接改 memory.md 正文（add 加一行 / replace 换一行 / remove 删一行），"
+                "**只有用户明确要求改、删、整理记忆文件时才用**——不要自己兴起整理，"
+                "也不要用它代替 update（改库里那条要 update，不是 edit）。"
                 "不要用于：查看待办（list_memos）、看今天安排（list_today）。"
             ),
             input_schema={
@@ -469,7 +472,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["search", "update", "delete", "restore"],
+                        "enum": ["search", "update", "delete", "restore", "edit"],
                         "description": "要做的动作",
                     },
                     "id": {
@@ -479,6 +482,19 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                     "query": {"type": "string", "description": "search 的关键词；留空表示最近若干条"},
                     "content": {"type": "string", "description": "update 时给出更新后的完整表述"},
                     "subject": {"type": "string", "description": "update 时可选的新分类"},
+                    "op": {
+                        "type": "string",
+                        "enum": ["add", "replace", "remove"],
+                        "description": "edit 的动作：add 往某段加一行 / replace 换掉一行 / remove 删掉一行",
+                    },
+                    "match": {
+                        "type": "string",
+                        "description": "edit 的定位：一段原文片段，或 [id] 形式的条目号（replace / remove 必填）",
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "edit add 的目标段落，例如 用户 / 偏好 / 待确认 / 手写笔记（缺省 手写笔记）",
+                    },
                 },
                 "required": ["action"],
             },

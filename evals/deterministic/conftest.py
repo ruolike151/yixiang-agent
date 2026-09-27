@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,12 @@ FIXED_NOW = datetime(2026, 9, 19, 10, 0, tzinfo=TZ_CN)
 
 # 一轮的 turn_id 也固定：trace / chat_log 的断言才对得上
 TURN_ID = "t_20260919_100000_test"
+
+# 一张真的 1×1 红色 PNG（69 字节）：图片这条路要走多模态 content parts，
+# 判据必须是"真图片字节"。内联常量，免得测试为了造一张图去依赖 Pillow 或网络。
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 @pytest.fixture(scope="session")

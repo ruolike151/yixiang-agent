@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
@@ -82,9 +82,19 @@ class Message:
     content: str = ""
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
+    # 本轮的附图（``data/`` 下的相对路径）。只有"这一轮刚发的 user 消息"带它——
+    # 历史里永远是 ``None``：一张 8MB 的图每轮重发一遍 base64，成本和上下文都受不了。
+    images: list[str] | None = None
 
-    def to_openai(self) -> dict[str, Any]:
-        """出站格式（OpenAI Chat Completions）。Provider 是唯一的适配点。"""
+    def to_openai(
+        self, *, resolve_image: Callable[[str], dict[str, Any] | None] | None = None
+    ) -> dict[str, Any]:
+        """出站格式（OpenAI Chat Completions）。Provider 是唯一的适配点。
+
+        ``resolve_image`` 把一条附图路径变成 content part（读盘与 base64 都在
+        Provider 那边）：这一层只拼 JSON 结构，不认识文件系统，也没法在测试里
+        偷偷读盘。返回 ``None`` 表示这一张发不出去，跳过即可。
+        """
         payload: dict[str, Any] = {"role": self.role}
         if self.role == "assistant" and self.tool_calls:
             payload["content"] = self.content or None
@@ -102,8 +112,34 @@ class Message:
             return payload
         if self.role == "tool":
             payload["tool_call_id"] = self.tool_call_id
+        parts = self._content_parts(resolve_image)
+        if parts is not None:
+            payload["content"] = parts
+            return payload
         payload["content"] = self.content
         return payload
+
+    def _content_parts(
+        self, resolve_image: Callable[[str], dict[str, Any] | None] | None
+    ) -> list[dict[str, Any]] | None:
+        """带图的那条 user 消息改成 parts 数组；没有图（或一张都发不出去）返回 ``None``。
+
+        一张都发不出去时**退回字符串形态**，而不是发一个只有 text 的 parts 数组：
+        这样"附图没成功"这一轮与"本来就没附图"的请求字节一致，前缀缓存与各家
+        兼容实现都不必为一个失败的分支多担一条路径。
+        """
+        if self.role != "user" or not self.images:
+            return None
+        parts: list[dict[str, Any]] = []
+        if self.content:
+            parts.append({"type": "text", "text": self.content})
+        attached = 0
+        for relative in self.images:
+            part = resolve_image(relative) if resolve_image is not None else None
+            if part is not None:
+                parts.append(part)
+                attached += 1
+        return parts if attached else None
 
 
 def _json_dumps(value: Any) -> str:
@@ -116,8 +152,8 @@ def system_message(text: str) -> Message:
     return Message(role="system", content=text)
 
 
-def user_message(text: str) -> Message:
-    return Message(role="user", content=text)
+def user_message(text: str, images: list[str] | None = None) -> Message:
+    return Message(role="user", content=text, images=images)
 
 
 def assistant_message(text: str = "", tool_calls: list[ToolCall] | None = None) -> Message:
@@ -163,6 +199,11 @@ class ProviderRequest:
     max_tokens: int = 2048
     timeout: float = 60.0
     stream: bool = False
+    # 显式要求这一次调用**关掉思考模式**（``reasoning_effort="none"``），不按模型名判。
+    # 谁需要它：loop 撞上 ``finish_reason=length`` 时的重问（会思考的模型把 reasoning
+    # 也算进同一个 ``max_tokens`` 预算，见 ``yixiang/loop/agent.py`` 的 length 分支）。
+    # 常规请求留 ``False``：要不要关由 ``YIXIANG_NO_THINK_MODELS`` 那份名单决定。
+    thinking_disabled: bool = False
     # 记账与排障用：usage.jsonl 的 turn_id 关联（§4.4）
     turn_id: str = ""
     session_id: str = ""

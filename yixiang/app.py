@@ -177,18 +177,22 @@ class App:
         stream: bool = True,
         tools: bool = True,
         registry: ToolRegistry | None = None,
+        images: list[str] | None = None,
     ) -> TurnResult:
         """一轮对话的完整链路：loop → 落 chat_log → 写 trace。
 
         ``registry`` 显式传入时用它（QQ 这类外部来源会带一份**收窄过**的注册表），
         否则用 App 自己那份。除此之外没有第二条差别——来源不该改动主链路。
+
+        ``images`` 是本轮附图（``data/`` 下的相对路径，Web 控制台上传的那张图）。
+        它随这一轮的 user 消息发出去，不进历史。
         """
         active = session or self.session
         active_registry = registry or self.registry
         if active is None or active_registry is None or self.provider is None:
             raise RuntimeError("App 尚未装配完成（缺 session / registry / provider）")
         turn_id = new_turn_id(self.clock)
-        active.begin_turn(text, turn_id=turn_id)
+        active.begin_turn(text, turn_id=turn_id, images=images)
         # 入口截断后的用户消息才是"这一轮真正说的话"：门控、历史、trace 共用它（T-8）
         user_text = active.pending_user
         started = time.perf_counter()

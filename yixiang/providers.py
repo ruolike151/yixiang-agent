@@ -22,6 +22,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
@@ -34,9 +35,11 @@ from yixiang.errors import (
     ProviderError,
 )
 from yixiang.ops.usage import NullUsageSink, UsageSink
+from yixiang.runtime.media import MAX_INLINE_IMAGE_BYTES, data_uri, sniff_image_file
 from yixiang.runtime.models import (
     Clock,
     LoopEvent,
+    Message,
     ModelReply,
     NullObserver,
     Observer,
@@ -166,7 +169,7 @@ class OpenAICompatibleProvider:
         system_text = req.system_text()
         if system_text:
             messages.append({"role": "system", "content": system_text})
-        messages.extend(message.to_openai() for message in req.messages)
+        messages.extend(self._outbound(message) for message in req.messages)
         payload: dict[str, Any] = {
             "model": self.settings.model_for(req.role),
             "messages": messages,
@@ -178,11 +181,47 @@ class OpenAICompatibleProvider:
             payload["tools"] = req.tools
         if stream:
             payload["stream_options"] = {"include_usage": True}
-        if self.settings.thinking_disabled_for(str(payload["model"])):
-            # 本地小模型的思考模式：OpenAI 兼容端点上只有这一个开关管用（见 config.py 的实测）。
+        if req.thinking_disabled or self.settings.thinking_disabled_for(str(payload["model"])):
+            # 思考模式的关法：OpenAI 兼容端点上只有这一个开关管用（见 config.py 的实测）。
             # 不关的话 max_tokens 会被思考过程吃光，调用者拿到的是空 content。
+            # 两个入口：① 名单 ``YIXIANG_NO_THINK_MODELS`` 按模型名命中；
+            # ② ``req.thinking_disabled`` —— 撞线重问时 loop 按**这一次请求**关掉。
             payload["reasoning_effort"] = "none"
         return payload
+
+    def _outbound(self, message: Message) -> dict[str, Any]:
+        """出站消息：本轮的 user 附图在这里读成 data URI（只有 Provider 碰磁盘）。"""
+        return message.to_openai(resolve_image=self._image_part)
+
+    def _image_part(self, relative: str) -> dict[str, Any] | None:
+        """一张附图 → 多模态 content part；读不到 / 不是图 / 太大都返回 ``None``。
+
+        返回 ``None`` 不是"出错"：消息文本里已经留着"（附图：…）"那一行，模型
+        照样知道有这张图、路径在哪儿，只是这一次没看到像素。
+        """
+        target = self._workspace_file(relative)
+        if target is None:
+            return None
+        mime = sniff_image_file(target)
+        if not mime:
+            return None
+        try:
+            data = target.read_bytes()
+        except OSError:
+            return None
+        if len(data) > MAX_INLINE_IMAGE_BYTES:
+            return None
+        return {"type": "image_url", "image_url": {"url": data_uri(data, mime)}}
+
+    def _workspace_file(self, relative: str) -> Path | None:
+        """把 ``data/`` 内的相对路径收敛成绝对路径；越界 / 不存在一律 ``None``。"""
+        root = self.settings.data_dir
+        try:
+            target = (root / relative).resolve()
+            target.relative_to(root.resolve())
+        except (OSError, ValueError):
+            return None
+        return target if target.is_file() else None
 
     # ---------------------------------------------------------------- 非流式调用
     async def complete(self, req: ProviderRequest) -> ModelReply:

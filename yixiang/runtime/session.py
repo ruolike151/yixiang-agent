@@ -65,6 +65,34 @@ TURN_CONTRACT_REMEMBER = (
     "如果写入失败，必须如实说明失败，禁止声称已记住。"
 )
 
+# 用户点名要动记忆文件本身（而不是"记住某件事"）——这时唯一的落盘出口是 edit
+MEMORY_FILE_WORDS = ("memory.md", "memory.MD", "记忆文件", "记忆.md", "备忘文件", "记忆文档")
+MEMORY_EDIT_WORDS = (
+    "改",
+    "编辑",
+    "删",
+    "去掉",
+    "移除",
+    "加",
+    "补充",
+    "整理",
+    "清理",
+    "重排",
+    "合并",
+    "更新",
+    "写回",
+)
+TURN_CONTRACT_MEMORY_EDIT = (
+    "【本轮硬性要求】用户明确要求改记忆文件本身（data/memory.md）。\n"
+    "只能调 manage_memory(action=\"edit\", ...) 真正落盘，op 只有三个：\n"
+    "  - 加一行：manage_memory(action=\"edit\", op=\"add\", section=\"<用户|偏好|待确认|手写笔记>\", content=\"<正文>\")\n"
+    "  - 换一行：manage_memory(action=\"edit\", op=\"replace\", match=\"<原文片段或 [id]>\", content=\"<新正文>\")\n"
+    "  - 删一行：manage_memory(action=\"edit\", op=\"remove\", match=\"<原文片段或 [id]>\")\n"
+    "只在回复里列一份\"更新后\"的清单等于没改：文件没动，用户下次看到的还是原来那份。\n"
+    "必须真调工具，并按工具返回如实汇报（多行命中/没命中时它会给候选，照着改小 match 再试）。\n"
+    "只有用户明确要求时才用 edit；不要自己兴起整理记忆。"
+)
+
 # §7.9 阶段 3：后验校验没过时追加的系统提醒（纠错重试 1 次）
 MEMORY_RETRY_NOTICE = (
     "【提醒】上一轮你没有把用户要求记住的信息写进长期记忆。"
@@ -73,17 +101,35 @@ MEMORY_RETRY_NOTICE = (
 
 
 def detect_intent(message: str) -> str:
-    """打标：显式的"记住"指令 → ``"REMEMBER"``，其余返回 ``""``（§7.9.1）。
+    """打标：显式的"记住"指令 → ``"REMEMBER"``，点名改记忆文件 → ``"MEMORY_EDIT"``。
 
     含时间意图的待办（"记一下周五交材料"）归 memo 路径，不打标——这是
     "记住我喜欢悬疑"与"记一下周五交材料"的分界线，靠规则而不是模型判断。
+    "改记忆文件"与"记住某件事"同理：前者要动 ``memory.md`` 正文（edit），
+    后者是往库里加一条事实（save_memory），两条路不能混。
     """
     text = (message or "").strip()
-    if not any(text.startswith(prefix) for prefix in REMEMBER_PREFIXES):
-        return ""
-    if any(word in text for word in MEMO_WORDS):
-        return ""
-    return "REMEMBER"
+    if any(text.startswith(prefix) for prefix in REMEMBER_PREFIXES):
+        if any(word in text for word in MEMO_WORDS):
+            return ""
+        return "REMEMBER"
+    # 只是提到 memory.md（"我这边 memory.md 还是原来的"）不算要求，必须带动作词
+    if any(word in text for word in MEMORY_FILE_WORDS) and any(
+        word in text for word in MEMORY_EDIT_WORDS
+    ):
+        return "MEMORY_EDIT"
+    return ""
+
+
+def _with_image_note(text: str, images: list[str]) -> str:
+    """把"（附图：…）"接到用户消息末尾。
+
+    图片本身随消息发一次（多模态），历史里只留这一行：刷新页面、切会话、下一轮
+    再问"刚才那张图"时，人和模型都还看得见那一轮带了哪张图、在哪儿；而 base64
+    不会被每轮重发一遍（前缀缓存与上下文预算都不答应）。
+    """
+    note = "（附图：" + "、".join(images) + "）"
+    return f"{text.rstrip()}\n{note}" if (text or "").strip() else note
 
 
 def read_core_file(settings: Settings, name: str) -> str:
@@ -127,6 +173,7 @@ class SessionManager:
         self.budget_chars = budget_chars
         self.turn_id = ""
         self.pending_user = ""
+        self.pending_images: list[str] | None = None
         self.turn_intent = ""
         self.extra_contract = ""
         self.truncated_chars = 0
@@ -146,6 +193,7 @@ class SessionManager:
         if source:
             self.source = source
         self.pending_user = ""
+        self.pending_images = None
         self.history = []
         self.load_history()
 
@@ -362,17 +410,26 @@ class SessionManager:
             self.history.append(user_message(row["user_text"]))
             self.history.append(assistant_message(row["reply_text"]))
 
-    def begin_turn(self, user_text: str, *, turn_id: str = "") -> str:
+    def begin_turn(
+        self, user_text: str, *, turn_id: str = "", images: list[str] | None = None
+    ) -> str:
         """起一轮：**入口截断**超长输入，打标意图，清掉上一轮的检索状态。
 
         截断发生在这里而不是 ``add_exchange`` / ``assemble``：用户消息在
         prompt、``chat_log``、trace 三处必须是同一个字符串，否则"检索用了什么"
         与"记下来的是什么"会对不上（T-8 的断言就打在这一点上）。
+
+        ``images`` 是本轮附图（``data/`` 下的相对路径）。图片随消息发出去，
+        文本里只留一行"（附图：…）"——所以它会同时进 prompt、chat_log 与 trace。
         """
         text = user_text or ""
         self.truncated_chars = max(len(text) - USER_INPUT_LIMIT, 0)
         if self.truncated_chars:
             text = text[:USER_INPUT_LIMIT] + USER_TRUNCATED_NOTICE
+        self.pending_images = [str(item) for item in images] if images else None
+        if self.pending_images:
+            # 附图这一行接在截断**之后**：它是"这一轮带了什么"的凭据，不能先被砍掉
+            text = _with_image_note(text, self.pending_images)
         self.pending_user = text
         if turn_id:
             self.turn_id = turn_id
@@ -482,6 +539,8 @@ class SessionManager:
         parts: list[str] = []
         if self.turn_intent == "REMEMBER":
             parts.append(TURN_CONTRACT_REMEMBER)
+        if self.turn_intent == "MEMORY_EDIT":
+            parts.append(TURN_CONTRACT_MEMORY_EDIT)
         if self.extra_contract:
             parts.append(self.extra_contract)
         return "\n".join(parts)
@@ -508,7 +567,7 @@ class SessionManager:
         while len(history) > 2 and sum(len(m.content or "") for m in history) > budget:
             history = history[2:]  # 丢最旧的一轮
         self._last_working_memory = self._snapshot(blocks, history)
-        return history + [user_message(self.pending_user)]
+        return history + [user_message(self.pending_user, self.pending_images)]
 
     def working_memory(self) -> dict[str, object]:
         """§6.3 的 trace 快照（只有分段长度，没有全文）。"""

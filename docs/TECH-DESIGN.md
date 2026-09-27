@@ -130,7 +130,7 @@ yixiang/                     # 包名 = CLI 命令 = 日志前缀 = env 前缀
     gate.py            # 检索门控（含 fail-open）
     consolidate.py     # 每 N 轮蒸馏 + watermark
     sync.py            # memory.md ⟷ facts 双向同步（本文 §7.4）
-    memory_admin.py    # manage_memory 工具的实现（search/update/delete/restore）
+    memory_admin.py    # manage_memory 工具的实现（search/update/delete/restore/edit）
   rag/
     ingest/            # Bangumi/TMDb → media 表 + 嵌入，幂等（models / normalize / store / fetch）
     retrieve/          # 混合检索：FTS5 + vec → RRF → 过滤 → 口味加权（models / context / text / vector / search / rerank）
@@ -270,6 +270,8 @@ data/                  # 运行时生成、gitignore：state.db、soul.md、user
 | `YIXIANG_LOOP_MAX_ITER` | `8` | | loop 迭代上限 |
 | `YIXIANG_TOOL_RETRY_MAX` | `2` | | 同一工具连续失败上限 |
 | `YIXIANG_LLM_TIMEOUT` | `60` | | 单次 LLM 调用超时（秒） |
+| `YIXIANG_MAX_TOKENS` | `8192` | | 单次调用的**总**输出预算（token，256~65536）：正文与思考**共用**它；撞线先自动关思考重问一次，仍撞线才保留已写出的部分并在末尾如实告知 |
+| `YIXIANG_NO_THINK_MODELS` | 空 | | 关掉思考模式的模型名单（逗号分隔，支持 `前缀*`），命中则请求带 `reasoning_effort="none"`。留空 = 谁都不关 |
 | `YIXIANG_GATE_TIMEOUT` | `8` | | 门控超时（秒），超时即 fail-open |
 | `YIXIANG_BUDGET_CNY_PER_DAY` | `0.5` | | 成本软上限，超限在 usage 报告里告警 |
 | `YIXIANG_LOG_LEVEL` | `INFO` | | |
@@ -291,6 +293,8 @@ def validate(self) -> list[str]:
         errors.append("YIXIANG_QQ_ENABLED=1 但 YIXIANG_QQ_ALLOWED 为空：出于安全考虑拒绝启动 QQ 网关")
     if not 1 <= self.loop_max_iter <= 20:
         errors.append("YIXIANG_LOOP_MAX_ITER 应在 1~20")
+    if not 256 <= self.max_tokens <= 65536:
+        errors.append("YIXIANG_MAX_TOKENS 应在 256~65536")
     return errors
 ```
 
@@ -332,14 +336,25 @@ class LLMResponse:
 class ChatModel(Protocol):
     def complete(self, *, role: str, system: list[Block], messages: list[Message],
                  tools: list[dict] | None = None, temperature: float = 0.0,
-                 max_tokens: int = 2048, timeout: float = 60) -> LLMResponse: ...
+                 max_tokens: int = 8192, timeout: float = 60) -> LLMResponse: ...
 ```
 
 要点：
 
 - `role` 决定用哪个模型（`main` / `gate` / `judge` / `utility`），调用方只说"我要用主模型"，路由在 Provider 内部完成。
 - `system` 是**分段列表**而不是一整块字符串，为的是将来做前缀缓存与差异化裁剪（§6.1）。
-- `finish_reason == "length"` 必须显式处理：回答被截断时要如实告知用户，而不是把半句话发出去。
+- `finish_reason == "length"` 必须显式处理，分两步：
+  1. **先自动关掉思考重问一次**（同一句 prompt，请求带 `reasoning_effort="none"`，发 `text_revoke`
+     撤回第一轮的草稿）。这一条来自实测病根：`max_tokens` 是**正文 + 思考**的总预算，
+     会思考的模型能把整个上限烧在 `reasoning` 上、`content` 一个字不吐（2026-09-27 直连探针：
+     `completion_tokens=10000`，`reasoning_tokens=10000`，`content_len=0`）。关掉思考后同一句
+     prompt 只用 1395 token 就自然收尾——所以"截断"多数时候不是正文太长，是思考吃掉了预算。
+     只重问一次，且名单里已经关思考的模型不重问（参数一个字节都不会变，纯粹白花钱）。
+  2. 仍撞线 → **留住答案 + 追加告知**：上限由 `YIXIANG_MAX_TOKENS` 决定（默认 8192），
+     已经写出来的那部分照发，末尾接一句"回答比较长，我分两段说；回一句「继续」我接着说下面的"，
+     `error` 记 `E_LLM_TRUNCATED`、`error_detail` 记下撞的是哪条线、有没有重问过。
+     旧口径"不许把半句话发出去"是错的：流式早就把那半篇推给用户了，收尾时凭空收回等于"看见了又没了"，
+     而且丢掉的是**已经付过费**的输出（2026-09-27 实测）。
 
 ### 4.2 角色路由表
 
@@ -445,7 +460,13 @@ def run_loop(ctx: TurnContext) -> TurnResult:
 
         if not resp.tool_calls:
             if resp.finish_reason == "length":
-                return TurnResult(reply=TRUNCATED_NOTICE, ...)   # 如实告知
+                # ① 先关掉思考重问一次（max_tokens 是正文 + 思考的总预算）
+                #    重问前发 text_revoke 撤回已流出去的那半篇
+                retry = complete(..., thinking_disabled=True)
+                if retry.finish_reason != "length":
+                    return TurnResult(reply=retry.text, error=None, ...)
+                # ② 仍撞线：留住已写出的部分，末尾告知（不是用一句文案顶掉整条答案）
+                return TurnResult(reply=f"{retry.text}\n\n{TRUNCATED_NOTICE}", ...)
             return TurnResult(reply=resp.text, tool_calls=trace_calls, iterations=iteration)
 
         messages.append(assistant_message(resp))
@@ -1150,7 +1171,7 @@ class Tool:
 | `list_today` | P0 | — | 今日任务 + 到期备忘 | 只读 |
 | `complete_task` | P0 | `item_id, status(done/skipped)` | `{"ok": true}` | ✅ |
 | `save_memory` | P0 | `subject, content` | `{"id": 21, "action": "insert"}` | — |
-| `manage_memory` | P0 | `action(search/update/delete/restore), id?, query?, content?` | search 返回带 id 的编号列表 | 部分 |
+| `manage_memory` | P0 | `action(search/update/delete/restore/edit), id?, query?, content?, op?, match?, section?` | search 返回带 id 的编号列表；`edit` 只由用户明确要求触发（`add` / `replace` / `remove`，唯一命中才动手） | 部分 |
 | `update_soul` | P0 | `rule` | `{"ok": true}` | 只追加 |
 | `update_user` | P0 | `section, content` | `{"ok": true}` | — |
 | `create_skill` | P0 | `slug, name, description, triggers, body, confirm` | `{"ok": true, "path": ...}` | 不覆盖 |
@@ -1292,7 +1313,7 @@ yixiang > 我给你排好了，每天 2 小时：...
 
 ### 10.2 QQ（NapCat + OneBot v11 反向 WebSocket；默认关闭）
 > **[决策]** 设计期原本把 QQ 延后到 P2：P0/P1 的交付物里**没有 QQ**（本地 CLI + 调度 + 本地投递已覆盖全部核心叙事）。本文档的这条决策后来**已落地**——`gateway/qq.py`（Task 11）现在是真实入口，默认关闭（`YIXIANG_QQ_ENABLED` + 非空 `YIXIANG_QQ_ALLOWED`，或 `yixiang serve --qq`），
-> 本节设计保持有效且**不参与任何验收门禁**。可验证的四处在位：`config.py` 的 `YIXIANG_QQ_*` 配置位（含 `qq_enabled` 与空白名单的启动拒绝）、`doctor` 的 QQ 白名单自检、`scheduler/brief_job.py` 的补发算法（§10.3.1，纯函数），以及 `evals/deterministic/test_qq.py` 的 13 条用例（D-13 已转实跑）。
+> 本节设计保持有效且**不参与任何验收门禁**。可验证的四处在位：`config.py` 的 `YIXIANG_QQ_*` 配置位（含 `qq_enabled` 与空白名单的启动拒绝）、`doctor` 的 QQ 白名单自检、`scheduler/brief_job.py` 的补发算法（§10.3.1，纯函数），以及 `evals/deterministic/test_qq.py` 的 22 条用例（D-13 已转实跑；含收图那 9 条）。
 
 #### 10.2.1 接入方式
 
@@ -1542,7 +1563,7 @@ GitHub Actions（`.github/workflows/ci.yml`）步骤：
 |---|---|---|
 | `E_LLM_TIMEOUT` | 模型超时且重试失败 | "我这边超时了，请再说一次" |
 | `E_LLM_AUTH` | 密钥/额度问题 | "我的模型配置有问题，需要你检查 .env" |
-| `E_LLM_TRUNCATED` | `finish_reason=length` | "回答被截断了，我分两段说" |
+| `E_LLM_TRUNCATED` | `finish_reason=length` 且关思考重问一次后**仍**撞线（撞 `YIXIANG_MAX_TOKENS`） | 半篇答案照发 + "（回答比较长，我分两段说；回一句「继续」我接着说下面的）"；重问成功则不出这个码 |
 | `E_TOOL_FAILED` | 工具连续失败超限 | "这个操作失败了：<原因>" |
 | `E_MEMORY_WRITE` | "记住"指令未成功写入 | "抱歉，这条我没记住（原因）" |
 | `E_GATE_FAIL_OPEN` | 门控失败但已降级检索 | 无感（仅 trace） |
@@ -1754,7 +1775,7 @@ evals/
     test_loop_guard.py        # 迭代上限、重复调用、工具失败计数
     test_loop_context.py      # 历史窗口裁剪、system 段拼装顺序
     test_retrieval.py         # 离线检索（fixtures 语料，不调网络）
-    test_qq.py                # 白名单、幂等、CQ 码解析、分片、断线重连（D-13 已转实跑）
+    test_qq.py                # 白名单、幂等、CQ 码解析、分片、断线重连、收图（D-13 已转实跑）
     test_scheduler.py         # 补发、去重、异常隔离
     test_security.py          # 路径逃逸、注入包裹、超长输入
   judge/                      # 主观评分（需要真实模型）
@@ -1774,7 +1795,7 @@ evals/
 
 > 上面是**设计时的全集**，实际目录以仓库里的 `evals/` 为准——收口期后补的
 > `test_web.py`（15 条）、`test_event_loop.py`（8 条）、`test_cli_gateway.py`、`test_doctor.py` 等不在本清单里，
-> 不复述以免第二处真相。当前口径：`337 passed, 1 deselected`（见 `NUMBERS.md`）。
+> 不复述以免第二处真相。当前口径：`382 passed, 1 deselected`（见 `NUMBERS.md`）。
 
 四层，依赖与门禁各不相同：
 

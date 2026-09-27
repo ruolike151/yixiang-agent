@@ -13,7 +13,7 @@
 
 ```text
 ruff check .                                  → All checks passed
-pytest evals/deterministic -m "not live" -rs  → 337 passed, 1 deselected in 9.15s
+pytest evals/deterministic -m "not live" -rs  → 382 passed, 1 deselected in 9.01s
 yixiang skills validate                       → 通过
 python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"全过，可以合并"
 ```
@@ -21,10 +21,69 @@ python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"
 那 1 条 `deselected` 是标了 `-m live` 的真模型用例（`evals/live/`），nightly / 发版前才跑。**已无 `skip`**：
 D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地转成实跑，见 §2.1。
 
+**刚做完的一件事**（2026-09-27，`memory.md` 只能看不能改）：用户说"我这边 memory.md 还是原来的"——
+agent 手里确实**没有写这个文件的出口**。`data/memory.md` 每轮整份注入 S4，是人机共治的核心文件，但唯一
+改动路径是"先写 facts、再靠 `sync.write_memory_doc()` 回写"，所以**手写笔记段**（无 id、不入库）与整段
+重排 / 合并完全使不上劲——agent 只能在回复里列一张"改好了"的清单，文件一个字没动。现在给现有
+`manage_memory` 加 `action="edit"`（**不新增工具**，仍是那 19 个；`test_web.py` 钉着 `tools == 19`），只有三个
+精确操作 `add` / `replace` / `remove`，**刻意不做整份 rewrite**（`op="rewrite"` 直接报错）。全走现成机制：
+`core_files.parse_memory_md` + `insert_lines` / `remove_lines` + `write_core_file`（原子写 + 150 行上限，
+超限整份拒绝、文件不动）→ 紧接着 `sync.sync_memory_md(conn)`（文件为准）。带 id 的行删掉是**软删**，
+`manage_memory(restore)` 能捞回来；定位用 `match`：形如 `[123]` 按 fact_id，否则在正文做子串匹配
+（手写行也能命中），**唯一命中才动手**，多命中报出全部候选、零命中报错。"由用户触发"落在纪律上：
+工具描述 + S8 契约写死"只有用户明确要求才用 edit，只在回复里列清单等于没改"，`detect_intent` 新增
+`MEMORY_EDIT` 打标（须同时含文件词 + 动作词，且 REMEMBER 优先、只是提到 memory.md 不算）。新增 13 条
+用例（`test_memory_write.py` 9 → 22）。
+
+**刚做完的一件事**（Web 上传三处升级）：① 图片走**多模态**——`Message.images` 存相对路径，只在
+provider 组 payload 时读成 `data:` URI 的 content part，模型真的看得到像素；文本里只留一行
+"（附图：uploads/….png）"进历史（像素只发一次，前缀缓存与上下文预算都不答应重发）。② 单个上限
+2MB → **30MB**（`MAX_UPLOAD_BYTES`，文案统一从 `MAX_UPLOAD_LABEL` 出）。③ 工作区托盘改成**服务端
+列表**（`GET /api/uploads` + `DELETE /api/uploads/<name>` + `POST /api/uploads/clear`）——上一版的
+列表只活在浏览器内存里，刷新即空、磁盘上的文件却还在，界面上连一行都没有，所以"传了删不掉、
+工作区越堆越满"。
+
 **刚修的一件事**（`4b2883d`）：CLI 与 Web 连续对话时第二句报 `Event loop is closed`。根因是入口每轮
 `asyncio.run()` 新建并关掉 loop，而 provider 缓存的 `httpx.AsyncClient` 连接池绑在创建它的那条 loop 上。
 现在三个入口共用 `runtime/eventloop.py` 的一条常驻 loop。**纪律：不要再退回 `asyncio.run`。**
 （顺带：你自己起的 `yixiang web` 进程要重启才会带上这个修复。）
+
+**刚修的另一件事**（2026-09-27，输出上限）：问一句"鉴赏一下这张封面"就回 `E_LLM_TRUNCATED`。根因是
+`ProviderRequest.max_tokens` 默认 2048 而 loop 从没把它接上配置——**每一轮都被 2048 掐着**（截图里
+`out 2,048 token` 正好是它）。两处一起改：① `YIXIANG_MAX_TOKENS`（默认 **8192**）接进 loop；
+② 撞线时**不再把已经写好的半篇丢掉**——流式期间用户看着它滚出来，收尾却被一句错误文案顶掉，
+这是"看见了又没了"。现在半篇照发，末尾接一句"回一句「继续」我接着说"，`error_detail` 里记下撞的是
+哪条线。TECH-DESIGN §5.1 那句"不许把半句话发出去"就是这个决定的旧口径，已经改掉。
+
+**接着修的一件事**（2026-09-27，"改完 8192 还是被截断"）：**2048 不是病根，思考 token 才是。**
+直连 `POST /chat/completions` 探针（`max_tokens=10000`、prompt 让它一直输出到预算用尽）：
+`completion_tokens=10000` / `completion_tokens_details.reasoning_tokens=10000` / `content_len=0`
+——`max_tokens` 是**正文 + 思考的总预算**，deepseek-flash 把整个上限烧在 `reasoning` 上，正文一个字
+都没吐。关掉思考后同一句 prompt 只花 **1395 token** 就自然收尾（答案本身约 1400~1600 token，
+长度根本不是问题）。三个开关的对照：`reasoning_effort="none"` **生效**（`content_len=2918`，
+`reasoning_len=0`）；`thinking={"type":"disabled"}` 只是不返回 reasoning_content，**token 照烧**
+（假象）；`chat_template_kwargs` / `think=false` 则完全不透传。于是：
+
+1. `.env` 的 `YIXIANG_NO_THINK_MODELS` 从 `qwen3.5-*` 扩成 `qwen3.5-*,deepseek-*`（云端那家也关）；
+2. loop 的 `finish_reason=length` 分支多一道自愈：**自动关掉思考重问一次**（`ProviderRequest.
+   thinking_disabled`，重问前发 `text_revoke` 撤回已流出去的那半篇）。第二轮正常收尾就静默用完整答案，
+   用户连"被截断了"都看不到；只有**两轮都撞线**才落到"半篇 + 附告知"的收尾。只重问一次，且名单里
+   已经关思考的模型不重问（参数一个字节都不会变，纯粹白花钱）。
+3. `E_LLM_TRUNCATED` 文案改成"回答比较长，我分两段说；回一句「继续」我接着说下面的"。
+
+**纪律**：以后看到"截断了"，先把 `usage.completion_tokens_details.reasoning_tokens` 捞出来看——
+思考占大头就是"关思考"，不是"抬上限"。
+
+**刚做完的一件事**（2026-09-27，QQ 发图看不了）：QQ 里发一张图，agent 回"这张图我这边看不到内容"。
+根因不是模型不支持多模态，而是**图根本没到链路里**：`segments_to_text()` 把 `image` 段降级成字面量
+`[图片]`，`handle_event()` 也从没给 `App.handle_message(images=…)` 传过东西（那条形参早就有了，
+Web 上传正是靠它）。三处一起改：① `image` 段不再降级——`data.url` 单独返回，网关去下载；
+② 下载按文件头认类型（`runtime/media.sniff_image_mime`）、落盘走 Web 同一条口径
+（`runtime/uploads.store_upload`，仍 30MB 上限、同名让位），相对路径交主链路内联成 content part；
+③ "先发图、再打字"是 QQ 上的常态，所以只有图的那条**不跑模型**，回一句短回执
+（`IMAGE_ACK`）并把图替下一条文字留着（`PendingImages`，10 张封顶 / 5 分钟作废 / 取走即清）。
+取不到（过期、断网、不是图、超限）一律降级：**不说自己看见了**，把"有 N 张图没取到"如实拼进
+这一轮。新增 9 条用例（`test_qq.py` 13 → 22，多一条钉 CQ 串格式），全部门禁仍绿。
 
 ---
 
@@ -220,7 +279,7 @@ $env:PYTHONIOENCODING="utf-8"          # Windows 上中文输出不乱码（必�
 
 .venv\Scripts\ruff.exe check .                                        # ① All checks passed
 .venv\Scripts\python.exe -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-                                                                       # ② 337 passed, 1 deselected
+                                                                       # ② 382 passed, 1 deselected
 $env:YIXIANG_EMBED_BACKEND="hash"
 .venv\Scripts\python.exe -m yixiang.ops.release_gate                   # ③ 硬门禁 4/4
 .venv\Scripts\python.exe -m yixiang doctor                             # ④ 八项自检

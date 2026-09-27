@@ -193,39 +193,40 @@ top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 
 ```text
 $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-337 passed, 1 deselected in 9.15s
+382 passed, 1 deselected in 9.01s
 ```
 
 | 维度 | 数字 | 说明 |
 |---|---|---|
-| 收集总数 | **338** | 含 1 条 `-m live`（真模型用例） |
-| `-m "not live"` 选中 | **337** | 每次 PR + CI 跑的就是这一档 |
-| 通过 | **337** | 通过率 100%（门禁硬指标） |
+| 收集总数 | **383** | 含 1 条 `-m live`（真模型用例） |
+| `-m "not live"` 选中 | **382** | 每次 PR + CI 跑的就是这一档 |
+| 通过 | **382** | 通过率 100%（门禁硬指标） |
 | 跳过 | **0** | D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地**转成实跑**，不再 `skip` |
 | 排除 | **1** | 标了 `-m live`，nightly / 发版前才跑 |
-| 全量耗时 | **9.15 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
+| 全量耗时 | **9.01 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
 
-逐文件分布（`-m "not live"` 收集数，合计 337，36 个文件）：
+逐文件分布（`-m "not live"` 收集数，合计 382，36 个文件）：
 
 | 文件 | 条数 | 覆盖 |
 |---|---|---|
 | `test_retrieval.py` | 32 | 入库幂等、FTS 分词、RRF、硬过滤、口味加权、降级、注入包裹 |
-| `test_provider.py` | 26 | 流式解析、超时、`finish_reason=length`、坏 JSON、用量记账 |
-| `test_web.py` | 24 | 七栏控制台：配置/人设/记忆读写、multipart 上传、`read_file` 越界、SSE 分帧、链路 trace 面板 |
+| `test_provider.py` | 31 | 流式解析、超时、`finish_reason=length`、关思考开关（名单 / 单次请求）、坏 JSON、用量记账、多模态附图（越界 / 超大 / 单张坏图不拖垮整轮） |
+| `test_web.py` | 35 | 七栏控制台：配置/人设/记忆读写、multipart 上传（30MB）、上传件列表 / 删除 / 清空 / 原图、`read_file` 越界、SSE 分帧、链路 trace 面板 |
 | `test_tools_memo.py` | 17 | 备忘的幂等键 / 到期 / 去重 |
 | `test_bangumi_collections.py` | 16 | Bangumi 收藏 → 口味画像（假 client，不出网） |
 | `test_gate.py` | 16 | 门控规则层、模型层、fail-open、标注集指标 |
 | `test_ingest_fetch.py` | 16 | 抓取的限速 / 退避 / 缓存 / 游标（假 client，不出网） |
 | `test_scheduler.py` | 14 | 四个 job 的幂等、异常隔离、假时钟、补发 |
 | `test_security.py` | 14 | 路径逃逸（D-22）、注入包裹、超长截断、QQ 幂等 |
-| `test_doctor.py` | 13 | 八项自检、离线嵌入后端白名单、8766/8765 端口不撞车 |
-| `test_qq.py` | 13 | QQ 网关：分片、白名单、幂等、重连（D-13） |
+| `test_doctor.py` | 14 | 八项自检、离线嵌入后端白名单、8766/8765 端口不撞车、输出上限默认值与手滑拦截 |
+| `test_qq.py` | 22 | QQ 网关：分片、白名单、幂等、重连、**收图（多模态 / 暂存 / 降级 / CQ 串）**（D-13） |
 | `test_bangumi_tools.py` | 10 | `bangumi_search` / `bangumi_subject` 的契约与降级 |
-| `test_memory_write.py` | 9 | "记住"硬契约、纠错重试、失败可见 |
+| `test_memory_write.py` | 22 | "记住"硬契约、纠错重试、失败可见、`memory.md` 正文编辑（add / replace / remove，唯一命中才动手） |
 | `test_bangumi_proxy.py` | 8 | 仅 Bangumi 出口走代理，别的链路一字节不碰 |
 | `test_docs_consistency.py` | 8 | doc 口径防漂移：项数 / 栏数 / "还不存在"句 / 目录树 |
 | `test_event_loop.py` | 8 | 一条线程一条常驻 loop：两轮同 loop、收尾关闭、keep-alive 复用 |
 | `test_judge_parse.py` | 8 | judge 判词解析容错 |
+| `test_loop_guard.py` | 11 | 迭代上限、防绕圈、工具失败；输出截断的收尾口径（撞线先关思考重问一次 → 仍撞线才半篇 + 告知） |
 | `test_sinks.py` | 8 | 晨报三通道（cli / file / toast）各自可断言，一次真通知都不弹 |
 | `test_memory_sync.py` | 7 | 三方对账、手改生效、漂移检测 |
 | `test_pricing.py` | 7 | 价目表覆盖、退役模型名守门 |
@@ -233,7 +234,6 @@ $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
 | `test_db.py` | 5 | 迁移（D-26） |
 | `test_docs_bangumi.py` | 5 | Bangumi 接入的文档口径（工具数、§9.2 清单） |
 | `test_embed_contract.py` | 5 | 文档里的模型 / 维度与代码常量一致 |
-| `test_loop_guard.py` | 5 | 迭代上限、防绕圈 |
 | `test_memory_capacity.py` | 5 | 三文件上限与淘汰 |
 | `test_sessions.py` | 5 | 会话改名 / 搜索 / 导出 / 删除 |
 | `test_tools_plan.py` | 5 | 计划工具与工具痕迹折叠 |

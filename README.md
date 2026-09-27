@@ -7,7 +7,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![uv](https://img.shields.io/badge/deps-uv-DE5FE9)
 ![no framework](https://img.shields.io/badge/Agent%20Loop-%E8%87%AA%E7%A0%94%EF%BC%8C%E6%97%A0%20LangChain-orange)
-![tests](https://img.shields.io/badge/deterministic%20337%20passed-8~9s-brightgreen)
+![tests](https://img.shields.io/badge/deterministic%20382%20passed-8~10s-brightgreen)
 ![offline](https://img.shields.io/badge/%E7%A6%BB%E7%BA%BF%E5%8F%AF%E9%AA%8C%E8%AF%81-%E6%97%A0%E9%9C%80%20API%20Key-success)
 ![cost](https://img.shields.io/badge/%E5%8D%95%E6%97%A5%E6%88%90%E6%9C%AC-%C2%A50.21%E2%80%93%C2%A50.48-blue)
 
@@ -106,7 +106,7 @@ uv run yixiang web        # 打开 http://127.0.0.1:8765/
 
 | 栏 | 干什么 |
 |---|---|
-| **对话** | 流式逐字出；可中断、可继续 |
+| **对话** | 流式逐字出；可中断、可继续；可带图（截图直接粘贴，模型真的看得到） |
 | **历史对话** | 按会话翻往来，可改名 / 搜索 / 导出 / 删除，点一条即切过去 |
 | **人设与记忆** | `soul.md` / `user.md` / `memory.md` 就地改，超限一个字节都不写 |
 | **模型配置** | 主模型 / api_base / 上限 / 预算，写回 `.env` 并热生效（密钥只回掩码） |
@@ -114,7 +114,7 @@ uv run yixiang web        # 打开 http://127.0.0.1:8765/
 | **QQ 设置** | 白名单校验：开了网关却没白名单直接拒 |
 | **链路 trace** | 本轮迭代 / 工具调用 / tokens / 成本，与 `yixiang ops show-trace <turn_id>` 同源 |
 
-上传的文件落在 `data/uploads/`，模型用 `read_file` 读它。手边没文件可传，用 [`evals/fixtures/web_upload_sample.md`](./evals/fixtures/web_upload_sample.md) 当样张。
+上传的文件落在 `data/uploads/`（**单个上限 30MB**）。托盘里列的是磁盘上**现在**有什么，不是"这次传了什么"：图片给缩略图、随消息以多模态一起发给模型（8MB 以内模型真的看得到像素），普通文件点一下就把 `read_file` 调用填进输入框；每个文件都能单独删，也能一键清空。**QQ 里发来的图走同一条路**（同一个目录、同一条多模态通路）：图随那条消息进模型；只发图、还没打字时先回一句短回执，把图留给下一条文字（10 张封顶、5 分钟有效）。手边没文件可传，用 [`evals/fixtures/web_upload_sample.md`](./evals/fixtures/web_upload_sample.md) 当样张。
 
 ### 三、QQ（默认关闭）
 
@@ -138,7 +138,7 @@ OneBot v11 反向 WebSocket，配 NapCat 之类的一侧。Windows 上有一键�
 
 | 指标 | 值 | 口径 |
 |---|---|---|
-| 离线确定性用例 | **337 passed, 1 deselected**（36 个文件，~9 秒） | `-m "not live"`，离线、零成本、零抖动 |
+| 离线确定性用例 | **382 passed, 1 deselected**（36 个文件，~9 秒） | `-m "not live"`，离线、零成本、零抖动 |
 | 检索 top-3 命中率（CI 口径） | **90.0%（18/20）· MRR 0.792** | 31 部语料 + `hash` 假嵌入 |
 | 检索 top-3 命中率（真语料 + 真嵌入） | **90.0%（18/20）· MRR 0.792** | 333 部语料 + `bge-small-zh-v1.5` |
 | 嵌入不可用降级 | **85.0%（17/20）** | 纯 FTS5，产品仍然可用 |

@@ -107,6 +107,31 @@ TURN_CONTRACT_RESCHEDULE = (
     "库里没有对应条目就如实说没有，不要编。"
 )
 
+# "写一份任务清单 / 排一个计划"这类**排期请求**：必须真落库（``plans`` / ``plan_items``）。
+# 2026-09-28 的事故：用户要一份下周任务清单，模型回了段聊天文字就完事，库里一直是空的——
+# 用户下次问"这周有什么"什么都问不出来。打标 + 契约 + 后验纠错把"排了"变成可断言的行为。
+PLAN_WORDS = ("计划", "清单")
+PLAN_ACTION_WORDS = ("排", "写", "列", "做", "定", "制定", "安排")
+TURN_CONTRACT_PLAN = (
+    "【本轮硬性要求】用户要求排计划 / 写任务清单。\n"
+    "排期必须落到库里，只有这两个出口，必须真调：\n"
+    "  - 先 create_plan(title=\"...\", start_date=\"YYYY-MM-DD\", end_date=\"YYYY-MM-DD\") 拿 plan_id\n"
+    "  - 再逐条 add_task(plan_id=<id>, date=\"YYYY-MM-DD\", content=\"...\") 把每天的任务加进去\n"
+    "date 要落到具体某一天（'下周一'按当前时间换算成 2026-09-21 这样的日期）。\n"
+    "只在回复里列一份\"任务清单\"等于没排：库里是空的，用户下次问\"这周有什么\"什么也拿不到。\n"
+    "排完按工具返回如实汇报排到了哪几天。"
+)
+
+# "这周 / 下周有什么"这类**排期查询**：必须先查库再答（与 list_today 的"不编造"同一条）。
+PLAN_QUERY_WEEK_WORDS = ("这周", "本周", "下周", "这一周", "下一周")
+PLAN_QUERY_WORDS = ("任务", "安排", "计划", "清单", "排")
+TURN_CONTRACT_PLAN_QUERY = (
+    "【本轮硬性要求】用户在问排期（这周 / 下周有什么任务 / 安排）。\n"
+    "必须先查库再回答：用 list_range(start_date=\"本周\") 一次拿整周，或 list_today 看某一天。\n"
+    "只报工具返回的内容，不要补充或推测；库里没有就如实说\"没有安排\"。\n"
+    "禁止凭历史或印象背一份清单——那多半是编的。"
+)
+
 # §7.9 阶段 3：后验校验没过时追加的系统提醒（纠错重试 1 次）
 MEMORY_RETRY_NOTICE = (
     "【提醒】上一轮你没有把用户要求记住的信息写进长期记忆。"
@@ -118,6 +143,18 @@ RESCHEDULE_RETRY_NOTICE = (
     "【提醒】上一轮你说把条目改期了，但并没有真正调用工具——库里那一列还是老日期。"
     "现在必须真的调用 reschedule_task（任务）或 reschedule_memo（备忘）完成改期；"
     "若解析不出具体某一天，就如实问用户是哪一天，不要编。"
+)
+
+# 排期轮的后验校验没过时追加的系统提醒（与"记住 / 改期"同一个纠错范式）
+PLAN_RETRY_NOTICE = (
+    "【提醒】上一轮用户要的是排期，但你没有真正写进数据库（plans / plan_items 还是空的）。"
+    "现在必须真的调用 create_plan 建计划、再用 add_task 把每条任务落到具体某一天，再回复用户。"
+)
+
+PLAN_QUERY_RETRY_NOTICE = (
+    "【提醒】上一轮用户问排期，你没有查数据库，只凭印象回答。"
+    "现在必须先调用 list_range（或 list_today）拿到真实数据，再按工具返回如实回答；"
+    "库里是空的就说\"没有安排\"，不要编。"
 )
 
 
@@ -135,6 +172,17 @@ def detect_intent(message: str) -> str:
     text = (message or "").strip()
     if any(word in text for word in RESCHEDULE_WORDS):
         return "RESCHEDULE"
+    # 排期请求排在"记住"前面："帮我排一个两周的复习计划"既像安排又像备忘，
+    # 但它的落库出口只有 plans / plan_items；PLAN 与 PLAN_QUERY 也按此顺序
+    # （"写一份下周任务清单"两句都命中，它要的是**写**，不是**查**）。
+    if any(word in text for word in PLAN_WORDS) and any(
+        word in text for word in PLAN_ACTION_WORDS
+    ):
+        return "PLAN"
+    if any(word in text for word in PLAN_QUERY_WEEK_WORDS) and any(
+        word in text for word in PLAN_QUERY_WORDS
+    ):
+        return "PLAN_QUERY"
     if any(text.startswith(prefix) for prefix in REMEMBER_PREFIXES):
         if any(word in text for word in MEMO_WORDS):
             return ""
@@ -581,6 +629,10 @@ class SessionManager:
             parts.append(TURN_CONTRACT_MEMORY_EDIT)
         if self.turn_intent == "RESCHEDULE":
             parts.append(TURN_CONTRACT_RESCHEDULE)
+        if self.turn_intent == "PLAN":
+            parts.append(TURN_CONTRACT_PLAN)
+        if self.turn_intent == "PLAN_QUERY":
+            parts.append(TURN_CONTRACT_PLAN_QUERY)
         if self.extra_contract:
             parts.append(self.extra_contract)
         return "\n".join(parts)

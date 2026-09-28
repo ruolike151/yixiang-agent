@@ -25,7 +25,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from yixiang.runtime.models import to_local_iso
 
@@ -163,6 +163,61 @@ def parse_day(value: str | None, now: datetime) -> datetime | None:
     if not _names_a_day(raw, now):
         return None
     return parse_when(raw, now)
+
+
+# ``本周 / 这周 / 下周`` 这类"哪一周"的说法：整句就是这个词（允许尾部一个"的"）才算。
+# 不做子串匹配，是因为"下周五"里的"下周"只是前缀——那是**某一天**，该走 ``parse_day``。
+_WEEK_SPANS = {
+    "本周": 0,
+    "这周": 0,
+    "这一周": 0,
+    "本星期": 0,
+    "这星期": 0,
+    "下周": 1,
+    "下一周": 1,
+    "下星期": 1,
+    "下个星期": 1,
+}
+
+
+def _range_endpoint(value: str | None, now: datetime) -> date | None:
+    """把区间的一头解析成日期；"说不清"就 ``None``（不猜）。"""
+    raw = str(value or "").strip().rstrip("的").strip()
+    if not raw:
+        return None
+    weeks = _WEEK_SPANS.get(raw)
+    if weeks is not None:
+        # 周一为一周之始：2026-09-19（周六）的"本周"是 09-14 ~ 09-20
+        monday = now.date() - timedelta(days=now.weekday())
+        return monday + timedelta(weeks=weeks)
+    parsed = parse_day(raw, now)
+    return parsed.date() if parsed is not None else None
+
+
+def parse_range(
+    start: str | None, end: str | None, now: datetime
+) -> tuple[date, date] | None:
+    """把区间说法解析成 ``(起, 止)`` 两个日期；解析不出来返回 ``None``。
+
+    与 ``parse_when`` / ``parse_day`` 分工一致：这两个是"某一天"，本函数是"哪一段"。
+    ``list_range`` 用它一次答完"这周 / 下周有什么"，所以只认**两头都说得清**的写法：
+
+    * ``start`` 是"本周 / 这周 / 下周"→ 该周 周一~周日；
+    * ``start`` 是具体一天（``2026-09-01`` / ``明天`` / ``周五``），``end`` 缺省 → 往后一周；
+    * 任一头说不清（``随便写写`` / ``None``）→ ``None``，由调用方给可行动的错误。
+
+    只判"解析不改写"：``end < start`` 原样返回，交给调用方决定怎么报错。
+    """
+    first = _range_endpoint(start, now)
+    if first is None:
+        return None
+    if str(end or "").strip():
+        last = _range_endpoint(end, now)
+        if last is None:
+            return None
+    else:
+        last = first + timedelta(days=6)
+    return first, last
 
 
 def add_memo(

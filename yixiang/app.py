@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from yixiang import db
+from yixiang import db, plan_doc
 from yixiang.config import Settings
 from yixiang.loop.agent import run_loop
 from yixiang.memory import configure as configure_memory
@@ -39,6 +39,8 @@ from yixiang.runtime.models import (
 from yixiang.runtime.session import (
     CONTEXT_BUDGET_CHARS,
     MEMORY_RETRY_NOTICE,
+    PLAN_QUERY_RETRY_NOTICE,
+    PLAN_RETRY_NOTICE,
     RESCHEDULE_RETRY_NOTICE,
     SessionManager,
 )
@@ -49,6 +51,11 @@ MEMORY_WRITE_TOOLS = ("save_memory", "manage_memory")
 
 # 改期工具：说得再像"挪好了"，没有这两个之一成功返回就等于没挪
 RESCHEDULE_TOOLS = ("reschedule_task", "reschedule_memo")
+
+# 排期写工具：要"排计划"就必须有其中之一真的落库（§7.9 阶段 3 的同一护栏）
+PLAN_WRITE_TOOLS = ("create_plan", "add_task")
+# 排期查工具：问"这周有什么"必须先过其中之一，否则就是凭印象背清单
+PLAN_QUERY_TOOLS = ("list_range", "list_today", "daily_brief")
 
 # 「停止生成」写进 chat_log 的回复占位：停止是用户主动行为，不是错误，但这一轮
 # 必须留下痕迹——否则用户按了停止就像这句话从没说过（§5.4 的落盘一致性）
@@ -89,9 +96,21 @@ class App:
             self.settings, usage_sink=self.usage_sink, clock=self.clock
         )
         self._configure_memory()
+        self._configure_plan_doc()
         self._configure_rag()
         self.registry = self.registry or build_registry(self.settings, self.deps())
         self.session = self.session or self.new_session_manager()
+
+    def _configure_plan_doc(self) -> None:
+        """启动同步 ``your_plan.md``（§7.3）：先收用户手改，再按库重渲染。
+
+        与记忆子系统同一条纪律——文档同步坏了不该让 App 起不来，所以整体吞异常。
+        失败只影响这一份「用户可见视图」，``plans``/``plan_items`` 仍是权威源。
+        """
+        with contextlib.suppress(Exception):
+            plan_doc.sync_plan_doc(
+                self.conn, self.settings.data_dir, now=self.clock.now()
+            )
 
     def _configure_memory(self) -> None:
         """装配记忆子系统 + 启动同步（§7.4）。任何一步失败都不该让 App 起不来。"""
@@ -217,6 +236,12 @@ class App:
             result = await self._verify_reschedule(
                 active, result, observer, stream, tools, registry=active_registry
             )
+            result = await self._verify_plan(
+                active, result, observer, stream, tools, registry=active_registry
+            )
+            result = await self._verify_plan_query(
+                active, result, observer, stream, tools, registry=active_registry
+            )
         except asyncio.CancelledError:
             # 「停止生成」：不再往下跑，但这一轮**必须留痕**（chat_log 与 trace 都要有）
             # 在这里吞掉 CancelledError 是安全的：上面就是 run_until_complete 的边界
@@ -333,6 +358,62 @@ class App:
         )
         return result if retry is None else _merge(result, retry)
 
+    async def _verify_plan(
+        self,
+        active: SessionManager,
+        result: TurnResult,
+        observer: Observer | None,
+        stream: bool,
+        tools: bool,
+        *,
+        registry: ToolRegistry | None = None,
+    ) -> TurnResult:
+        """排期轮的后验校验：说了"排好了"却没落库，就纠错重试一次。
+
+        判据只看有没有 ``create_plan`` / ``add_task`` 成功返回——有的轮只建计划
+        骨架（比如"排一个两周的复习计划"），不能强求它同时写满任务。
+        """
+        retry = await self._retry_intent_turn(
+            active,
+            result,
+            observer,
+            stream,
+            tools,
+            intent="PLAN",
+            landed=_did_plan,
+            notice=PLAN_RETRY_NOTICE,
+            registry=registry,
+        )
+        return result if retry is None else _merge(result, retry)
+
+    async def _verify_plan_query(
+        self,
+        active: SessionManager,
+        result: TurnResult,
+        observer: Observer | None,
+        stream: bool,
+        tools: bool,
+        *,
+        registry: ToolRegistry | None = None,
+    ) -> TurnResult:
+        """排期查询轮的后验校验：问"这周有什么"必须先过库，不能凭印象背。
+
+        与排期写入轮同一条护栏。意图互斥（``detect_intent`` 只返回一个），所以
+        一轮里最多只会重试一次。
+        """
+        retry = await self._retry_intent_turn(
+            active,
+            result,
+            observer,
+            stream,
+            tools,
+            intent="PLAN_QUERY",
+            landed=_did_plan_query,
+            notice=PLAN_QUERY_RETRY_NOTICE,
+            registry=registry,
+        )
+        return result if retry is None else _merge(result, retry)
+
     async def _retry_intent_turn(
         self,
         active: SessionManager,
@@ -420,6 +501,20 @@ def _memory_tool_failed(result: TurnResult) -> bool:
 def _did_reschedule(result: TurnResult) -> bool:
     """本轮是否真的把某条改期落到了库里（改期轮后验校验的判据）。"""
     return any(event.tool in RESCHEDULE_TOOLS and event.ok for event in result.tool_calls)
+
+
+def _did_plan(result: TurnResult) -> bool:
+    """本轮是否真的把排期落到了库里（排期轮后验校验的判据）。
+
+    只说话不落库、或者只把清单写进聊天回复，都算没排——``create_plan`` 建骨架
+    也算数，因为有的任务本来就只排到"计划"这一层。
+    """
+    return any(event.tool in PLAN_WRITE_TOOLS and event.ok for event in result.tool_calls)
+
+
+def _did_plan_query(result: TurnResult) -> bool:
+    """本轮问排期时是否真查过库（排期查询轮后验校验的判据）。"""
+    return any(event.tool in PLAN_QUERY_TOOLS and event.ok for event in result.tool_calls)
 
 
 def _merge(first: TurnResult, second: TurnResult) -> TurnResult:

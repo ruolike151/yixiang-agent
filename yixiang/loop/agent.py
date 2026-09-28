@@ -29,6 +29,7 @@ from yixiang.runtime.models import (
     TurnResult,
     Usage,
     assistant_message,
+    strip_tool_trail,
     tool_message,
 )
 from yixiang.runtime.session import SessionManager
@@ -86,7 +87,7 @@ async def run_loop(
         model = answer.model or model
 
         if not answer.wants_tools:
-            reply, finish_reason = answer.text, answer.finish_reason or "stop"
+            reply, finish_reason = strip_tool_trail(answer.text), answer.finish_reason or "stop"
             if answer.error:
                 error, detail = answer.error, "流式回复中断，已把已输出内容作为最终回复"
             elif finish_reason == "length":
@@ -115,7 +116,10 @@ async def run_loop(
                     model = retry.model or model
                     if retry.text.strip() and not retry.error and not retry.wants_tools:
                         # 重说的那一版更长更完整，就发它（第一版已经撤回了）
-                        reply, finish_reason = retry.text, retry.finish_reason or "stop"
+                        reply, finish_reason = (
+                            strip_tool_trail(retry.text),
+                            retry.finish_reason or "stop",
+                        )
                         if finish_reason != "length":
                             break
                 # 关思考之后仍然撞线：**已经写出来的部分照发**，把"被截断了"接在末尾。

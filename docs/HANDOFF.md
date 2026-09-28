@@ -13,13 +13,36 @@
 
 ```text
 ruff check .                                  → All checks passed
-pytest evals/deterministic -m "not live" -rs  → 399 passed, 1 deselected in 8.8s
+pytest evals/deterministic -m "not live" -rs  → 416 passed, 1 deselected in 9.0s
 yixiang skills validate                       → 通过
 python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"全过，可以合并"
 ```
 
 那 1 条 `deselected` 是标了 `-m live` 的真模型用例（`evals/live/`），nightly / 发版前才跑。**已无 `skip`**：
 D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地转成实跑，见 §2.1。
+
+**刚补的一件事**（2026-09-28，"排期是 agent 自己编的"）：用户在 QQ 里说"现在写一份下周的任务清单：
+1、拍证件照；2、熟悉简历上的项目"，agent 回得头头是道，可 `data/traces/2026-09-28.jsonl` 里那一轮
+`tool_calls: []`、`iterations: 1`，`plans` / `plan_items` **都是 0 行**——三项任务没有一项存在。
+同一句问话在 Web 端反而答"库里没有"，因为那一轮**真调了** `list_today`。两半拼起来是三个结构缺口：
+① **看不见的入口等于不存在**：`list_today(conn, now, date=...)` 早就支持查指定日期，但注册表里的
+description 写着"无参数"、`input_schema` 是空的，模型根本不知道能问别的日子；② **模型自己打的工具痕迹**：
+它回复末尾那行 `[tools used: list_today]` 是**它自己写的字**（程序拼的那行只在真调了工具时才出现），
+用户和排查的人都会被骗；③ **"排了"没有落库判据**：清单只写在聊天回复里。补法四层：① `list_today`
+补 `date` 入口，新增 `list_range(start_date, end_date?)` 一次答"这周 / 下周"（`parse_range` 把
+本周 / 这周 / 下周 解析成周一~周日，只报库里真有的、按天分组）；② `runtime/models.py` 加
+`strip_tool_trail()`，剥掉独立成行的 `[tools used: …]`——工具痕迹只认程序拼的那一行；③ 新增 PLAN 契约
+（`detect_intent` 命中"计划 / 清单 + 排 / 写 / 列…"就打 `PLAN`），后验判据是 `create_plan` / `add_task`
+至少成功一个，没落库就纠错重试一次；④ 问排期同样加护栏（`PLAN_QUERY`，本轮没成功调
+`list_range` / `list_today` / `daily_brief` 就重试一次），不能凭历史背清单。
+
+**同一轮加的一份文档**（2026-09-28，`your_plan.md`）：排期也该有个人能看、能改的面。新增
+`data/your_plan.md`（与 `memory.md` 同级，实现 `yixiang/plan_doc.py`），走 §7.4.5 那套"DB 权威 +
+文件可手改 + 哈希快速路径 + 单事务 + 原子写"；`create_plan` / `add_task` / `complete_task` /
+`reschedule_task` 一改库就同步它，App 启动时也补渲染一次。**和 `memory.md` 的分工写死在文件头和
+TECH §7.4.5 表里**：`memory.md` 记**事实**（我是谁、偏好、长期在做什么，`facts` 表权威），
+`your_plan.md` 记**排期**（哪一天做什么，`plans` / `plan_items` 权威）——两类文档、两条写入路径，
+别混。新增 16 条用例（`test_tools_plan.py` 10 → 27，注册表 21 → **22**）。
 
 **刚补的一件事**（2026-09-28，"改期根本没有出口"）：用户在 QQ 里说"把这几条挪到本周"，agent 回
 "挪好了，三项都落在本周"，但那一轮 `tool_calls` 是**空的**、库里 `memos.due_at` 还是老值、
@@ -48,7 +71,7 @@ D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地转�
 agent 手里确实**没有写这个文件的出口**。`data/memory.md` 每轮整份注入 S4，是人机共治的核心文件，但唯一
 改动路径是"先写 facts、再靠 `sync.write_memory_doc()` 回写"，所以**手写笔记段**（无 id、不入库）与整段
 重排 / 合并完全使不上劲——agent 只能在回复里列一张"改好了"的清单，文件一个字没动。现在给现有
-`manage_memory` 加 `action="edit"`（**不新增工具**，仍是那 21 个；`test_web.py` 钉着 `tools == 21`），只有三个
+`manage_memory` 加 `action="edit"`（**不新增工具**；`test_web.py` 钉着工具数，注册表当前 22 个），只有三个
 精确操作 `add` / `replace` / `remove`，**刻意不做整份 rewrite**（`op="rewrite"` 直接报错）。全走现成机制：
 `core_files.parse_memory_md` + `insert_lines` / `remove_lines` + `write_core_file`（原子写 + 150 行上限，
 超限整份拒绝、文件不动）→ 紧接着 `sync.sync_memory_md(conn)`（文件为准）。带 id 的行删掉是**软删**，
@@ -172,7 +195,7 @@ uv run yixiang rag eval                                                 # 真实
 四个真实的选择点，按踩坑概率排序：
 
 1. **main 必须支持工具调用（function calling）**。工具是主链路的骨架（`add_memo` / `search_media` /
-   `read_file`…共 21 个），模型不会调工具 = 整个 Agent 只剩聊天。⚠️ **`deepseek-reasoner` 在
+   `read_file`…共 22 个），模型不会调工具 = 整个 Agent 只剩聊天。⚠️ **`deepseek-reasoner` 在
    `pricing.py` 的价目表里有，但它不支持工具调用**，换上去主链路会哑掉——**代码里没有任何拦截**，
    这是最容易踩的一个坑。换 main 之前先确认候选模型支持 OpenAI 风格的 `tools` + 流式 `tool_calls` 分片。
 2. **价目表是手工维护的，换模型必须同时改 `yixiang/ops/pricing.py`**。现在是
@@ -302,7 +325,7 @@ $env:PYTHONIOENCODING="utf-8"          # Windows 上中文输出不乱码（必�
 
 .venv\Scripts\ruff.exe check .                                        # ① All checks passed
 .venv\Scripts\python.exe -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-                                                                       # ② 399 passed, 1 deselected
+                                                                       # ② 416 passed, 1 deselected
 $env:YIXIANG_EMBED_BACKEND="hash"
 .venv\Scripts\python.exe -m yixiang.ops.release_gate                   # ③ 硬门禁 4/4
 .venv\Scripts\python.exe -m yixiang doctor                             # ④ 八项自检

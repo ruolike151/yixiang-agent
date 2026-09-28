@@ -395,7 +395,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 },
                 "required": ["title"],
             },
-            fn=partial(plan.create_plan, conn, now),
+            fn=partial(plan.create_plan, conn, now, data_dir=deps.data_dir),
         )
     )
     registry.register(
@@ -415,18 +415,60 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 },
                 "required": ["plan_id", "date", "content"],
             },
-            fn=partial(plan.add_task, conn, now),
+            fn=partial(plan.add_task, conn, now, data_dir=deps.data_dir),
         )
     )
     registry.register(
         Tool(
             name="list_today",
             description=(
-                "返回今天的学习任务与到期备忘。用户问'今天要干什么/今天有什么'时调用。"
-                "严格按数据库返回，不要补充或推测未列出的内容。无参数。"
+                "返回某一天的学习任务与到期备忘。用户问'今天要干什么/今天有什么'时调用。"
+                "date 可选：不传就是今天；也可以传 YYYY-MM-DD 或'明天 / 周五'。"
+                "想看一整周（这周 / 下周）用 list_range。"
+                "严格按数据库返回，不要补充或推测未列出的内容。"
             ),
-            input_schema={"type": "object", "properties": {}, "required": []},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "看哪一天，YYYY-MM-DD 或'明天 / 周五'；不传就是今天",
+                        "example": "2026-09-20",
+                    },
+                },
+                "required": [],
+            },
             fn=partial(plan.list_today, conn, now),
+            side_effect=False,
+        )
+    )
+    registry.register(
+        Tool(
+            name="list_range",
+            description=(
+                "返回一段日期内的学习任务与到期备忘，按天分组。"
+                "用户问'这周有什么 / 下周的任务 / 这周安排'时用它一次答完（不要一次只查今天）。"
+                "start_date 传'本周 / 这周 / 下周'或 YYYY-MM-DD /'明天'；"
+                "end_date 可选，不传就默认 start_date 往后一周。"
+                "严格按数据库返回，只报列表里有的；库里空的就如实说没有，不要补充或推测。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "起始日期，'本周 / 这周 / 下周'或 YYYY-MM-DD /'明天'",
+                        "example": "本周",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "结束日期（可选），不传就默认 start_date 往后一周",
+                        "example": "2026-09-20",
+                    },
+                },
+                "required": ["start_date"],
+            },
+            fn=partial(plan.list_range, conn, now),
             side_effect=False,
         )
     )
@@ -449,7 +491,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 },
                 "required": ["item_id"],
             },
-            fn=partial(plan.complete_task, conn, now),
+            fn=partial(plan.complete_task, conn, now, data_dir=deps.data_dir),
         )
     )
     registry.register(
@@ -475,7 +517,7 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 },
                 "required": ["item_id", "date"],
             },
-            fn=partial(plan.reschedule_task, conn, now),
+            fn=partial(plan.reschedule_task, conn, now, data_dir=deps.data_dir),
         )
     )
     # ── PART 2 记忆工具（§9.2）──

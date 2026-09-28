@@ -193,19 +193,21 @@ top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 
 ```text
 $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-399 passed, 1 deselected in 8.79s
+416 passed, 1 deselected in 8.96s
 ```
+
+> 本轮复测：2026-09-28（`list_range` 一周视图 + `your_plan.md` 双向同步落地后，`test_tools_plan.py` 10 → 27 条）。
 
 | 维度 | 数字 | 说明 |
 |---|---|---|
-| 收集总数 | **400** | 含 1 条 `-m live`（真模型用例） |
-| `-m "not live"` 选中 | **399** | 每次 PR + CI 跑的就是这一档 |
-| 通过 | **399** | 通过率 100%（门禁硬指标） |
+| 收集总数 | **417** | 含 1 条 `-m live`（真模型用例） |
+| `-m "not live"` 选中 | **416** | 每次 PR + CI 跑的就是这一档 |
+| 通过 | **416** | 通过率 100%（门禁硬指标） |
 | 跳过 | **0** | D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地**转成实跑**，不再 `skip` |
 | 排除 | **1** | 标了 `-m live`，nightly / 发版前才跑 |
-| 全量耗时 | **8.8 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
+| 全量耗时 | **9.0 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
 
-逐文件分布（`-m "not live"` 收集数，合计 399，36 个文件）：
+逐文件分布（`-m "not live"` 收集数，合计 416，36 个文件）：
 
 | 文件 | 条数 | 覆盖 |
 |---|---|---|
@@ -236,7 +238,7 @@ $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
 | `test_embed_contract.py` | 5 | 文档里的模型 / 维度与代码常量一致 |
 | `test_memory_capacity.py` | 5 | 三文件上限与淘汰 |
 | `test_sessions.py` | 6 | 会话改名 / 搜索 / 导出 / 删除 / 来源标注 |
-| `test_tools_plan.py` | 10 | 计划工具（含 `reschedule_task` 改期 + 改期纠错重试）与工具痕迹折叠 |
+| `test_tools_plan.py` | 27 | 计划工具（含 `list_today(date)` / `list_range` 一周视图、`reschedule_task` 改期）、PLAN 落库护栏、模型自打工具痕迹的剥离、`your_plan.md` 双向同步（渲染 / 手改回读 / 启动补渲染 / 缺标记不动） |
 | `test_consolidation.py` | 4 | 巩固三档阈值与质量门禁 |
 | `test_release_gate.py` | 4 | 门禁判定自身 |
 | `test_backup_secrets.py` | 3 | `.env` 可恢复副本（第 7 项自检的证据） |

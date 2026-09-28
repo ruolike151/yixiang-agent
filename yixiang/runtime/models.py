@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,24 @@ from typing import Any, Protocol, runtime_checkable
 
 # 工具结果长度上限（§5.5 冻结约定）
 TOOL_RESULT_LIMIT = 2000
+
+# 模型有时候会**自己打字**冒充工具痕迹（"…\n\n[tools used: list_today]"）。
+# 这一行只有程序拼的才算数，所以独立成行的那种一律剥掉（2026-09-28 的真实事故）。
+_TOOL_TRAIL_LINE_RE = re.compile(r"^\s*\[tools used:.*\]\s*$")
+
+
+def strip_tool_trail(text: str) -> str:
+    """剥掉模型自己在正文里打的 ``[tools used: ...]`` 行（§5.3）。
+
+    工具痕迹是**程序拼的**（``TurnResult.fold_into_history``），不是模型写的。
+    模型自己写的那一行会把"它什么都没查"伪装成"它查过了"——2026-09-28 的 QQ 轮
+    就是靠这行骗过了用户：``tool_calls`` 为空，回复末尾却挂着 ``[tools used: list_today]``。
+    这里只删独立成行的写法，正文里的普通方括号不受影响。
+    """
+    if not text or "[tools used:" not in text:
+        return text
+    kept = [line for line in text.splitlines() if not _TOOL_TRAIL_LINE_RE.match(line)]
+    return "\n".join(kept).strip()
 
 
 # --------------------------------------------------------------------- 时钟

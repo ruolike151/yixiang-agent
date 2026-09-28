@@ -44,12 +44,12 @@ uv run python -m yixiang.ops.release_gate
 
 ```text
 All checks passed!                                                    ← ① ruff
-399 passed, 1 deselected in 8.8s                                      ← ② 确定性用例（耗时随负载浮动，约 8~12 秒）
+416 passed, 1 deselected in 9.0s                                      ← ② 确定性用例（耗时随负载浮动，约 8~12 秒）
 校验通过：…\data\skills 下 0 个技能可用                                 ← ③ skills validate
 
 发布门禁：硬门禁 4/4 通过                                              ← ④ release_gate
   ✓ 确定性用例通过率                   100.0% / 阈值 100.0%     [硬门禁]
-      399 passed / 0 failed（pytest 退出码 0）
+      416 passed / 0 failed（pytest 退出码 0）
   ✓ judge 均分                     4.80 / 阈值 4.00       [硬门禁]
       10 条 · 均分 4.80 / 通过线 4.0（offline） · 最低：J-05=4；J-09=4
   ✓ 门控漏检率                        0.0% / 阈值 0.0%       [硬门禁]
@@ -240,7 +240,7 @@ uv run python scripts/restore_drill.py   # 演练：把快照当唯一库源启�
 ```powershell
 $env:YIXIANG_EMBED_BACKEND='hash'; $env:PYTHONUTF8='1'
 uv run ruff check .
-uv run pytest evals/deterministic -m "not live" -rs        # 399 passed, 1 deselected
+uv run pytest evals/deterministic -m "not live" -rs        # 416 passed, 1 deselected
 uv run yixiang eval judge                                  # 4.80（offline）
 uv run yixiang rag eval                                    # hash 口径：75.0% / MRR 0.625（333 部语料）
 uv run python -m yixiang.ops.release_gate                  # 硬门禁 4/4

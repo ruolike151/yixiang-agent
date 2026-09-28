@@ -126,9 +126,11 @@ OneBot v11 反向 WebSocket，配 NapCat 之类的一侧。Windows 上有一键�
 
 **记忆**：三文件核心记忆（原子写 + 上限校验：3000 / 4000 / 活跃区 150 行）、三支柱检索（facts 走 FTS5 + 向量 RRF；episodes 只用向量；skills 关键词）、检索门控（规则预过滤 + 小模型判定，fail-open）、人机共治（手改 `memory.md` 重启即生效）、巩固（三档阈值 + watermark，失败不推水印）、"记住"硬契约、`memory {list,show,sync,verify,restore}` 三方对账。
 
+**排期**：`create_plan` / `add_task` / `list_today` / `list_range`（一次答"这周 / 下周"，按天分组）/ `complete_task` / `reschedule_task`，`plans` / `plan_items` 是权威源。`data/your_plan.md` 是**和 `memory.md` 同级**、给人看也给人改的排期视图：改一行文字 = 改任务、删整行 = 移出排期、在某天下面手写一行 = 新增一条（同步后回写 `item_id`）。**两张文件分工不同**——`memory.md` 记"事实"（我是谁 / 偏好 / 长期在做什么），`your_plan.md` 记"排期"（哪一天做什么），别混。
+
 **RAG 语料**：`source_id` 幂等入库（简介没变就跳过且不重嵌入）、中文混合检索（jieba 预分词 + LIKE 兜底 + RRF + 硬过滤 + 口味软加权）、推荐去重（7 天窗口，对话与日报共用）、`ops explain-search` 五段可解释（FTS / 向量 / RRF / 过滤 / 加权）、`rag eval` golden 回归、嵌入不可用时降级纯 FTS5（trace 记 `E_EMBED_UNAVAILABLE`，用户无感）。外部内容一律 `<external_content>` 包裹。
 
-**工具**：注册表里第 21 个具名工具（备忘 / 计划 / 改期 / 记忆管理 / 影视 / 日报 / `read_file`），路径、SQL、命令一律由代码拼装，不由模型输出拼接——模型可以建议，只有代码做决定。
+**工具**：注册表里第 22 个具名工具（备忘 / 计划 / 一周视图 `list_range` / 改期 / 记忆管理 / 影视 / 日报 / `read_file`），路径、SQL、命令一律由代码拼装，不由模型输出拼接——模型可以建议，只有代码做决定。
 
 **评测与运维**：确定性用例、judge 10 条 rubric、检索 golden 回归、发布门禁五项、trace / usage / doctor / backup / 恢复演练、常驻 job（巩固兜底 / 每日汇总 / 周巡检，异常隔离——失败可见，绝不杀主链路）。
 
@@ -138,7 +140,7 @@ OneBot v11 反向 WebSocket，配 NapCat 之类的一侧。Windows 上有一键�
 
 | 指标 | 值 | 口径 |
 |---|---|---|
-| 离线确定性用例 | **399 passed, 1 deselected**（36 个文件，~8 秒） | `-m "not live"`，离线、零成本、零抖动 |
+| 离线确定性用例 | **416 passed, 1 deselected**（36 个文件，~9 秒） | `-m "not live"`，离线、零成本、零抖动 |
 | 检索 top-3 命中率（CI 口径） | **90.0%（18/20）· MRR 0.792** | 31 部语料 + `hash` 假嵌入 |
 | 检索 top-3 命中率（真语料 + 真嵌入） | **90.0%（18/20）· MRR 0.792** | 333 部语料 + `bge-small-zh-v1.5` |
 | 嵌入不可用降级 | **85.0%（17/20）** | 纯 FTS5，产品仍然可用 |
@@ -212,7 +214,8 @@ yixiang/         包本体
   scheduler/     常驻 job：jobs.py（巩固兜底 / 每日汇总 / 周巡检）+ brief_job.py（晨报）+ runtime.py
   ops/           trace、usage、doctor、explain-search、release_gate、backup
 templates/       soul.md / user.md / memory.md 的初版模板（仓库只放模板）
-data/            运行时数据（gitignore）：三文件、state.db、traces/、usage.jsonl、briefs/、backups/
+data/            运行时数据（gitignore）：三文件、your_plan.md（排期视图，与 memory.md 同级）、
+                 state.db、traces/、usage.jsonl、briefs/、backups/
                  └ 它同时是一个**私有仓**：只版本化三文件 / skills / briefs，永不推远端
 evals/           deterministic/（L1+L2+L3）+ live/（`-m live` 真模型）+ golden/ + judge/ + fixtures/
 docs/            PRODUCT.md、TECH-DESIGN.md、architecture.md、NUMBERS.md、HANDOFF.md、

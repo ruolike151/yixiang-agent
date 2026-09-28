@@ -748,6 +748,35 @@ id      := 正整数，全文件唯一
 - **并发**：一把 `asyncio.Lock` 保护"完整同步 + 所有文件写"，避免"巩固追加候选"与"用户手改"交叉写。
 - **巡检**：`yixiang memory verify` 做三方对账（文件行 / DB 存活条目 / 索引行数）；`yixiang memory rebuild` 全量重建索引。
 
+#### 7.4.5 同一范式的第二份文件：`your_plan.md`
+
+排期也有一份用户可见、可手改的视图文件，和 `memory.md` 同级（都在 `data/`），复用上面
+这套"文件为准 + 哈希快速路径 + 单事务 + 原子写"的范式（实现见 `yixiang/plan_doc.py`）。
+
+**先分清两份文档管什么**——混起来才是真的乱：
+
+| | `memory.md`（记忆） | `your_plan.md`（排期） |
+|---|---|---|
+| 记的是 | **事实**：我是谁、偏好、长期在做什么 | **排期**：哪一天要做什么 |
+| 权威源 | `facts` 表（FTS5 + 向量） | `plans` / `plan_items` 表 |
+| 谁写 | `save_memory` / `manage_memory`（可由"记住"轮触发） | `create_plan` / `add_task` / `complete_task` / `reschedule_task` |
+| 时间性 | 长期，不随时间失效 | 有日期，过去了就过期 |
+| 一次性的截止提醒 | 不进（那是 `memos`，自己一条线） | 不进（同上） |
+
+与 §7.4 的差别只有两处，都是为了"排期是待办视图"这个性质：
+
+1. **快速路径要比两份东西**：不只比文件自己的 sha256，还比"按 DB 渲染出来的那一份"。
+   因为 Web 控制台与 QQ 网关是**两个进程、共用一份 `data/state.db`**（ADR-3），另一头写的
+   排期不会碰这个进程的哈希文件；只比文件哈希就会让过期视图一直留着（这正是"QQ 上给的
+   任务在 Web 端看不到"那类投诉的一半）。
+2. **删除是软删**：文件里删掉一行 = 那条 `status='skipped'`（留痕可恢复，与 §7.4.3 同口径）；
+   `status='done'` 的条目不渲染——完成的事从待办视图里消失，但库里还在。
+
+条目格式 `- [item_id=12] 内容（60 分钟，todo）`：`item_id` 是"人改文件"与"改数据库"对齐的
+唯一锚点（改文字 = 改内容、挪到别的日期段 = 改期）；无 id 的手写行按所在日期段新增，同步后
+回写 id。文件少了格式标记 `<!-- yixiang:plan=v1 -->` 就**一个字节都不动**——宁可不同步，也
+不能抹掉人手写的东西。
+
 ### 7.5 检索门控
 
 #### 7.5.1 门控 prompt（完整版）
@@ -1169,7 +1198,8 @@ class Tool:
 | `reschedule_memo` | P0 | `id, due_at(ISO / 人话)` | `{"ok": true, "id": ..., "due_at": ...}` | ✅ |
 | `create_plan` | P0 | `title, goal, start_date, end_date` | `{"plan_id": 3}` | — |
 | `add_task` | P0 | `plan_id, date, content, est_minutes?` | `{"item_id": 8}` | — |
-| `list_today` | P0 | — | 今日任务 + 到期备忘 | 只读 |
+| `list_today` | P0 | `date?(YYYY-MM-DD / 人话)` | 那天的任务 + 到期备忘（缺省今天） | 只读 |
+| `list_range` | P0 | `start_date(YYYY-MM-DD / 本周 / 下周), end_date?` | 该区间的任务 + 到期备忘，按天分组 | 只读 |
 | `complete_task` | P0 | `item_id, status(done/skipped)` | `{"ok": true}` | ✅ |
 | `reschedule_task` | P0 | `item_id, date(YYYY-MM-DD / 人话)` | `{"ok": true, "item_id": ..., "date": ...}` | ✅ |
 | `save_memory` | P0 | `subject, content` | `{"id": 21, "action": "insert"}` | — |
@@ -1194,8 +1224,13 @@ Web 控制台上传件的读取出口；两个 `reschedule_*` 是"改期"的出�
 改期还复用 §7.9 那套"打标 → S8 契约 → 后验校验"的护栏：`detect_intent` 命中
 `挪到 / 改到 / 推迟 / 顺延` 等词就打 `RESCHEDULE`，本轮没成功调 `reschedule_*` 时纠错重试
 一次——因为"只在回复里说挪好了"这条路上一次是真实事故（`tool_calls` 为空、库里没动）。
+`list_range` 是"这周 / 下周"的查询出口（2026-09-28 新增）：一次答整段区间、按天分组、只报
+库里真有的；`list_today` 早就能查指定日期，但 description 原来写着"无参数"、schema 是空的，
+模型看不见这个入口——于是回答排期时只能凭印象背清单，这是同一轮事故的另一半。
+两条查询工具与写入侧共用一条护栏：问排期（`PLAN_QUERY`）时本轮没成功查过库就纠错重试
+一次（`PLAN` 写入侧同理，判据是 `create_plan` / `add_task` 至少成功一个）。
 **P2 两行是设计位、尚未落盘**——数"现在有几个工具"时以
-`yixiang/tools/registry.py` 的 `build_registry()` 为准（当前 **21** 个）。
+`yixiang/tools/registry.py` 的 `build_registry()` 为准（当前 **22** 个）。
 
 两个关键工具的完整 schema（其余按此风格写）：
 
@@ -1803,7 +1838,7 @@ evals/
 
 > 上面是**设计时的全集**，实际目录以仓库里的 `evals/` 为准——收口期后补的
 > `test_web.py`（15 条）、`test_event_loop.py`（8 条）、`test_cli_gateway.py`、`test_doctor.py` 等不在本清单里，
-> 不复述以免第二处真相。当前口径：`399 passed, 1 deselected`（见 `NUMBERS.md`）。
+> 不复述以免第二处真相。当前口径：`416 passed, 1 deselected`（见 `NUMBERS.md`）。
 
 四层，依赖与门禁各不相同：
 

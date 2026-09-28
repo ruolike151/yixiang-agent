@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,12 +39,16 @@ from yixiang.runtime.models import (
 from yixiang.runtime.session import (
     CONTEXT_BUDGET_CHARS,
     MEMORY_RETRY_NOTICE,
+    RESCHEDULE_RETRY_NOTICE,
     SessionManager,
 )
 from yixiang.tools.registry import Deps, ToolRegistry, build_registry
 
 # 写入类记忆工具：后验校验看的就是这些（§7.9 阶段 3）
 MEMORY_WRITE_TOOLS = ("save_memory", "manage_memory")
+
+# 改期工具：说得再像"挪好了"，没有这两个之一成功返回就等于没挪
+RESCHEDULE_TOOLS = ("reschedule_task", "reschedule_memo")
 
 # 「停止生成」写进 chat_log 的回复占位：停止是用户主动行为，不是错误，但这一轮
 # 必须留下痕迹——否则用户按了停止就像这句话从没说过（§5.4 的落盘一致性）
@@ -209,6 +214,9 @@ class App:
             result = await self._verify_memory_write(
                 active, result, observer, stream, tools, registry=active_registry
             )
+            result = await self._verify_reschedule(
+                active, result, observer, stream, tools, registry=active_registry
+            )
         except asyncio.CancelledError:
             # 「停止生成」：不再往下跑，但这一轮**必须留痕**（chat_log 与 trace 都要有）
             # 在这里吞掉 CancelledError 是安全的：上面就是 run_until_complete 的边界
@@ -279,26 +287,82 @@ class App:
         registry: ToolRegistry | None = None,
     ) -> TurnResult:
         """§7.9 阶段 3：REMEMBER 轮没写记忆就纠错重试一次，仍失败则如实标记。"""
-        active_registry = registry or self.registry
-        if _wrote_memory(result):
-            return result
-        if active.turn_intent != "REMEMBER" or active_registry is None or self.provider is None:
+        retry = await self._retry_intent_turn(
+            active,
+            result,
+            observer,
+            stream,
+            tools,
+            intent="REMEMBER",
+            landed=_wrote_memory,
+            notice=MEMORY_RETRY_NOTICE,
+            registry=registry,
+        )
+        if retry is None:
             result.memory_write_failed = _memory_tool_failed(result)
             return result
+        if not _wrote_memory(retry):
+            retry.memory_write_failed = True
+        return _merge(result, retry)
+
+    async def _verify_reschedule(
+        self,
+        active: SessionManager,
+        result: TurnResult,
+        observer: Observer | None,
+        stream: bool,
+        tools: bool,
+        *,
+        registry: ToolRegistry | None = None,
+    ) -> TurnResult:
+        """改期轮的后验校验：说了挪却没真调工具，就纠错重试一次。
+
+        与"记住"轮同一条护栏（``_verify_memory_write``）。两者的意图互斥
+        （``detect_intent`` 只返回一个），所以一轮里最多只会重试一次。
+        """
+        retry = await self._retry_intent_turn(
+            active,
+            result,
+            observer,
+            stream,
+            tools,
+            intent="RESCHEDULE",
+            landed=_did_reschedule,
+            notice=RESCHEDULE_RETRY_NOTICE,
+            registry=registry,
+        )
+        return result if retry is None else _merge(result, retry)
+
+    async def _retry_intent_turn(
+        self,
+        active: SessionManager,
+        result: TurnResult,
+        observer: Observer | None,
+        stream: bool,
+        tools: bool,
+        *,
+        intent: str,
+        landed: Callable[[TurnResult], bool],
+        notice: str,
+        registry: ToolRegistry | None = None,
+    ) -> TurnResult | None:
+        """``intent`` 轮没落库就带着提醒重跑一遍 loop；返回 ``None`` 表示不需重试。"""
+        active_registry = registry or self.registry
+        if landed(result) or active.turn_intent != intent:
+            return None
+        if active_registry is None or self.provider is None:
+            return None
         # 让重试看得见上一轮的回复：临时塞两条进历史，跑完再撤回
         active.history.append(assistant_message(result.reply))
-        active.history.append(user_message(MEMORY_RETRY_NOTICE))
-        active.extra_contract = MEMORY_RETRY_NOTICE
+        active.history.append(user_message(notice))
+        active.extra_contract = notice
         try:
-            retry = await run_loop(
+            return await run_loop(
                 active, active_registry, self.provider, observer, stream=stream, tools=tools
             )
         finally:
             del active.history[-2:]
             active.extra_contract = ""
-        if not _wrote_memory(retry):
-            retry.memory_write_failed = True
-        return _merge(result, retry)
 
     async def _consolidate(self) -> None:
         """§7.7 巩固：后台按阈值跑；注入的假模型不参与（避免污染剧本）。"""
@@ -351,6 +415,11 @@ def _memory_tool_failed(result: TurnResult) -> bool:
     return any(
         event.tool in MEMORY_WRITE_TOOLS and not event.ok for event in result.tool_calls
     )
+
+
+def _did_reschedule(result: TurnResult) -> bool:
+    """本轮是否真的把某条改期落到了库里（改期轮后验校验的判据）。"""
+    return any(event.tool in RESCHEDULE_TOOLS and event.ok for event in result.tool_calls)
 
 
 def _merge(first: TurnResult, second: TurnResult) -> TurnResult:

@@ -193,26 +193,26 @@ top-3 命中率：70.0%（14/20，目标 ≥60%） · MRR 0.667 → 通过
 
 ```text
 $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-382 passed, 1 deselected in 9.01s
+399 passed, 1 deselected in 8.79s
 ```
 
 | 维度 | 数字 | 说明 |
 |---|---|---|
-| 收集总数 | **383** | 含 1 条 `-m live`（真模型用例） |
-| `-m "not live"` 选中 | **382** | 每次 PR + CI 跑的就是这一档 |
-| 通过 | **382** | 通过率 100%（门禁硬指标） |
+| 收集总数 | **400** | 含 1 条 `-m live`（真模型用例） |
+| `-m "not live"` 选中 | **399** | 每次 PR + CI 跑的就是这一档 |
+| 通过 | **399** | 通过率 100%（门禁硬指标） |
 | 跳过 | **0** | D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地**转成实跑**，不再 `skip` |
 | 排除 | **1** | 标了 `-m live`，nightly / 发版前才跑 |
-| 全量耗时 | **9.01 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
+| 全量耗时 | **8.8 s** | 离线、零成本（耗时随负载浮动，约 8~12 秒；目标 ≤30 秒） |
 
-逐文件分布（`-m "not live"` 收集数，合计 382，36 个文件）：
+逐文件分布（`-m "not live"` 收集数，合计 399，36 个文件）：
 
 | 文件 | 条数 | 覆盖 |
 |---|---|---|
 | `test_retrieval.py` | 32 | 入库幂等、FTS 分词、RRF、硬过滤、口味加权、降级、注入包裹 |
 | `test_provider.py` | 31 | 流式解析、超时、`finish_reason=length`、关思考开关（名单 / 单次请求）、坏 JSON、用量记账、多模态附图（越界 / 超大 / 单张坏图不拖垮整轮） |
-| `test_web.py` | 35 | 七栏控制台：配置/人设/记忆读写、multipart 上传（30MB）、上传件列表 / 删除 / 清空 / 原图、`read_file` 越界、SSE 分帧、链路 trace 面板 |
-| `test_tools_memo.py` | 17 | 备忘的幂等键 / 到期 / 去重 |
+| `test_web.py` | 36 | 七栏控制台：配置/人设/记忆读写、multipart 上传（30MB）、上传件列表 / 删除 / 清空 / 原图、`read_file` 越界、SSE 分帧、链路 trace 面板、Web 新会话固定落 `web:` 命名空间 |
+| `test_tools_memo.py` | 27 | 备忘的幂等键 / 到期 / 去重 / 改期（严格解日 + 拒绝瞎猜） |
 | `test_bangumi_collections.py` | 16 | Bangumi 收藏 → 口味画像（假 client，不出网） |
 | `test_gate.py` | 16 | 门控规则层、模型层、fail-open、标注集指标 |
 | `test_ingest_fetch.py` | 16 | 抓取的限速 / 退避 / 缓存 / 游标（假 client，不出网） |
@@ -235,8 +235,8 @@ $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
 | `test_docs_bangumi.py` | 5 | Bangumi 接入的文档口径（工具数、§9.2 清单） |
 | `test_embed_contract.py` | 5 | 文档里的模型 / 维度与代码常量一致 |
 | `test_memory_capacity.py` | 5 | 三文件上限与淘汰 |
-| `test_sessions.py` | 5 | 会话改名 / 搜索 / 导出 / 删除 |
-| `test_tools_plan.py` | 5 | 计划工具与工具痕迹折叠 |
+| `test_sessions.py` | 6 | 会话改名 / 搜索 / 导出 / 删除 / 来源标注 |
+| `test_tools_plan.py` | 10 | 计划工具（含 `reschedule_task` 改期 + 改期纠错重试）与工具痕迹折叠 |
 | `test_consolidation.py` | 4 | 巩固三档阈值与质量门禁 |
 | `test_release_gate.py` | 4 | 门禁判定自身 |
 | `test_backup_secrets.py` | 3 | `.env` 可恢复副本（第 7 项自检的证据） |

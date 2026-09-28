@@ -131,7 +131,7 @@ def test_state_shows_models_counters_and_masks_the_key(settings, clock):
 
     state = api.state()
 
-    assert state["counters"]["tools"] == 19
+    assert state["counters"]["tools"] == 21
     assert state["counters"]["skills"] == 0  # tmp 里还没有 skills/
     assert state["models"]["main"] == "deepseek-flash"
     assert state["models"]["gate"] == "deepseek-flash"  # 留空 → 回落主模型
@@ -453,6 +453,40 @@ def test_session_rename_search_export_delete(settings, clock):
     assert store.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == 1
 
 
+def test_web_new_session_stays_in_the_web_namespace(settings, clock):
+    """Web 的「新会话」永远落在 ``web:``——哪怕当前正站在 QQ 会话里。
+
+    站在 QQ 会话里点新会话、沿用原 source，会造出 ``qq:20260919-1000-复习`` 这种
+    "看着像 QQ、其实是网页聊的"会话：QQ 的往来被拆成好几条，``chat_log.source``
+    也跟着说假话。所以判据有三条——新 id 是 ``web:``、当前来源是 ``web``、
+    原来那条 QQ 会话一轮不少地留在列表里。
+    """
+    api = make_api(settings, clock, text_reply("R1"), text_reply("R2"))
+    qq = api.app.new_session_manager("qq:1904625008", source="qq")
+    qq.add_exchange("挪到本周", "好，三项都挪到本周了。")
+
+    api.switch("qq:1904625008")
+    listing = api.sessions()
+    assert listing["current"] == "qq:1904625008"
+    # 列表行带上来源：网页上分得清哪条是 QQ 来的、哪条是自己聊的
+    assert {item["session_id"]: item["source"] for item in listing["sessions"]} == {
+        "qq:1904625008": "qq"
+    }
+
+    created = api.new_session("复习")
+    assert created["current"] == "web:20260919-1000-复习"
+    assert api.app.session.source == "web"
+
+    api.chat("新会话里的一句")  # 零轮的新会话不进历史列表，聊一句才有得比
+    rows = {item["session_id"]: item for item in api.sessions()["sessions"]}
+    assert set(rows) == {"qq:1904625008", "web:20260919-1000-复习"}
+    assert (rows["qq:1904625008"]["turns"], rows["qq:1904625008"]["source"]) == (1, "qq")
+    assert (rows["web:20260919-1000-复习"]["turns"], rows["web:20260919-1000-复习"]["source"]) == (
+        1,
+        "web",
+    )
+
+
 def test_chat_streams_events_and_reports_the_turn(settings, clock):
     api = make_api(settings, clock, text_reply(REPLY))
 
@@ -711,10 +745,10 @@ def test_http_layer_serves_api_static_upload_and_sse(settings, clock):
         status, raw = client.call("GET", "/api/state")
         assert status == 200
         state = json.loads(raw)
-        assert state["counters"]["tools"] == 19
+        assert state["counters"]["tools"] == 21
         assert state["session"]["id"] == "web:default"
         assert state["provider"]["api_key_mask"] == mask_secret(settings.api_key)
-        assert json.loads(client.call("GET", "/api/tools")[1])["count"] == 19
+        assert json.loads(client.call("GET", "/api/tools")[1])["count"] == 21
         assert json.loads(client.call("GET", "/api/skills")[1])["count"] == 0
 
         # 前端外壳与静态资源

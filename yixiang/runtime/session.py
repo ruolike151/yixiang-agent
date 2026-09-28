@@ -93,10 +93,31 @@ TURN_CONTRACT_MEMORY_EDIT = (
     "只有用户明确要求时才用 edit；不要自己兴起整理记忆。"
 )
 
+# 用户要求"改期"（把某条任务 / 备忘挪到另一天）。这一类话的失败模式特别隐蔽：
+# 模型回一句"挪好了"，库里那一列没动，用户下次打开还是老日期——所以打标 + 契约，
+# 让"说了挪就必须真挪"变成可断言的行为（与 memory edit 那份契约同一个范式）。
+RESCHEDULE_WORDS = ("挪到", "挪去", "挪一下", "改到", "改期", "推迟", "顺延")
+TURN_CONTRACT_RESCHEDULE = (
+    "【本轮硬性要求】用户要求把某条任务或备忘**改期**（挪到 / 改到 / 推迟 / 顺延）。\n"
+    "改期只有这两个出口，必须真调，并在工具成功返回后如实汇报改到了哪天：\n"
+    "  - 任务：先 list_today 拿 item_id → reschedule_task(item_id=<id>, date=\"YYYY-MM-DD\")\n"
+    "  - 备忘：先 list_memos 拿 id → reschedule_memo(id=<id>, due_at=\"YYYY-MM-DD 或 周五中午\")\n"
+    "date / due_at 要落到具体某一天：'本周'这类说法按当前时间换算成日期再传。\n"
+    "只在回复里说\"已经挪好了\"等于没挪——库里没动，用户下次看到的还是老日期。\n"
+    "库里没有对应条目就如实说没有，不要编。"
+)
+
 # §7.9 阶段 3：后验校验没过时追加的系统提醒（纠错重试 1 次）
 MEMORY_RETRY_NOTICE = (
     "【提醒】上一轮你没有把用户要求记住的信息写进长期记忆。"
     "现在必须先调用 manage_memory(action=\"search\") 或 save_memory 完成写入，再回复用户。"
+)
+
+# 改期轮的后验校验没过时追加的系统提醒（与"记住"轮同一个纠错范式）
+RESCHEDULE_RETRY_NOTICE = (
+    "【提醒】上一轮你说把条目改期了，但并没有真正调用工具——库里那一列还是老日期。"
+    "现在必须真的调用 reschedule_task（任务）或 reschedule_memo（备忘）完成改期；"
+    "若解析不出具体某一天，就如实问用户是哪一天，不要编。"
 )
 
 
@@ -107,8 +128,13 @@ def detect_intent(message: str) -> str:
     "记住我喜欢悬疑"与"记一下周五交材料"的分界线，靠规则而不是模型判断。
     "改记忆文件"与"记住某件事"同理：前者要动 ``memory.md`` 正文（edit），
     后者是往库里加一条事实（save_memory），两条路不能混。
+
+    改期（``"RESCHEDULE"``）排在最前面：'挪到 / 改到 / 推迟'比"记住"这个前缀
+    具体得多，先认它们——"记住把周五那条挪到本周"也不会被误判成 REMEMBER。
     """
     text = (message or "").strip()
+    if any(word in text for word in RESCHEDULE_WORDS):
+        return "RESCHEDULE"
     if any(text.startswith(prefix) for prefix in REMEMBER_PREFIXES):
         if any(word in text for word in MEMO_WORDS):
             return ""
@@ -197,13 +223,20 @@ class SessionManager:
         self.history = []
         self.load_history()
 
-    def new_session_id(self, name: str | None = None) -> str:
+    def new_session_id(self, name: str | None = None, *, source: str | None = None) -> str:
+        """新会话的 id：``<来源>:<时间戳>[-名字]``。
+
+        ``source`` 不传就沿用当前来源（CLI 的 ``/new`` 仍落在 ``cli:``）；Web 控制台
+        会明确传 ``web``——否则"站在 QQ 会话里点新会话"会造出 ``qq:<时间戳>``，
+        既把 QQ 的往来拆成好几条，又让来源标记说假话。
+        """
         stamp = self.clock.now().strftime("%Y%m%d-%H%M")
         suffix = (name or "").strip().replace(" ", "-")
-        return f"{self.source}:{stamp}" + (f"-{suffix}" if suffix else "")
+        origin = source or self.source
+        return f"{origin}:{stamp}" + (f"-{suffix}" if suffix else "")
 
-    def new_session(self, name: str | None = None) -> str:
-        self.switch(self.new_session_id(name))
+    def new_session(self, name: str | None = None, *, source: str | None = None) -> str:
+        self.switch(self.new_session_id(name, source=source), source=source)
         return self.session_id
 
     def list_sessions(self, limit: int = 20) -> list[dict[str, object]]:
@@ -274,15 +307,20 @@ class SessionManager:
         }
 
     def _session_row(self, row: sqlite3.Row, titles: dict[str, str]) -> dict[str, object]:
-        """一行会话：``list_sessions`` 与 ``search_sessions`` 共用同一套拼装。"""
+        """一行会话：``list_sessions`` 与 ``search_sessions`` 共用同一套拼装。
+
+        顺带带上 ``source``（首轮是从哪个入口进来的）：Web 历史面板要能一眼分清
+        "这条是 QQ 上聊的、那条是网页上聊的"，光看 ``qq:1904625008`` 这种 id 认不出来。
+        """
         first = self.store.execute(
-            "SELECT user_text FROM chat_log WHERE id = ?", (row["first_id"],)
+            "SELECT user_text, source FROM chat_log WHERE id = ?", (row["first_id"],)
         ).fetchone()
         default_title = str((first["user_text"] if first else "") or "")[:TITLE_LIMIT]
         return {
             "session_id": row["session_id"],
             "turns": row["turns"],
             "last_at": row["last_at"],
+            "source": str(first["source"]) if first else "",
             "title": titles.get(str(row["session_id"])) or default_title,
         }
 
@@ -541,6 +579,8 @@ class SessionManager:
             parts.append(TURN_CONTRACT_REMEMBER)
         if self.turn_intent == "MEMORY_EDIT":
             parts.append(TURN_CONTRACT_MEMORY_EDIT)
+        if self.turn_intent == "RESCHEDULE":
+            parts.append(TURN_CONTRACT_RESCHEDULE)
         if self.extra_contract:
             parts.append(self.extra_contract)
         return "\n".join(parts)

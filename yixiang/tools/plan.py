@@ -1,4 +1,4 @@
-"""计划工具：create_plan / add_task / list_today / complete_task（TECH §9.2）。
+"""计划工具：create_plan / add_task / list_today / complete_task / reschedule_task（TECH §9.2）。
 
 ``list_today`` 是 D-02 的主角：**严格只返回今日 items，不编造**。
 它的 description 里也写着这句，因为工具返回什么、模型说什么，靠的是同一份契约。
@@ -11,7 +11,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime
 
-from yixiang.tools.memo import parse_when
+from yixiang.tools.memo import parse_day, parse_when
 
 VALID_STATUS = ("done", "skipped")
 
@@ -135,3 +135,31 @@ def complete_task(
     with conn:
         conn.execute("UPDATE plan_items SET status = ? WHERE id = ?", (status, item_id))
     return json.dumps({"ok": True, "item_id": item_id, "status": status}, ensure_ascii=False)
+
+
+def reschedule_task(
+    conn: sqlite3.Connection, now: Callable[[], datetime], item_id: int, date: str
+) -> str:
+    """把一条任务挪到另一天（只动 ``date``，内容 / 状态 / 所属计划都不动）。
+
+    日期用的是严格解析（``parse_day``）：用户说"挪到本周"这种**没落到某一天**的
+    说法时返回可行动的错误，让模型回去换算成具体日期再调一次，而不是挑一天写进库
+    ——"改期改错了"比"改期没改成"更难发现（下次看 ``list_today`` 时它已经不在
+    该在的位置上了）。
+    """
+    current = now()
+    row = conn.execute("SELECT id, date FROM plan_items WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        return f"Error: 没有 item_id={item_id} 的任务（先调 list_today 看当前 id）"
+    parsed = parse_day(date, current)
+    if parsed is None:
+        return (
+            f"Error: date={date!r} 说不到具体哪一天（今天是 {current.date().isoformat()}）；"
+            "请传 YYYY-MM-DD，或'明天 / 周五'这种写法"
+        )
+    day = parsed.date().isoformat()
+    with conn:
+        conn.execute("UPDATE plan_items SET date = ? WHERE id = ?", (day, item_id))
+    return json.dumps(
+        {"ok": True, "item_id": item_id, "date": day, "from": row["date"]}, ensure_ascii=False
+    )

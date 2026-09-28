@@ -7,7 +7,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![uv](https://img.shields.io/badge/deps-uv-DE5FE9)
 ![no framework](https://img.shields.io/badge/Agent%20Loop-%E8%87%AA%E7%A0%94%EF%BC%8C%E6%97%A0%20LangChain-orange)
-![tests](https://img.shields.io/badge/deterministic%20382%20passed-8~10s-brightgreen)
+![tests](https://img.shields.io/badge/deterministic%20384%20passed-8~10s-brightgreen)
 ![offline](https://img.shields.io/badge/%E7%A6%BB%E7%BA%BF%E5%8F%AF%E9%AA%8C%E8%AF%81-%E6%97%A0%E9%9C%80%20API%20Key-success)
 ![cost](https://img.shields.io/badge/%E5%8D%95%E6%97%A5%E6%88%90%E6%9C%AC-%C2%A50.21%E2%80%93%C2%A50.48-blue)
 
@@ -128,7 +128,7 @@ OneBot v11 反向 WebSocket，配 NapCat 之类的一侧。Windows 上有一键�
 
 **RAG 语料**：`source_id` 幂等入库（简介没变就跳过且不重嵌入）、中文混合检索（jieba 预分词 + LIKE 兜底 + RRF + 硬过滤 + 口味软加权）、推荐去重（7 天窗口，对话与日报共用）、`ops explain-search` 五段可解释（FTS / 向量 / RRF / 过滤 / 加权）、`rag eval` golden 回归、嵌入不可用时降级纯 FTS5（trace 记 `E_EMBED_UNAVAILABLE`，用户无感）。外部内容一律 `<external_content>` 包裹。
 
-**工具**：注册表里第 19 个具名工具（备忘 / 计划 / 记忆管理 / 影视 / 日报 / `read_file`），路径、SQL、命令一律由代码拼装，不由模型输出拼接——模型可以建议，只有代码做决定。
+**工具**：注册表里第 21 个具名工具（备忘 / 计划 / 改期 / 记忆管理 / 影视 / 日报 / `read_file`），路径、SQL、命令一律由代码拼装，不由模型输出拼接——模型可以建议，只有代码做决定。
 
 **评测与运维**：确定性用例、judge 10 条 rubric、检索 golden 回归、发布门禁五项、trace / usage / doctor / backup / 恢复演练、常驻 job（巩固兜底 / 每日汇总 / 周巡检，异常隔离——失败可见，绝不杀主链路）。
 
@@ -138,7 +138,7 @@ OneBot v11 反向 WebSocket，配 NapCat 之类的一侧。Windows 上有一键�
 
 | 指标 | 值 | 口径 |
 |---|---|---|
-| 离线确定性用例 | **382 passed, 1 deselected**（36 个文件，~9 秒） | `-m "not live"`，离线、零成本、零抖动 |
+| 离线确定性用例 | **399 passed, 1 deselected**（36 个文件，~8 秒） | `-m "not live"`，离线、零成本、零抖动 |
 | 检索 top-3 命中率（CI 口径） | **90.0%（18/20）· MRR 0.792** | 31 部语料 + `hash` 假嵌入 |
 | 检索 top-3 命中率（真语料 + 真嵌入） | **90.0%（18/20）· MRR 0.792** | 333 部语料 + `bge-small-zh-v1.5` |
 | 嵌入不可用降级 | **85.0%（17/20）** | 纯 FTS5，产品仍然可用 |

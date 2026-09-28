@@ -18,7 +18,7 @@ from datetime import timedelta
 import pytest
 from fake_provider import FakeProvider, text_reply, tool_round
 
-from yixiang.tools.memo import parse_when
+from yixiang.tools.memo import parse_day, parse_when
 
 
 def test_d01_memo_call_parses_relative_due_at(registry, session, conn, turn):
@@ -92,6 +92,65 @@ def test_unparseable_due_at_degrades_to_no_deadline_with_a_warning(registry, con
     payload = json.loads(outcome.output)
     assert payload["due_at"] is None and "warning" in payload
     assert conn.execute("SELECT due_at FROM memos").fetchone()["due_at"] is None
+
+
+def test_reschedule_memo_moves_the_deadline_and_keeps_the_note(registry, conn):
+    """改期只动 ``due_at``：正文与完成状态都不许被顺手改掉。"""
+    first = json.loads(
+        registry.run("add_memo", {"content": "交材料", "due_at": "2026-09-27"}).output
+    )
+
+    moved = registry.run("reschedule_memo", {"id": first["id"], "due_at": "明天"})
+
+    assert moved.ok is True
+    payload = json.loads(moved.output)
+    assert payload["due_at"] == "2026-09-20T09:00:00+08:00"
+    assert payload["from"] == "2026-09-27T09:00:00+08:00"
+    row = conn.execute(
+        "SELECT content, done, due_at FROM memos WHERE id = ?", (first["id"],)
+    ).fetchone()
+    assert row["content"] == "交材料" and row["done"] == 0
+    # 改完之后两个入口都按新日期算：list_memos 排序，以及 list_today 的"到期备忘"
+    assert "2026-09-20T09:00:00+08:00" in registry.run("list_memos", {}).output
+    assert "交材料" in registry.run("list_today", {"date": "2026-09-20"}).output
+    assert "交材料" not in registry.run("list_today", {"date": "2026-09-27"}).output
+
+
+def test_reschedule_memo_rejects_unknown_id_and_unresolvable_time(registry):
+    missing = registry.run("reschedule_memo", {"id": 9999, "due_at": "明天"})
+    assert missing.ok is False
+    assert missing.output.startswith("Error") and "list_memos" in missing.output
+
+    memo = json.loads(registry.run("add_memo", {"content": "交材料"}).output)
+    # 说不到具体某一天（"本周""随便写写"）时返回 Error，不替用户挑一天写进库
+    for vague in ("本周", "下周", "随便写写"):
+        outcome = registry.run("reschedule_memo", {"id": memo["id"], "due_at": vague})
+        assert outcome.ok is False, vague
+        assert outcome.output.startswith("Error"), vague
+    assert registry.run("list_memos", {}).output.count("无截止时间") == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-09-25", "2026-09-25"),
+        ("明天", "2026-09-20"),
+        ("周五中午", "2026-09-25"),
+        ("3点", "2026-09-19"),  # 说了一个时刻也算"说了哪一天"
+        ("本周", None),  # 只说了哪一周、没说哪天 → 不猜
+        ("下周", None),
+        ("随便写写", None),
+        ("", None),
+    ],
+)
+def test_parse_day_only_accepts_a_day_the_user_actually_named(clock, text, expected):
+    """``parse_day`` 是 ``parse_when`` 的严格版：说不清哪一天就 ``None``。
+
+    ``parse_when`` 必须给一个时刻（兜底"今天 9 点、已过则明天"），所以它会把
+    "随便写写" 解析成明天——那对"什么时候提醒我"够用，对"改期"就是替用户拍板。
+    """
+    parsed = parse_day(text, clock.now())
+    assert (parsed.date().isoformat() if parsed else None) == expected
 
 
 @pytest.mark.parametrize(

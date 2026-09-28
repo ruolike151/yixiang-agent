@@ -12,7 +12,11 @@ import json
 
 from fake_provider import FakeProvider, text_reply, tool_round
 
-from yixiang.runtime.session import SessionManager
+from yixiang import memory
+from yixiang.app import App
+from yixiang.memory import semantic
+from yixiang.runtime.session import SessionManager, detect_intent
+from yixiang.tools.registry import build_registry
 
 
 def seed(registry) -> dict[str, int]:
@@ -116,6 +120,113 @@ def test_adding_a_task_to_an_unknown_plan_is_refused(registry):
     )
     assert outcome.ok is False
     assert outcome.output.startswith("Error") and "create_plan" in outcome.output
+
+
+def test_reschedule_task_moves_the_date_and_list_today_follows(registry, conn):
+    """改期只动 ``date``：内容、状态、所属计划一个都不许被顺手改掉。
+
+    结果侧故意查两处：库里那一列，以及 ``list_today`` 看不看得见——只改库、
+    面板还按老日期过滤的话，"挪好了"就只是句空话。
+    """
+    ids = seed(registry)
+
+    moved = registry.run("reschedule_task", {"item_id": ids["tomorrow"], "date": "2026-09-19"})
+
+    assert moved.ok is True
+    payload = json.loads(moved.output)
+    assert payload["date"] == "2026-09-19" and payload["from"] == "2026-09-20"
+    row = conn.execute(
+        "SELECT content, status, plan_id FROM plan_items WHERE id = ?", (ids["tomorrow"],)
+    ).fetchone()
+    assert row["content"] == "写向量检索 demo" and row["status"] == "todo"
+    assert row["plan_id"] == ids["plan"]
+    assert "写向量检索 demo" in registry.run("list_today", {}).output
+    assert "写向量检索 demo" not in registry.run("list_today", {"date": "2026-09-20"}).output
+
+
+def test_reschedule_task_parses_natural_language_and_refuses_to_guess(registry):
+    ids = seed(registry)
+
+    moved = registry.run("reschedule_task", {"item_id": ids["today"], "date": "明天"})
+    assert json.loads(moved.output)["date"] == "2026-09-20"
+
+    missing = registry.run("reschedule_task", {"item_id": 9999, "date": "2026-09-20"})
+    assert missing.ok is False
+    assert missing.output.startswith("Error") and "list_today" in missing.output
+
+    # "本周"只说了哪一周、没说哪一天：宁可让模型回去说明确，也不替用户挑一天写进库
+    vague = registry.run("reschedule_task", {"item_id": ids["today"], "date": "本周"})
+    assert vague.ok is False and vague.output.startswith("Error")
+
+
+def test_a_reschedule_turn_lands_in_the_database(registry, session, conn, turn):
+    """触发断言：用户说"挪"，这一轮就得真调到 ``reschedule_task``。
+
+    上一轮的真实事故是模型回了"挪好了"而 ``tool_calls`` 为空、库里没动——
+    所以这里断言的不是回复文案，而是 DB 那一列真的换了值。
+    """
+    ids = seed(registry)
+    provider = FakeProvider(
+        tool_round(("reschedule_task", {"item_id": ids["tomorrow"], "date": "2026-09-19"})),
+        text_reply("挪好了：写向量检索 demo 改到今天。"),
+    )
+
+    result = turn(session, registry, provider, "把明天那条挪到今天")
+
+    assert [event.tool for event in result.tool_calls] == ["reschedule_task"]
+    assert result.tool_calls[0].ok is True
+    row = conn.execute("SELECT date FROM plan_items WHERE id = ?", (ids["tomorrow"],)).fetchone()
+    assert row["date"] == "2026-09-19"
+
+
+def test_reschedule_intent_injects_the_contract(settings, conn, clock):
+    """S8 契约只在说了"挪"的轮次注入，且写明"只在回复里说挪好了等于没挪"。"""
+    asked = SessionManager(settings, store=conn, session_id="cli:test", clock=clock)
+    asked.begin_turn("把周五那条挪到本周")
+
+    contract = asked.turn_contract_block()
+
+    assert detect_intent("把周五那条挪到本周") == "RESCHEDULE"
+    assert "reschedule_task" in contract and "reschedule_memo" in contract
+    assert "已经挪好了" in contract
+
+    chatty = SessionManager(settings, store=conn, session_id="cli:test", clock=clock)
+    chatty.begin_turn("今天有点累，随便聊聊")
+    assert chatty.turn_intent == ""
+    assert chatty.turn_contract_block() == ""
+
+
+def test_a_reschedule_claim_without_a_tool_call_is_retried(settings, conn, clock, deps):
+    """把上一轮真实事故变成一条回归：模型回"挪好了"却没调工具 → 纠错重试一次。
+
+    契约（S8）只是"让模型更可能调"，真正兜底的是这条后验校验：本轮没成功调
+    ``reschedule_task`` / ``reschedule_memo`` 就追加提醒重跑一遍 loop，与
+    "记住"轮（``_verify_memory_write``）同一个范式。
+    """
+    ids = seed(build_registry(settings, deps))
+    provider = FakeProvider(
+        text_reply("挪好了：写向量检索 demo 改到今天。"),  # 第一次：没调工具
+        tool_round(
+            ("reschedule_task", {"item_id": ids["tomorrow"], "date": "2026-09-19"})
+        ),
+        text_reply("挪好了：写向量检索 demo 改到今天。"),
+    )
+    app = App.from_settings(
+        settings, provider=provider, clock=clock, conn=conn, embedder=semantic.HashEmbedder()
+    )
+    try:
+        result = app.ask("把明天那条挪到今天", stream=False)
+
+        assert [event.tool for event in result.tool_calls] == ["reschedule_task"]
+        assert result.tool_calls[0].ok is True
+        row = conn.execute(
+            "SELECT date FROM plan_items WHERE id = ?", (ids["tomorrow"],)
+        ).fetchone()
+        assert row["date"] == "2026-09-19"
+        assert len(provider.requests) == 3  # 1 次只说话 + 1 次工具 + 1 次收尾
+    finally:
+        app.close()
+        memory.reset()
 
 
 def test_tool_trail_is_folded_into_history_not_the_raw_output(registry, session, conn, turn):

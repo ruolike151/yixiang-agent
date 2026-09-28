@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from yixiang.runtime.session import TITLE_LIMIT
+from yixiang.runtime.session import TITLE_LIMIT, SessionManager
 
 CREATED_AT = "2026-09-19T10:00:00+08:00"
 
@@ -68,6 +68,29 @@ def test_search_hits_reply_text_not_only_the_title(session):
     everything = {item["session_id"] for item in session.search_sessions("")}
     assert everything == {"cli:test", "cli:20260919-1000-复习"}
     assert session.search_sessions("完全不存在的话") == []
+
+
+def test_session_rows_carry_the_source_of_each_session(settings, conn, clock):
+    """列表行带上 ``source``：网页历史面板要能一眼分出哪条是 QQ 上聊的。
+
+    两个入口各有自己的命名空间与来源（TECH §10.2.2），但对用户来说"哪条会话
+    是从哪个入口进来的"得看得见——光看 ``qq:1904625008`` 这种 id 认不出来。
+    """
+    web = SessionManager(
+        settings, store=conn, session_id="web:default", source="web", clock=clock
+    )
+    web.add_exchange("网页上聊的", "记下了。")
+    qq = SessionManager(
+        settings, store=conn, session_id="qq:1904625008", source="qq", clock=clock
+    )
+    qq.add_exchange("QQ 上聊的", "收到。")
+
+    rows = {row["session_id"]: row for row in web.list_sessions()}
+    assert rows["web:default"]["source"] == "web"
+    assert rows["qq:1904625008"]["source"] == "qq"
+
+    # 搜索走的是同一套拼装（前端两个接口共用一份渲染），来源也得带上
+    assert [item["source"] for item in web.search_sessions("QQ 上聊的")] == ["qq"]
 
 
 def test_export_is_chronological_and_complete(session):

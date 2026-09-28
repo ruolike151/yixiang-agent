@@ -243,8 +243,13 @@ class ConsoleAPI:
         return self.sessions() | {"current": target}
 
     def new_session(self, name: str | None = None) -> dict[str, Any]:
-        """开一个新会话：``web:20260920-1530[-名字]``（与 CLI ``/new`` 同规则）。"""
-        self.app.session.new_session(name)
+        """开一个新会话：``web:20260920-1530[-名字]``（与 CLI ``/new`` 同规则）。
+
+        **来源写死 ``web``**：站在 QQ 会话里点新会话时，沿用原 source 会造出
+        ``qq:<时间戳>``——那条会话既不是 QQ 来的（QQ 的会话键永远是自己那个号），
+        又会把 QQ 的往来拆成好几条，网页历史里就越看越乱。
+        """
+        self.app.session.new_session(name, source="web")
         return self.sessions()
 
     def transcript(self, session_id: str | None = None, limit: int = 200) -> dict[str, Any]:

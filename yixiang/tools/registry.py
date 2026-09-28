@@ -353,6 +353,32 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
     )
     registry.register(
         Tool(
+            name="reschedule_memo",
+            description=(
+                "改一条备忘的截止时间（只动时间，正文与完成状态都不动）。"
+                "用于：'那条交材料挪到周五'、'取快递推迟到明天'。"
+                "不要用于：标记完成（那是 finish_memo）、新加一条备忘（那是 add_memo）。"
+                "需要先用 list_memos 拿到 id。due_at 可传 ISO8601 或自然语言（明天 / 周五中午）；"
+                "'本周'这种没落到某一天的说法会被拒绝，先按当前时间换算成日期再传。"
+                "返回：{\"ok\": true, \"id\": ..., \"due_at\": ...}；id 不存在或日期说不清时返回 Error。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "备忘 id（来自 list_memos / list_today）"},
+                    "due_at": {
+                        "type": "string",
+                        "description": "新的截止时间，ISO8601（2026-09-28T09:00）或自然语言（明天 / 周五中午）",
+                        "example": "2026-09-28T09:00",
+                    },
+                },
+                "required": ["id", "due_at"],
+            },
+            fn=partial(memo.reschedule_memo, conn, now),
+        )
+    )
+    registry.register(
+        Tool(
             name="create_plan",
             description=(
                 "建一个学习/行动计划（多天任务的容器，先建计划再加任务）。"
@@ -424,6 +450,32 @@ def build_registry(settings: Settings, deps: Deps) -> ToolRegistry:
                 "required": ["item_id"],
             },
             fn=partial(plan.complete_task, conn, now),
+        )
+    )
+    registry.register(
+        Tool(
+            name="reschedule_task",
+            description=(
+                "把一条已排期的任务改到另一天（只动日期，内容与状态都不动）。"
+                "用于：'把今天那条挪到周五'、'这项推迟到下周'。"
+                "不要用于：标记完成 / 跳过（那是 complete_task）、加一条新任务（那是 add_task）。"
+                "需要先用 list_today 拿到 item_id。date 接受 YYYY-MM-DD 或'明天 / 周五'；"
+                "'本周'这种没落到某一天的说法会被拒绝，先按当前时间换算成日期再传。"
+                "返回：{\"ok\": true, \"item_id\": ..., \"date\": ...}；item_id 不存在时返回 Error。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer", "description": "任务 id（来自 list_today）"},
+                    "date": {
+                        "type": "string",
+                        "description": "改到哪一天，YYYY-MM-DD 或'明天 / 周五'",
+                        "example": "2026-09-25",
+                    },
+                },
+                "required": ["item_id", "date"],
+            },
+            fn=partial(plan.reschedule_task, conn, now),
         )
     )
     # ── PART 2 记忆工具（§9.2）──

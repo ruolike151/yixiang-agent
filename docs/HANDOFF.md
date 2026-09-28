@@ -13,7 +13,7 @@
 
 ```text
 ruff check .                                  → All checks passed
-pytest evals/deterministic -m "not live" -rs  → 382 passed, 1 deselected in 9.01s
+pytest evals/deterministic -m "not live" -rs  → 399 passed, 1 deselected in 8.8s
 yixiang skills validate                       → 通过
 python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"全过，可以合并"
 ```
@@ -21,11 +21,34 @@ python -m yixiang.ops.release_gate            → 硬门禁 4/4 通过，结论"
 那 1 条 `deselected` 是标了 `-m live` 的真模型用例（`evals/live/`），nightly / 发版前才跑。**已无 `skip`**：
 D-13（QQ 幂等）与 D-27（定时补发）随 QQ 网关与调度器落地转成实跑，见 §2.1。
 
+**刚补的一件事**（2026-09-28，"改期根本没有出口"）：用户在 QQ 里说"把这几条挪到本周"，agent 回
+"挪好了，三项都落在本周"，但那一轮 `tool_calls` 是**空的**、库里 `memos.due_at` 还是老值、
+`plan_items.date` 一动不动。根因不是模型偷懒，是**结构缺口**：注册表里压根没有"改期"这个工具
+（`add_memo` 只能在创建时定 `due_at`，`complete_task` 只能标完成，两个都是单向门），模型唯一
+能"改期"的方式就是在回复里吹一句。补法三层：① 新增 `reschedule_memo(id, due_at)` 与
+`reschedule_task(item_id, date)`（注册表 19 → **21**），各自只 `UPDATE` 那一列，内容 / 状态 /
+所属计划一律不动；② 时间解析走 `parse_day`——`parse_when` 的**严格版**，"本周 / 下周 / 随便写写"
+这类**说不清是哪一天**的说法直接返回可行动错误（带上今天日期与举例），**绝不替用户挑一天**
+（改错比没改更难发现）；③ 复用 §7.9 那套护栏：`detect_intent` 命中 `挪到 / 改到 / 推迟 / 顺延`
+就打 `RESCHEDULE`，注入 S8 契约；本轮没成功调 `reschedule_*` 时再**纠错重试一次**（`_verify_reschedule`，
+与"记住"轮的 `_verify_memory_write` 同一范式）。新增 13 条用例（`test_tools_plan.py` 5 → 10、
+`test_tools_memo.py` 17 → 27）。
+
+**刚修的一件事**（2026-09-28，"QQ 上的任务在 Web 端拿不到"）：根因不在网关，在 **Web 控制台开新会话时的
+命名空间**。`ConsoleAPI.new_session()` 直接调 `SessionManager.new_session()`，后者拿**当前会话的 source**
+拼新 id——而 `switch()` 会刻意沿用被打开的会话的来源。于是"先在 Web 里翻看一条 `qq:` 会话、再点『新会话』"
+就造出 `qq:20260928-2251-xxx` 这种**假 QQ 会话**：QQ 的往来被拆成好几条，`chat_log.source` 也说假话，
+历史面板越看越乱。两处一起改：① `new_session(name, *, source=None)` 支持显式指定来源，`ConsoleAPI.new_session()`
+固定传 `source="web"`（CLI 的 `/new` 不传，仍落 `cli:`，行为不变；`switch()` 沿用原 source 的逻辑是对的，
+保留不动）；② `_session_row()` 顺带把 `source` 带出来（`list_sessions` / `search_sessions` 共用同一套拼装），
+历史行多一个来源徽章（QQ / 命令行；网页来源不标），一眼能看出哪条是哪来的。新增 2 条用例
+（`test_web.py` 35 → 36、`test_sessions.py` 5 → 6）。
+
 **刚做完的一件事**（2026-09-27，`memory.md` 只能看不能改）：用户说"我这边 memory.md 还是原来的"——
 agent 手里确实**没有写这个文件的出口**。`data/memory.md` 每轮整份注入 S4，是人机共治的核心文件，但唯一
 改动路径是"先写 facts、再靠 `sync.write_memory_doc()` 回写"，所以**手写笔记段**（无 id、不入库）与整段
 重排 / 合并完全使不上劲——agent 只能在回复里列一张"改好了"的清单，文件一个字没动。现在给现有
-`manage_memory` 加 `action="edit"`（**不新增工具**，仍是那 19 个；`test_web.py` 钉着 `tools == 19`），只有三个
+`manage_memory` 加 `action="edit"`（**不新增工具**，仍是那 21 个；`test_web.py` 钉着 `tools == 21`），只有三个
 精确操作 `add` / `replace` / `remove`，**刻意不做整份 rewrite**（`op="rewrite"` 直接报错）。全走现成机制：
 `core_files.parse_memory_md` + `insert_lines` / `remove_lines` + `write_core_file`（原子写 + 150 行上限，
 超限整份拒绝、文件不动）→ 紧接着 `sync.sync_memory_md(conn)`（文件为准）。带 id 的行删掉是**软删**，
@@ -149,7 +172,7 @@ uv run yixiang rag eval                                                 # 真实
 四个真实的选择点，按踩坑概率排序：
 
 1. **main 必须支持工具调用（function calling）**。工具是主链路的骨架（`add_memo` / `search_media` /
-   `read_file`…共 19 个），模型不会调工具 = 整个 Agent 只剩聊天。⚠️ **`deepseek-reasoner` 在
+   `read_file`…共 21 个），模型不会调工具 = 整个 Agent 只剩聊天。⚠️ **`deepseek-reasoner` 在
    `pricing.py` 的价目表里有，但它不支持工具调用**，换上去主链路会哑掉——**代码里没有任何拦截**，
    这是最容易踩的一个坑。换 main 之前先确认候选模型支持 OpenAI 风格的 `tools` + 流式 `tool_calls` 分片。
 2. **价目表是手工维护的，换模型必须同时改 `yixiang/ops/pricing.py`**。现在是
@@ -279,7 +302,7 @@ $env:PYTHONIOENCODING="utf-8"          # Windows 上中文输出不乱码（必�
 
 .venv\Scripts\ruff.exe check .                                        # ① All checks passed
 .venv\Scripts\python.exe -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
-                                                                       # ② 382 passed, 1 deselected
+                                                                       # ② 399 passed, 1 deselected
 $env:YIXIANG_EMBED_BACKEND="hash"
 .venv\Scripts\python.exe -m yixiang.ops.release_gate                   # ③ 硬门禁 4/4
 .venv\Scripts\python.exe -m yixiang doctor                             # ④ 八项自检

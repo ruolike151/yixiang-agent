@@ -1166,10 +1166,12 @@ class Tool:
 | `add_memo` | P0 | `content, due_at(ISO), idempotency_key?` | `{"id": 12, "due_at": ...}` | ✅ |
 | `list_memos` | P0 | `status?(open/done), due_before?` | 文本列表 | 只读 |
 | `finish_memo` | P0 | `id` | `{"ok": true}` | ✅ |
+| `reschedule_memo` | P0 | `id, due_at(ISO / 人话)` | `{"ok": true, "id": ..., "due_at": ...}` | ✅ |
 | `create_plan` | P0 | `title, goal, start_date, end_date` | `{"plan_id": 3}` | — |
 | `add_task` | P0 | `plan_id, date, content, est_minutes?` | `{"item_id": 8}` | — |
 | `list_today` | P0 | — | 今日任务 + 到期备忘 | 只读 |
 | `complete_task` | P0 | `item_id, status(done/skipped)` | `{"ok": true}` | ✅ |
+| `reschedule_task` | P0 | `item_id, date(YYYY-MM-DD / 人话)` | `{"ok": true, "item_id": ..., "date": ...}` | ✅ |
 | `save_memory` | P0 | `subject, content` | `{"id": 21, "action": "insert"}` | — |
 | `manage_memory` | P0 | `action(search/update/delete/restore/edit), id?, query?, content?, op?, match?, section?` | search 返回带 id 的编号列表；`edit` 只由用户明确要求触发（`add` / `replace` / `remove`，唯一命中才动手） | 部分 |
 | `update_soul` | P0 | `rule` | `{"ok": true}` | 只追加 |
@@ -1186,8 +1188,14 @@ class Tool:
 | `pixiv_download` | P2 | `pid` | 文件路径 | 只读外部（**设计位，尚未落盘**） |
 
 表里的 P1 三行 `bangumi_*` 是 2026-09-21 新增的 live 工具（分工见 §9.5）；`read_file` 是
-Web 控制台上传件的读取出口。**P2 两行是设计位、尚未落盘**——数"现在有几个工具"时以
-`yixiang/tools/registry.py` 的 `build_registry()` 为准（当前 **19** 个）。
+Web 控制台上传件的读取出口；两个 `reschedule_*` 是"改期"的出口（`reschedule_task` 改
+`plan_items.date`、`reschedule_memo` 改 `memos.due_at`），与 `complete_task` / `finish_memo`
+（标记完成）严格分开——改期解析不出**具体某一天**时返回可行动的错误，不替用户挑一天。
+改期还复用 §7.9 那套"打标 → S8 契约 → 后验校验"的护栏：`detect_intent` 命中
+`挪到 / 改到 / 推迟 / 顺延` 等词就打 `RESCHEDULE`，本轮没成功调 `reschedule_*` 时纠错重试
+一次——因为"只在回复里说挪好了"这条路上一次是真实事故（`tool_calls` 为空、库里没动）。
+**P2 两行是设计位、尚未落盘**——数"现在有几个工具"时以
+`yixiang/tools/registry.py` 的 `build_registry()` 为准（当前 **21** 个）。
 
 两个关键工具的完整 schema（其余按此风格写）：
 
@@ -1766,8 +1774,8 @@ evals/
     conftest.py               # 临时 data 目录 fixture、假 Settings、内存/文件 DB
     fake_provider.py          # 脚本化 Provider（§13.2）
     test_provider.py          # 重试、超时、usage 记账、角色路由
-    test_tools_memo.py        # add_memo / list_memos / finish_memo / 时间解析
-    test_tools_plan.py        # create_plan / add_task / list_today / complete_task
+    test_tools_memo.py        # add_memo / list_memos / finish_memo / 时间解析 / reschedule_memo
+    test_tools_plan.py        # create_plan / add_task / list_today / complete_task / reschedule_task
     test_memory_write.py      # save_memory / manage_memory / 记住指令
     test_memory_sync.py       # memory.md ⟷ facts 双向同步（最需要覆盖）
     test_memory_capacity.py   # 容量上限、淘汰、置顶保护
@@ -1795,7 +1803,7 @@ evals/
 
 > 上面是**设计时的全集**，实际目录以仓库里的 `evals/` 为准——收口期后补的
 > `test_web.py`（15 条）、`test_event_loop.py`（8 条）、`test_cli_gateway.py`、`test_doctor.py` 等不在本清单里，
-> 不复述以免第二处真相。当前口径：`382 passed, 1 deselected`（见 `NUMBERS.md`）。
+> 不复述以免第二处真相。当前口径：`399 passed, 1 deselected`（见 `NUMBERS.md`）。
 
 四层，依赖与门禁各不相同：
 

@@ -167,6 +167,16 @@ function badge(text, tone = "") {
   return h("span", { class: `badge ${tone}`.trim(), text });
 }
 
+/* 会话来源：各入口各聊各的（TECH §10.2.2），列表里得看得出来这一条是从哪进来的。
+   网页自己不用标——在网页上看到的多半就是它，标了反而吵；
+   零轮的 ``source``（老库 / 异常数据）也不猜，宁可不标。 */
+const SOURCE_LABELS = { qq: "QQ", cli: "命令行" };
+
+function sourceBadge(session) {
+  const label = SOURCE_LABELS[session.source];
+  return label ? badge(label) : null;
+}
+
 /* ------------------------------------------------------------------ API */
 class ApiError extends Error {
   constructor(message, payload, status) {
@@ -1258,6 +1268,7 @@ async function renderHistory() {
               text: `${session.session_id} · ${session.turns} 轮 · ${fmtTime(session.last_at)}`,
             })
           ),
+          sourceBadge(session),
           active ? badge("当前", "ok") : null
         ),
         h(

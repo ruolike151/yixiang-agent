@@ -1,7 +1,7 @@
 """Bangumi 接入的文档口径：把会漂移的句子钉成断言。
 
-Task 26/27/28 之后有三样东西会漂：注册表里的**工具数**（16 → 19）、TECH §9.2 的
-**工具清单**（少了三个 Bangumi 工具，也没写 `read_file`）、**数据边界**里
+Task 26/27/28 之后有三样东西会漂：注册表里的**工具数**（16 → 19 → 21）、TECH §9.2 的
+**工具清单**（少了三个 Bangumi 工具，也没写 `read_file` / 两个 `reschedule_*`）、**数据边界**里
 "对话阶段也会出网"这一行（live 检索是新的出网面）。这份用例只钉这几处。
 
 分工：doctor 项数 / 门禁项数 / 前端栏数 / 卡 3 数字的用例在
@@ -52,7 +52,7 @@ def test_the_tool_table_lists_every_registered_tool():
 
 def test_the_tool_count_in_every_doc_matches_the_registry():
     n = len(_registered_tools())
-    assert n == 19, f"注册表应该是 19 个工具（16 + Task 27 的 2 + Task 28 的 1），实际 {n}"
+    assert n == 21, f"注册表应该是 21 个工具（16 + Task 27 的 2 + Task 28 的 1 + 改期 2），实际 {n}"
     for rel in TOOL_COUNT_DOCS:
         found = [int(m) for m in re.findall(r"(?:第|共)\s*(\d+)\s*个", _read(rel))]
         assert found, f"{rel} 里找不到「第 N 个工具」这类句子，用例失去意义"

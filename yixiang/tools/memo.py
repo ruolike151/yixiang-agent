@@ -1,4 +1,4 @@
-"""备忘工具：add_memo / list_memos / finish_memo + 相对时间解析（TECH §9.2）。
+"""备忘工具：add_memo / list_memos / finish_memo / reschedule_memo + 相对时间解析（TECH §9.2）。
 
 为什么单独写解析器：模型传进来的 ``due_at`` 常常是"周五中午"这种人话。
 与其让它自己算出错误日期，不如在工具侧统一解析成 ISO8601——**解析错了能被
@@ -129,6 +129,42 @@ def _shift_hour(raw: str, hour: int) -> int:
     return hour
 
 
+def _names_a_day(raw: str, now: datetime) -> bool:
+    """这句话里有没有"哪一天"的线索：日期、今天/明天/后天、星期，或一个明确时刻。"""
+    if _parse_iso(raw, now.tzinfo) is not None:
+        return True
+    if any(token in raw for token in _DAY_OFFSETS):
+        return True
+    if _WEEKDAY_RE.search(raw):
+        return True
+    if _CLOCK_RE.search(raw) or _HOUR_RE.search(raw):
+        return True
+    return any(token in raw for token, _ in _PERIOD_HOURS)
+
+
+def parse_day(value: str | None, now: datetime) -> datetime | None:
+    """``parse_when`` 的**严格版**：用户真说了"哪一天"才解析，说不清就 ``None``。
+
+    两个函数的分工是"什么时候"与"哪一天"的区别：``parse_when`` 必须给一个时刻，
+    听不出日期时会兜底成"今天 9 点、已过则明天"——这对"什么时候提醒我"够用；
+    而"改期"是**把用户没说过的一天写进库**，替用户拍板比报错糟糕得多（用户以为
+    挪到本周三，实际躺在本周六）。所以 ``reschedule_*`` 只用这个函数：
+    "本周"（只说了哪一周）、"随便写写"（什么都没说）一律 ``None``，
+    由工具返回可行动的错误。
+
+    返回值仍是**带时区的时刻**（"周五中午"保留 12:00）；只要日期请自己
+    ``.date().isoformat()``。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if now.tzinfo is None:
+        now = now.astimezone()
+    if not _names_a_day(raw, now):
+        return None
+    return parse_when(raw, now)
+
+
 def add_memo(
     conn: sqlite3.Connection,
     now: Callable[[], datetime],
@@ -216,3 +252,30 @@ def finish_memo(
             (to_local_iso(now()), id),
         )
     return json.dumps({"ok": True, "id": id}, ensure_ascii=False)
+
+
+def reschedule_memo(
+    conn: sqlite3.Connection, now: Callable[[], datetime], id: int, due_at: str
+) -> str:
+    """改一条备忘的截止时间（只动 ``due_at``，正文与完成状态不动）。
+
+    与 ``add_memo`` 的口径差别是**故意的**：``add_memo`` 解析不出截止时间就降级成
+    "无截止时间"并给 warning（"这条我记下了，日子回头再说"是合理结局）；而用户说
+    "挪到某天"时解析不出来等于**没挪**，降级保存会让用户以为改好了，所以这里返回 Error。
+    """
+    current = now()
+    row = conn.execute("SELECT id, due_at FROM memos WHERE id = ?", (id,)).fetchone()
+    if row is None:
+        return f"Error: 没有 id={id} 的备忘（先调 list_memos 看当前 id）"
+    parsed = parse_day(due_at, current)
+    if parsed is None:
+        return (
+            f"Error: due_at={due_at!r} 说不到具体哪一天（今天是 {current.date().isoformat()}）；"
+            "请传 ISO8601（2026-09-28T09:00）或'明天 / 周五中午'这种写法"
+        )
+    new_due = to_local_iso(parsed)
+    with conn:
+        conn.execute("UPDATE memos SET due_at = ? WHERE id = ?", (new_due, id))
+    return json.dumps(
+        {"ok": True, "id": id, "due_at": new_due, "from": row["due_at"]}, ensure_ascii=False
+    )

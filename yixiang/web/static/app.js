@@ -13,7 +13,7 @@
 // Markdown 渲染器是独立模块（`markdown.mjs`），解析与建节点分开：
 // 它只往 textContent / createTextNode 写数据，第 5 行的那条约束照样成立。
 import { renderMarkdown } from "./markdown.mjs";
-import { chooseMode, findLineIndex, formatTime, pollDelay, stageMessage, visibleLineIndexes } from "./music.mjs";
+import { chooseMode, DEFAULT_THEME, findLineIndex, formatTime, pollDelay, stateToFoliaEvents, stageMessage, visibleLineIndexes } from "./music.mjs";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -291,6 +291,7 @@ const store = {
   musicProvider: "",
   musicQuery: "",
   musicStage: false,
+  musicEngine: "original",   // Task 10：'original'（MIT，Task 9）| 'folia'（AGPL，Task 10）
   musicAudio: null,
   musicSong: null,
 };
@@ -2664,8 +2665,72 @@ async function openOnlineSong(provider, songId) {
   });
 }
 
+// —— Task 10：两个引擎靠 store.musicEngine 分叉，两条协议**不合并** ——
+// original（MIT，Task 9）：父页发 {type:"midori-lyrics-state", state, mode, theme}
+// folia（AGPL，Task 10）  ：父页发 {type:"midori-lyrics-events", events:[…4 条…]}
+// 舞台侧各认各的，父页按当前引擎挑信封；改成"统一发一条"会直接让一个引擎黑屏。
+const LYRIC_ENGINES = [
+  { engine: "original", label: "Original（6 模式）" },
+  { engine: "folia", label: "Folia（12 模式）" },
+];
+
+function frameUrlFor(engine, mode) {
+  if (engine === "folia") {
+    // 上游 spotify-lyrics-stage.js:334-340 的形状：folia 的模式走 URL 查询串。
+    return `./lyrics-stage/folia/index.html?lyricStage=1&visualizer=${encodeURIComponent(mode)}`;
+  }
+  // original 与 Task 8 逐字一致：模式**不走 URL**，靠 postMessage 送（换歌不重载 iframe）。
+  return "./lyrics-stage/original/index.html";
+}
+
+// folia 的产物会注册 scope 含 /lyrics-stage/folia/ 的 service worker；不先注销，
+// 换引擎 / 换版本时会命中旧缓存（上游 spotify-lyrics-stage.js:47-53 的原样做法）。
+function foliaServiceWorkerReset() {
+  if (!("serviceWorker" in navigator)) return Promise.resolve();
+  return navigator.serviceWorker
+    .getRegistrations()
+    .then((registrations) => Promise.all(
+      registrations
+        .filter((registration) => (registration.scope || "").includes("/lyrics-stage/folia/"))
+        .map((registration) => registration.unregister()),
+    ))
+    .catch(() => {});
+}
+
+function musicStageEngineBar(mode) {
+  const bar = document.createElement("div");
+  bar.className = "music-stage-engines";
+  for (const engine of LYRIC_ENGINES) {
+    bar.append(button(engine.label, {
+      className: store.musicEngine === engine.engine ? "primary" : "ghost",
+      onClick: () => switchLyricEngine(engine.engine),
+    }));
+  }
+  const label = document.createElement("span");
+  label.className = "music-stage-mode";
+  label.textContent = `当前模式：${mode}`;
+  bar.append(label);
+  return bar;
+}
+
+function switchLyricEngine(engine) {
+  if (engine === store.musicEngine) return;
+  store.musicEngine = engine;
+  const frame = document.querySelector(".music-stage-frame");
+  if (frame) {
+    // 顺序有讲究（上游 spotify-lyrics-stage.js:375-379）：
+    // 先把 iframe 甩到 about:blank 断开旧引擎，复位 service worker，再赋真 src。
+    // 直接换 src 会命中旧 SW 的缓存，表现为"切过去了但还是旧引擎的画面"。
+    frame.src = "about:blank";
+    foliaServiceWorkerReset().then(() => {
+      frame.src = frameUrlFor(store.musicEngine, chooseMode(store.music.track, "", store.musicEngine));
+    });
+  }
+  render();
+}
+
 function musicStageCard(state) {
-  const mode = chooseMode(state.track);
+  const mode = chooseMode(state.track, "", store.musicEngine);
   const toggle = button(store.musicStage ? "收起歌词舞台" : "打开歌词舞台", {
     iconName: "layers",
     className: store.musicStage ? "ghost" : "primary",
@@ -2679,14 +2744,15 @@ function musicStageCard(state) {
     text: "点「打开歌词舞台」，它会在这一页里开一块画布，跟着系统里那首歌滚。",
   });
   if (store.musicStage) {
+    const engineBar = musicStageEngineBar(mode);
     const frame = h("iframe", {
       class: "music-stage-frame",
       title: "歌词舞台",
       loading: "lazy",
-      src: "/lyrics-stage/original/index.html",
+      src: frameUrlFor(store.musicEngine, mode),
     });
-    frame.addEventListener("load", () => pushStageState(frame, store.music, mode));
-    body = frame;
+    frame.addEventListener("load", () => postStateToFrame(frame, store.music, mode));
+    body = h("div", { class: "music-stage" }, engineBar, frame);
   }
   return h(
     "section",
@@ -2695,16 +2761,28 @@ function musicStageCard(state) {
     h("p", {
       class: "card-note",
       text:
-        "移植自参考项目 MIT 的 original 渲染器（6 个模式、逐句高亮）——用哪个模式由歌名算出来，" +
-        "同一首歌永远是同一个。",
+        "两套渲染器可切：original（MIT，6 个模式、逐句高亮）与 Folia（AGPL，12 个模式、卡拉 OK 逐字）" +
+        "——用哪个模式由歌名算出来，同一首歌永远同一个。",
     }),
     body
   );
 }
 
-function pushStageState(frame, state, mode) {
-  if (!frame.contentWindow || !state) return;
-  frame.contentWindow.postMessage(stageMessage(state, mode), window.location.origin);
+function postStateToFrame(frame, state, mode) {
+  const target = frame?.contentWindow;
+  if (!target || !state) return;
+  if (store.musicEngine === "folia") {
+    target.postMessage(
+      { type: "midori-lyrics-events", events: stateToFoliaEvents(state) },
+      window.location.origin,
+    );
+    return;
+  }
+  // Task 8 原来那一条，一个字不改（theme 沿用盘上的取值）。
+  target.postMessage(
+    { type: "midori-lyrics-state", state, mode, theme: store.musicTheme ?? DEFAULT_THEME },
+    window.location.origin,
+  );
 }
 
 // 舞台加载完会回一条 midori-lyrics-ready：等它自报家门之后父页再补送一次状态，
@@ -2712,11 +2790,12 @@ function pushStageState(frame, state, mode) {
 window.addEventListener("message", (event) => {
   if (event.origin !== window.location.origin) return;
   const data = event.data;
-  if (!data || data.type !== "midori-lyrics-ready" || data.engine !== "original") return;
+  if (!data || data.type !== "midori-lyrics-ready") return;
+  if (data.engine !== store.musicEngine) return;   // 只认当前引擎的自报家门
   if (!store.musicStage || !store.music) return;
   const frame = document.querySelector(".music-stage-frame");
   if (frame && frame.contentWindow === event.source) {
-    pushStageState(frame, store.music, chooseMode(store.music.track));
+    postStateToFrame(frame, store.music, chooseMode(store.music.track, "", store.musicEngine));
   }
 });
 

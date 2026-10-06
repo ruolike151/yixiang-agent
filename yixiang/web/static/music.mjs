@@ -55,11 +55,24 @@ export function trackIdentity(track) {
   return [track.id, track.title, track.artist, track.durationMs].filter(Boolean).join("|");
 }
 
-/** 同一首歌永远挑同一个模式——不是随机的，所以刷新页面不会闪来闪去。 */
-export function chooseMode(track) {
-  const identity = trackIdentity(track);
-  if (!identity) return ORIGINAL_MODES[0];
-  return ORIGINAL_MODES[hashText(identity) % ORIGINAL_MODES.length];
+/** 同一首歌永远挑同一个模式——不是随机的，所以刷新页面不会闪来闪去。
+ *
+ * 追加的两个参数都是**可选**的：`requestedMode` 是点名要的模式（`"folia:tempera"` 或
+ * 简写 `"tempera"`），`engine` 决定从哪个池子里挑（original 6 / folia 12）。都不传时
+ * 行为与 Task 8 逐字相同；引擎名不认识也退回 original 那 6 个。
+ */
+export function chooseMode(track, requestedMode = "", engine = "original") {
+  const pool = MODES_BY_ENGINE[engine] || ORIGINAL_MODES;
+  const automatic = pool.filter((mode) => mode !== "tempera");
+  const exact = pool.find((mode) => `${engine}:${mode}` === requestedMode);
+  if (exact) return exact;
+  const shorthand = pool.find((mode) => mode === requestedMode);
+  if (shorthand) return shorthand;
+  const identity = [track?.id, track?.title, track?.artist, track?.durationMs]
+    .filter(Boolean)
+    .join("|");
+  if (!identity) return automatic[0];
+  return automatic[hashText(identity) % automatic.length];
 }
 
 function pollValue(polls, key) {
@@ -145,4 +158,112 @@ export function formatTime(ms) {
  */
 export function stageMessage(state, mode, theme = DEFAULT_THEME) {
   return { type: "midori-lyrics-state", state, mode, theme };
+}
+
+// —— Folia 引擎（AGPL-3.0 构建产物，来源与许可见 lyrics-stage/folia/README.md）——
+// 模式名的顺序照上游 spotify-lyrics-stage.js:3-25 的 SPOTIFY_LYRIC_MODES 逐字抄：
+// original 6 个在前、folia 12 个在后。顺序没有语义，但换顺序会让 chooseMode 的
+// 自动挑选结果整体漂移（Task 8 有一条用例钉了 "pixel"），所以别动。
+
+export const FOLIA_MODES = Object.freeze([
+  "classic", "cadenza", "partita", "tilt", "fume", "monet",
+  "claddagh", "pendolo", "diorama", "sonnet", "cappella", "tempera",
+]);
+
+export const LYRIC_MODES = Object.freeze([...ORIGINAL_MODES, ...FOLIA_MODES]);
+
+export const MODES_BY_ENGINE = Object.freeze({
+  original: ORIGINAL_MODES,
+  folia: FOLIA_MODES,
+});
+
+// tempera 是 opt-in（上游原话：New full-scene mode is opt-in; preserve the existing
+// per-track automatic selection.）：进 LYRIC_MODES、但不进自动轮换池。
+export const AUTOMATIC_LYRIC_MODES = Object.freeze(
+  LYRIC_MODES.filter((mode) => mode !== "tempera"),
+);
+
+// 上游的时间戳**自带方括号**：`[mm:ss.cc]`（**厘秒**，不是毫秒）。整首 LRC 是
+// 行与行 join("\n")、**没有尾换行**。方括号在这一层，`lyricLinesToLrc` 里**不再包**。
+export function formatLrcTimestamp(timeMs) {
+  const safeTime = Math.max(0, Math.floor(Number(timeMs) || 0));
+  const minutes = Math.floor(safeTime / 60_000);
+  const seconds = Math.floor((safeTime % 60_000) / 1_000);
+  const centiseconds = Math.floor((safeTime % 1_000) / 10);
+  return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}]`;
+}
+
+export function lyricLinesToLrc(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .filter((line) => line && String(line.text || "").trim())
+    .map((line) => `${formatLrcTimestamp(line.timeMs)}${String(line.text).trim()}`)
+    .join("\n");
+}
+
+// 照上游 spotify-lyrics-stage.js:114-177 与 nowPlayingSource.ts 的 NowPlayingLyricPayload 抄。
+// 三条纪律（写错任何一条都是"舞台没歌词"或"进度条乱跳"，且不报错）：
+//   ① 内层信封的键是 **`event`** 不是 `type`（外层消息才是 type；见 Step 1.2 的提示框）；
+//   ② Track.duration / Lyric.duration 是**秒**，PlayerPauseState.seekbarCurrentPosition
+//      与 PlayerProgress.progress 是**毫秒**；
+//   ③ karaokeLyric 是**原始 QRC 明文串**，原样透传，不解析、不塞进 lines[].words。
+export function stateToFoliaEvents(state, nowMs = Date.now()) {
+  const track = state?.track;
+  const playback = state?.playback || {};
+  const lrc = lyricLinesToLrc(state?.lyrics?.lines || []);
+  const karaokeLyric = String(state?.lyrics?.karaokeLyric || "");
+  if (!track) {
+    return [
+      { event: "Track", data: {} },
+      { event: "Lyric", data: {} },
+      { event: "PlayerPauseState", data: { hasSong: false, isPaused: true, seekbarCurrentPosition: 0 } },
+      { event: "PlayerProgress", data: { progress: 0 } },
+    ];
+  }
+  const durationMs = Math.max(0, Number(track.durationMs) || 0);
+  const sampledAtMs = Math.max(0, Number(playback.sampledAtMs) || 0);
+  // 后端采样的是"墙上时钟"，页面要把它到这一刻的流逝补上，否则播放中进度条会一顿一顿。
+  const sampleAgeMs = playback.isPlaying && sampledAtMs
+    ? Math.max(0, nowMs - sampledAtMs)
+    : 0;
+  const progressMs = Math.min(
+    durationMs || Number.POSITIVE_INFINITY,
+    Math.max(0, Number(playback.positionMs) || 0) + sampleAgeMs,
+  );
+  return [
+    {
+      event: "Track",
+      data: {
+        id: track.id,
+        title: track.title,
+        author: track.artist,          // 上游字段名是 author
+        album: track.album,
+        cover: track.artworkUrl,       // 上游字段名是 cover
+        duration: durationMs / 1000,   // ← 秒
+      },
+    },
+    {
+      event: "Lyric",
+      data: {
+        source: state?.lyrics?.source || "lrclib",
+        title: track.title,
+        author: track.artist,
+        duration: durationMs / 1000,   // ← 秒
+        hasLyric: Boolean(lrc),
+        hasTranslatedLyric: false,     // 翻译 v1 不做，但要如实报 false
+        hasKaraokeLyric: Boolean(karaokeLyric.trim()),
+        lrc,
+        translatedLyric: "",
+        karaokeLyric,
+      },
+    },
+    {
+      event: "PlayerPauseState",
+      data: {
+        hasSong: true,
+        isPaused: !playback.isPlaying,
+        seekbarCurrentPosition: progressMs,   // ← 毫秒
+      },
+    },
+    { event: "PlayerProgress", data: { progress: progressMs } },   // ← 毫秒
+  ];
 }

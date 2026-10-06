@@ -1189,3 +1189,18 @@ code,
   /* 舞台自己有底：深色主题下先铺一层近黑，省掉 iframe 加载时的白闪 */
   background: #05070d;
 }
+
+/* —— Task 10：歌词舞台的引擎切换条 —— */
+.music-stage-engines {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.music-stage-engines .music-stage-mode {
+  margin-left: auto;
+  color: var(--color-fg-mute);
+  font-size: 12px;
+}

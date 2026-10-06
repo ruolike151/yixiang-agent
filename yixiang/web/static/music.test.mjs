@@ -4,15 +4,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AUTOMATIC_LYRIC_MODES,
   DEFAULT_POLL_MS,
+  FOLIA_MODES,
+  LYRIC_MODES,
   MIN_POLL_MS,
   ORIGINAL_MODES,
   chooseMode,
   findLineIndex,
+  formatLrcTimestamp,
   formatTime,
   hashText,
+  lyricLinesToLrc,
   pollDelay,
   stageMessage,
+  stateToFoliaEvents,
   trackIdentity,
   visibleLineIndexes,
 } from "./music.mjs";
@@ -172,4 +178,84 @@ test("stageMessage 的形状就是参考项目那条契约，多一个字段都�
     theme: "night",
   });
   assert.equal(stageMessage(state, "cloud", "day").theme, "day");
+});
+test("LYRIC_MODES 是 18 个：original 6 + folia 12，顺序照上游", () => {
+  assert.equal(LYRIC_MODES.length, 18);
+  assert.deepEqual(LYRIC_MODES.slice(6), FOLIA_MODES);
+  assert.deepEqual(FOLIA_MODES, [
+    "classic", "cadenza", "partita", "tilt", "fume", "monet",
+    "claddagh", "pendolo", "diorama", "sonnet", "cappella", "tempera",
+  ]);
+  assert.equal(AUTOMATIC_LYRIC_MODES.length, 17);
+  assert.ok(!AUTOMATIC_LYRIC_MODES.includes("tempera"), "tempera 是 opt-in，不进自动轮换");
+});
+
+test("chooseMode 按引擎分池：folia 的自动池排除 tempera，显式请求照收", () => {
+  assert.equal(chooseMode(null, "", "folia"), "classic");
+  assert.ok(FOLIA_MODES.includes(chooseMode({ id: "smtc:QQMusic.exe", title: "One Last Kiss" }, "", "folia")));
+  assert.notEqual(chooseMode({ id: "x", title: "y" }, "", "folia"), "tempera");
+  assert.equal(chooseMode({ id: "x" }, "tempera", "folia"), "tempera");
+  assert.equal(chooseMode({ id: "x" }, "folia:cappella", "folia"), "cappella");
+  // 引擎不认识 / 没传 → 退回 original 的 6 个，行为与 Task 8 逐字一致。
+  assert.ok(["luminous", "blueprint", "cinema", "pixel", "cloud", "mindscape"]
+    .includes(chooseMode({ id: "smtc:QQMusic.exe", title: "One Last Kiss" })));
+});
+
+test("formatLrcTimestamp 是 [mm:ss.cc]（厘秒，不是毫秒）", () => {
+  assert.equal(formatLrcTimestamp(0), "[00:00.00]");
+  assert.equal(formatLrcTimestamp(1_234), "[00:01.23]");
+  assert.equal(formatLrcTimestamp(75_450), "[01:15.45]");
+  assert.equal(formatLrcTimestamp(3_723_990), "[62:03.99]");
+  // 上游是 join("\n")，**没有尾换行**；空文本行丢掉。
+  assert.equal(lyricLinesToLrc([{ timeMs: 1_234, text: "嗨" }, { timeMs: 2_000, text: "" }]),
+    "[00:01.23]嗨");
+});
+
+test("stateToFoliaEvents 无歌时四条事件都要在，形状照上游一个字不改", () => {
+  const events = stateToFoliaEvents({ connection: "offline", track: null }, 1_000);
+  assert.deepEqual(events.map((envelope) => envelope.event),
+    ["Track", "Lyric", "PlayerPauseState", "PlayerProgress"]);
+  assert.deepEqual(events[0].data, {});
+  assert.deepEqual(events[1].data, {});
+  assert.deepEqual(events[2].data, { hasSong: false, isPaused: true, seekbarCurrentPosition: 0 });
+  assert.deepEqual(events[3].data, { progress: 0 });
+});
+
+test("stateToFoliaEvents：duration 是秒、progress 是毫秒、采样会补上", () => {
+  const state = {
+    track: { id: "q:1", title: "歌", artist: "人", album: "辑", durationMs: 240_000, artworkUrl: "" },
+    playback: { isPlaying: true, positionMs: 10_000, sampledAtMs: 1_000 },
+    lyrics: { source: "lrclib", lines: [{ timeMs: 0, text: "第一句" }], karaokeLyric: "" },
+  };
+  const [track, lyric, pause, progress] = stateToFoliaEvents(state, 2_500);
+
+  assert.equal(track.data.duration, 240);      // 秒
+  assert.equal(track.data.author, "人");        // artist → author
+  assert.equal(lyric.data.duration, 240);
+  assert.equal(lyric.data.hasLyric, true);
+  assert.equal(lyric.data.hasKaraokeLyric, false);
+  assert.equal(lyric.data.lrc, "[00:00.00]第一句");
+  assert.equal(pause.data.seekbarCurrentPosition, 11_500);   // 10_000 + 1_500
+  assert.equal(progress.data.progress, 11_500);
+
+  // 暂停时不再补时间；进度封顶在 durationMs。
+  const paused = stateToFoliaEvents(
+    { ...state, playback: { isPlaying: false, positionMs: 10_000, sampledAtMs: 1_000 } }, 9_000);
+  assert.equal(paused[3].data.progress, 10_000);
+  const over = stateToFoliaEvents(
+    { ...state, playback: { isPlaying: true, positionMs: 999_000, sampledAtMs: 1 } }, 2);
+  assert.equal(over[3].data.progress, 240_000);
+});
+
+test("stateToFoliaEvents 把 QRC 原串透传给卡拉 OK，不塞进 words", () => {
+  const karaokeLyric = "[0,1000](0,500,0)嗨(500,500,0)呀";
+  const [, lyric] = stateToFoliaEvents({
+    track: { id: "q:2", title: "歌", artist: "人", durationMs: 1_000 },
+    playback: { isPlaying: false, positionMs: 0, sampledAtMs: 0 },
+    lyrics: { source: "qq", lines: [{ timeMs: 0, text: "嗨呀" }], karaokeLyric },
+  }, 0);
+  assert.equal(lyric.data.karaokeLyric, karaokeLyric);
+  assert.equal(lyric.data.hasKaraokeLyric, true);
+  assert.equal(lyric.data.hasTranslatedLyric, false);
+  assert.equal(lyric.data.translatedLyric, "");
 });

@@ -37,10 +37,13 @@
 | `lyric-presentation.mjs` | 638 | `2AFC5B5E50F9BD2522C088C869B0B8CC7B5AE881E7FC2467D34428189EBFDD1D`（改后） |
 | `styles.css` | 17990 | `3FBEC341F93C93631C98B2919EA4DA4A958E56802A67FB502DDC01B6A9B4912D` |
 
-## 为什么这里有 original，隔壁还有一套 Folia
+## 另一个引擎：Folia
 
-本目录（`original/`）是 **MIT** 许可的渲染器（6 个模式）。同一套歌词舞台在 Task 10 里
-还会引入第二套渲染器 —— Folia（12 个模式），它是 **AGPL-3.0**，住在**独立子目录**
-`lyrics-stage/folia/`：两套代码不混放、不互相 import，各带各的许可文件，许可分层写在
-`lyrics-stage/THIRD_PARTY.md` 里。角色美术 / 语音 / 贴纸 / logo 不在代码许可范围内，
-一个都没搬——想用请自己取得授权。
+参考项目里还有一套 Folia 渲染器（12 个模式、卡拉 OK 逐字），它是 **AGPL-3.0**。
+本仓库在 Task 10 里**也把它搬进来了**，但**单独放在隔壁的 [`../folia/`](../folia/) 子树**，
+与这里的 MIT original 物理隔离：许可、来源与校验表都写在那棵树自己的 `README.md` 里。
+两个引擎由宿主按 `engine` 分叉（父页对 original 发 `midori-lyrics-state`、
+对 Folia 发 `midori-lyrics-events`），互不影响。
+
+角色美术 / 语音 / 贴纸 / logo 不在**任何**代码许可范围内——两个引擎都不含可单独复用的素材；
+详见 [`../THIRD_PARTY.md`](../THIRD_PARTY.md)。

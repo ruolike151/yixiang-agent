@@ -50,13 +50,21 @@ STATUS_NAMES = {
     5: "paused",
 }
 
-# 界面上要显示的按钮：名字 → winrt ``PlaybackControls`` 上的布尔属性
-CONTROL_FLAGS = (
-    ("play", "is_play_enabled"),
-    ("pause", "is_pause_enabled"),
-    ("next", "is_next_enabled"),
-    ("previous", "is_previous_enabled"),
+# 动作表：action → (winrt 里"能不能按"的布尔属性名, 要调的 Session 方法名)
+CONTROL_ACTIONS = (
+    ("play", "is_play_enabled", "try_play_async"),
+    ("pause", "is_pause_enabled", "try_pause_async"),
+    ("next", "is_next_enabled", "try_skip_next_async"),
+    ("previous", "is_previous_enabled", "try_skip_previous_async"),
+    ("seek", "is_playback_position_enabled", "try_change_playback_position_async"),
 )
+
+# 界面上要显示的按钮：名字 → winrt 里的布尔属性（保持 Task 3 的形状，只是多一项 seek）
+CONTROL_FLAGS = tuple((name, flag) for name, flag, _ in CONTROL_ACTIONS)
+
+# 定位参数的单位是 ticks（100 ns）。微软文档原文：TryChangePlaybackPositionAsync
+# "Attempts to change the playback position on the session to the specified time, in ticks."
+TICKS_PER_MS = 10_000
 
 
 @dataclass(frozen=True)
@@ -176,3 +184,41 @@ def read_current(
         app_id=app_id,
         controls=controls_of(info),
     )
+
+
+def control(
+    action: str,
+    *,
+    position_ms: int = 0,
+    session_factory: Callable[[], Any] | None = None,
+) -> bool:
+    """替用户按一下播放器的按钮。``True`` = 按下去了并且播放器接受了。
+
+    ``action`` 只能是 play / pause / next / previous / seek。
+    返回 ``False`` 有三种情况，对界面都是同一件事（这个按钮现在别点）：
+    没有会话、当前 app 没开这个按钮、winrt 按下了但回 ``False``（正在缓冲 / 设备被独占）。
+
+    ``position_ms`` 是对外的**毫秒**口径；winrt 要的是 ticks，所以在这里乘 ``TICKS_PER_MS``。
+    单位写错不会报错，只会让进度条跳到一个千分之一都不到的位置——改这行前先看真机进度条。
+
+    系统级不可用（装了 winrt 但服务报错）照 Task 3 的口径抛 ``SmtcUnavailable``；
+    没装 winrt 则静默返 ``False``。
+    """
+
+    table = {name: (flag, method) for name, flag, method in CONTROL_ACTIONS}
+    if action not in table:
+        raise ValueError(f"不认识的控制动作：{action}")
+
+    session = (session_factory or default_session_factory)()
+    if session is None:
+        return False
+
+    flag, method_name = table[action]
+    if not getattr(getattr(session.get_playback_info(), "controls", None), flag, False):
+        return False
+
+    method = getattr(session, method_name)
+    if action == "seek":
+        ticks = max(0, int(position_ms)) * TICKS_PER_MS
+        return bool(_await(method(ticks)))
+    return bool(_await(method()))

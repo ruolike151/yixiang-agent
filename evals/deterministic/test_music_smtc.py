@@ -13,7 +13,7 @@ import datetime as dt
 import pytest
 
 from yixiang.media import smtc
-from yixiang.media.smtc import SmtcSnapshot, ms_of, read_current
+from yixiang.media.smtc import SmtcSnapshot, control, ms_of, read_current
 
 
 class FakeControls:
@@ -63,7 +63,7 @@ class FakeOperation:
 
 
 class FakeSession:
-    """一个"正在放的 app"。只实现 Task 3 用得到的读方法。"""
+    """一个"正在放的 app"。读方法照 Task 3；Task 4 起多一套可记录的 try_ 写方法。"""
 
     def __init__(
         self,
@@ -74,12 +74,16 @@ class FakeSession:
         media: FakeMedia | None = None,
         app_id: str = "QQMusic.exe",
         media_is_awaitable: bool = False,
+        calls: list[tuple[str, int | None]] | None = None,
+        results: dict[str, bool] | None = None,
     ) -> None:
         self._info = FakePlaybackInfo(status, controls)
         self._timeline = timeline or FakeTimeline()
         self._media = media
         self.source_app_user_model_id = app_id
         self._media_is_awaitable = media_is_awaitable
+        self.calls: list[tuple[str, int | None]] = [] if calls is None else calls
+        self._results: dict[str, bool] = {} if results is None else results
 
     def get_playback_info(self) -> FakePlaybackInfo:
         return self._info
@@ -91,6 +95,27 @@ class FakeSession:
         if self._media_is_awaitable:
             return FakeOperation(self._media)
         return self._media
+
+    # --- Task 4：写方法。真实 winrt 这几支都返回 IAsyncOperation[bool]，
+    # 拒绝时是"回了 False"而不是抛异常，所以这里也照抄：记录参数 + 回 FakeOperation。
+    def _record(self, name: str, argument: int | None = None) -> FakeOperation:
+        self.calls.append((name, argument))
+        return FakeOperation(self._results.get(name, True))
+
+    def try_play_async(self) -> FakeOperation:
+        return self._record("play")
+
+    def try_pause_async(self) -> FakeOperation:
+        return self._record("pause")
+
+    def try_skip_next_async(self) -> FakeOperation:
+        return self._record("next")
+
+    def try_skip_previous_async(self) -> FakeOperation:
+        return self._record("previous")
+
+    def try_change_playback_position_async(self, requested_playback_position: int) -> FakeOperation:
+        return self._record("seek", requested_playback_position)
 
 
 def _read(**kwargs: object) -> SmtcSnapshot | None:
@@ -188,3 +213,79 @@ def test_read_current_degrades_to_none_when_winrt_is_missing(monkeypatch: pytest
     monkeypatch.setattr(smtc, "_SessionManager", None)
 
     assert read_current() is None
+
+
+# 五个按钮都亮着 = 一个"什么都能干"的播放器（QQ 音乐真机就是这个形状）
+ALL_CONTROLS = FakeControls(
+    is_play_enabled=True,
+    is_pause_enabled=True,
+    is_next_enabled=True,
+    is_previous_enabled=True,
+    is_playback_position_enabled=True,
+)
+
+
+def _controllable(**kwargs: object) -> FakeSession:
+    """默认给一套全亮的按钮；显式传了 controls= 就以显式的为准。"""
+
+    kwargs.setdefault("controls", ALL_CONTROLS)
+    return FakeSession(**kwargs)  # type: ignore[arg-type]
+
+
+def test_control_play_pause_and_skip_call_the_matching_winrt_method():
+    session = _controllable()
+
+    assert control("play", session_factory=lambda: session) is True
+    assert control("pause", session_factory=lambda: session) is True
+    assert control("next", session_factory=lambda: session) is True
+    assert control("previous", session_factory=lambda: session) is True
+
+    # 方法名是 skip_next / skip_previous，不是 try_next_async / try_previous_async
+    assert [name for name, _ in session.calls] == ["play", "pause", "next", "previous"]
+
+
+def test_seek_converts_milliseconds_to_ticks():
+    # 微软文档：TryChangePlaybackPositionAsync 的单位是 ticks（100 ns）→ 1 ms = 10 000 ticks
+    session = _controllable()
+
+    assert control("seek", position_ms=60_000, session_factory=lambda: session) is True
+
+    assert session.calls == [("seek", 600_000_000)]
+
+
+def test_seek_clamps_a_negative_position_to_zero():
+    session = _controllable()
+
+    assert control("seek", position_ms=-5, session_factory=lambda: session) is True
+
+    assert session.calls == [("seek", 0)]
+
+
+def test_control_returns_false_for_a_button_this_app_does_not_have():
+    # 界面亮不亮由 controls 决定：没这个按钮就根本不去调 winrt
+    session = _controllable(controls=FakeControls(is_play_enabled=True))
+
+    assert control("next", session_factory=lambda: session) is False
+    assert control("seek", position_ms=1_000, session_factory=lambda: session) is False
+    assert session.calls == []
+
+
+def test_control_propagates_a_winrt_refusal():
+    # 按钮亮着，按下去 winrt 仍可能回 False（正在缓冲 / 设备被独占）：照实回 False，不抛
+    session = _controllable(results={"play": False})
+
+    assert control("play", session_factory=lambda: session) is False
+    assert [name for name, _ in session.calls] == ["play"]
+
+
+def test_control_returns_false_without_a_session():
+    assert control("play", session_factory=lambda: None) is False
+
+
+def test_control_rejects_an_unknown_action():
+    session = _controllable()
+
+    with pytest.raises(ValueError):
+        control("音量调到最大", session_factory=lambda: session)
+
+    assert session.calls == []

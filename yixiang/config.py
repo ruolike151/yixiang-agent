@@ -164,6 +164,25 @@ class Settings:
     budget_cny_per_day: float = 0.5
     log_level: str = "INFO"
 
+    # ── 音乐（Web 控制台第 8 栏）──
+    # 关着时 /api/music/* 一律回空态：不读 SMTC、不出网、不列曲库。
+    # 默认关：不是每台机器都想听歌，而且开着就会去碰系统级"正在播放"。
+    music_enabled: bool = False
+    # 三个目录都相对 project_root；load() 会把它们绝对化（与 data_dir 同一套规矩）。
+    music_lyrics_dir: Path = field(default_factory=lambda: Path("data/music/lyrics"))
+    music_cache_dir: Path = field(default_factory=lambda: Path("data/music/cache"))
+    music_audio_dir: Path = field(default_factory=lambda: Path("data/music/audio"))
+    # 四档轮询（毫秒）：正在放 / 快放完 / 暂停 / 什么都没放。
+    # 前端不写死这些数字，跟着状态 JSON 一起收（见 Task 5 的 pollMs 契约）。
+    music_poll_playing_ms: int = 5000
+    music_poll_near_end_ms: int = 1500
+    music_poll_paused_ms: int = 15000
+    music_poll_idle_ms: int = 30000
+    # 在线平台 API（Task 7）。留空 = 这一家不可用，不报错、不进 validate()。
+    netease_api_base: str = ""
+    kugou_api_base: str = ""
+    qq_api_base: str = ""
+
     # ── 非 env 字段（程序内部使用）──
     project_root: Path = field(default_factory=lambda: Path.cwd())
     env_file: Path | None = None
@@ -202,6 +221,10 @@ class Settings:
         settings.env_file = env_path
         if not settings.data_dir.is_absolute():
             settings.data_dir = (root / settings.data_dir).resolve()
+        for name in ("music_lyrics_dir", "music_cache_dir", "music_audio_dir"):
+            current = getattr(settings, name)
+            if not current.is_absolute():
+                setattr(settings, name, (root / current).resolve())
         return settings
 
     # ------------------------------------------------------------------ 校验

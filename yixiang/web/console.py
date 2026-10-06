@@ -24,10 +24,13 @@ from typing import Any
 
 from yixiang.app import App
 from yixiang.config import ENV_PREFIX, Settings, parse_env_text
+from yixiang.media.providers.base import OnlineProvider, ProviderError, Song
+from yixiang.media.providers.registry import build_providers, get_provider
 from yixiang.media.service import (
     AUDIO_SUFFIXES,
     MusicService,
     lyrics_json,
+    online_lyrics_outcome,
     track_from_query,
 )
 from yixiang.memory import core_files, procedural, sync
@@ -130,6 +133,37 @@ class ConsoleError(Exception):
         self.payload: dict[str, Any] = dict(payload or {})
 
 
+# provider 错误码 → HTTP 状态。**502 不是 500**：500 是"yixiang 自己崩了"，
+# 502 才是"我们替你去问的那家没答上来"——排查时这两个结论差得很远。
+_PROVIDER_STATUS = {
+    "unsupported": 400,
+    "unavailable": 400,
+    "auth-required": 401,
+    "not-playable": 404,
+    "network": 502,
+    "invalid-response": 502,
+}
+
+
+def _provider_status(exc: ProviderError) -> int:
+    return _PROVIDER_STATUS.get(exc.code, 502)
+
+
+def _audio_source_or_blank(target: OnlineProvider, song: Song) -> str:
+    """直链拿不到（VIP / 版权 / 地区）不是"这首歌不存在"：回空串，让面板照常画歌词。
+
+    只有 ``not-playable`` 被吞掉——``network`` / ``auth-required`` 还是照抛，
+    因为那是"我们没问到"，与"问了、人家不给"是两回事。
+    """
+
+    try:
+        return target.get_audio_source(song)
+    except ProviderError as exc:
+        if exc.code != "not-playable":
+            raise
+        return ""
+
+
 class ConsoleAPI:
     """控制台的唯一业务入口。一个进程一个实例（内部持有唯一的 App 与连接）。"""
 
@@ -140,6 +174,7 @@ class ConsoleAPI:
         app: App | None = None,
         app_factory: Callable[[Settings], App] | None = None,
         music_factory: Callable[[Settings], MusicService] | None = None,
+        provider_factory: Callable[[Settings], dict[str, OnlineProvider]] | None = None,
         env_file: Path | str | None = None,
     ) -> None:
         self.settings = settings
@@ -153,7 +188,13 @@ class ConsoleAPI:
         # 音乐同理，但理由完全不同：它是为了让用例注入假 SMTC / 假 LRCLib
         # （`MusicService` 里没有 sqlite，跨线程本来就没问题）。
         self.music_factory = music_factory or (lambda current: MusicService(current))
+        # 在线平台同理，注入的是"三家适配器"这一层：用例塞假 httpx client，
+        # 生产代码照 `Settings` 里那三个 base 现建。
+        self.provider_factory = provider_factory or (
+            lambda current: build_providers(current)
+        )
         self._music: MusicService | None = None
+        self._providers: dict[str, OnlineProvider] | None = None
         self._entered = False
 
     # ------------------------------------------------------------------ 装配
@@ -191,6 +232,14 @@ class ConsoleAPI:
             self._music = self.music_factory(self.settings)
         return self._music
 
+    @property
+    def providers(self) -> dict[str, OnlineProvider]:
+        """懒装配：理由与 ``music`` 一样——只读 ``Settings``，不碰 sqlite。"""
+
+        if self._providers is None:
+            self._providers = self.provider_factory(self.settings)
+        return self._providers
+
     def music_state(self) -> dict[str, Any]:
         """当前在放什么（系统"正在播放"）+ 歌词 + 四档轮询间隔，一次给全。"""
 
@@ -223,6 +272,50 @@ class ConsoleAPI:
         """本机曲库：``music_audio_dir`` 下的音频文件（关掉音乐就是空列表）。"""
 
         return self.music.library()
+
+    def music_search(
+        self, provider: str, keyword: str, *, limit: int = 20, offset: int = 0
+    ) -> dict[str, Any]:
+        """在线搜歌。关键词为空是调用方写错（400 ``bad_query``），不是"没搜到"。"""
+
+        name = keyword.strip()
+        if not name:
+            raise ConsoleError("搜歌需要一个关键词（q 不能为空）。", code="bad_query")
+        try:
+            target = get_provider(self.providers, provider)
+            page = target.search_songs(name, limit=int(limit), offset=int(offset))
+        except ProviderError as exc:
+            raise ConsoleError(
+                exc.message, status=_provider_status(exc), code=exc.code
+            ) from exc
+        return {"ok": True, "provider": provider, **page.to_json()}
+
+    def music_song(self, provider: str, song_id: str) -> dict[str, Any]:
+        """一首歌的详情 + 直链 + 词（面板点搜索结果时打这个）。
+
+        ``audioUrl`` 拿不到时回**空串**而不是 4xx——这首歌存在，只是放不了，
+        面板照样能画歌词（见上面 `_audio_source_or_blank()`）。
+        """
+
+        key = song_id.strip()
+        if not key:
+            raise ConsoleError("取详情需要一个歌曲 id（id 不能为空）。", code="bad_query")
+        try:
+            target = get_provider(self.providers, provider)
+            song = target.get_song_detail(key)
+            lyrics = target.get_lyrics(song)
+            audio_url = _audio_source_or_blank(target, song)
+        except ProviderError as exc:
+            raise ConsoleError(
+                exc.message, status=_provider_status(exc), code=exc.code
+            ) from exc
+        return {
+            "ok": True,
+            "provider": provider,
+            "song": song.to_json(),
+            "audioUrl": audio_url,
+            "lyrics": lyrics_json(online_lyrics_outcome(provider, lyrics)),
+        }
 
     def audio_path(self, name: str) -> Path:
         """``/api/audio/<name>`` 的文件解析：只认 ``music_audio_dir`` 的**直接子文件**。

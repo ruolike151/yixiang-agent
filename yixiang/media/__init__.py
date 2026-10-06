@@ -16,6 +16,7 @@ from yixiang.media.service import (
     LyricsOutcome,
     MusicService,
     lyrics_json,
+    online_lyrics_outcome,
     track_from_query,
 )
 from yixiang.media.smtc import SmtcSnapshot, SmtcUnavailable, control, read_current
@@ -38,6 +39,7 @@ __all__ = [
     "fetch_lrclib",
     "load_local_lyrics",
     "lyrics_json",
+    "online_lyrics_outcome",
     "parse_lrc",
     "read_cache",
     "read_current",

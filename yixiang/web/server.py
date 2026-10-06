@@ -335,6 +335,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 )
             if path == "/api/music/library":
                 return self._send_json(api.music_library())
+            if path == "/api/music/search":
+                # 搜歌是外呼（可能几秒），与 state / lyrics 同理：不走 runner，
+                # 别占那条唯一的工作线程。
+                return self._send_json(
+                    api.music_search(
+                        _one(query, "provider"),
+                        _one(query, "q"),
+                        limit=_int(query, "limit", 20),
+                        offset=_int(query, "offset", 0),
+                    )
+                )
+            if path == "/api/music/song":
+                return self._send_json(
+                    api.music_song(_one(query, "provider"), _one(query, "id"))
+                )
             if path.startswith("/api/audio/"):
                 name = path[len("/api/audio/") :]
                 return self._send_file(

@@ -35,6 +35,7 @@ from yixiang.media.lrclib import (
     write_cache,
 )
 from yixiang.media.lyrics import LyricLine, Track, load_local_lyrics
+from yixiang.media.providers.base import ProviderLyrics
 from yixiang.media.smtc import (
     SmtcUnavailable,
     read_current,
@@ -94,6 +95,30 @@ def lyrics_json(outcome: LyricsOutcome) -> dict[str, Any]:
     if outcome.note:
         payload["note"] = outcome.note
     return payload
+
+
+def online_lyrics_outcome(
+    provider_name: str, result: ProviderLyrics | None
+) -> LyricsOutcome:
+    """一家在线平台的取词结果 → ``LyricsOutcome``（与本地 / LRCLib 同一个形状）。
+
+    **永远有结果**：没查到（含 QQ 密文坏了那条降级说明）是 ``empty`` 并把 ``note``
+    带上；有词是 ``ready``。**逐字那条线要显式透传**：``ProviderLyrics.karaoke_lyric``
+    → ``LyricsOutcome.karaoke_lyric``（Task 5 已经加好的字段），Folia 引擎（task-10）
+    靠它渲染逐字。``word_by_word`` / ``is_pure_music`` 仍留在 provider 层——
+    ``LyricsOutcome`` 不为它们加字段（加了就得同步 ``lyrics_json()`` 与 Task 1 的契约用例）。
+    """
+
+    if result is None or not result.lines:
+        note = result.note if result is not None else ""
+        return LyricsOutcome(status="empty", source=provider_name, note=note)
+    return LyricsOutcome(
+        status="ready",
+        source=provider_name,
+        lines=result.lines,
+        note=result.note,
+        karaoke_lyric=result.karaoke_lyric,
+    )
 
 
 def track_from_query(

@@ -50,8 +50,15 @@ STALE_GATE = (
     re.compile(r"六个检查项"),
 )
 
-# 过期口径：Task 16 之后前端是 7 栏（第 7 栏 = 链路 trace）
-STALE_PANELS = (re.compile(r"六栏"), re.compile(r"六个面板"), re.compile(r"六件测试时"))
+# 过期口径：Task 16 之后前端是 7 栏，Task 8（音乐）之后是 8 栏——"六栏/七栏"都过期了
+STALE_PANELS = (
+    re.compile(r"六栏"),
+    re.compile(r"六个面板"),
+    re.compile(r"六件测试时"),
+    re.compile(r"七栏"),
+    re.compile(r"七个面板"),
+    re.compile(r"七件测试时"),
+)
 
 # 目录树里的 `scheduler.py` 是设计期的单文件写法，实现是 `scheduler/` 包。
 # 负向前瞻排除 `test_scheduler.py`——那是用例文件名，合法。
@@ -142,17 +149,18 @@ def test_gate_count_is_five_in_every_file_that_mentions_it() -> None:
     assert "CACHE_HIT_TARGET" not in gate, "Task 20（前缀缓存进巡检）本次不做，门禁仍是五项"
 
 
-def test_panel_count_is_seven_in_docs_and_in_app_js() -> None:
+def test_panel_count_is_eight_in_docs_and_in_app_js() -> None:
     for rel in CURRENT_DOCS:
         _assert_no(rel, STALE_PANELS)
         text = _read(rel)
-        assert re.search(r"七(栏|个面板)", text), f"{rel} 的栏数还是旧的"
+        assert re.search(r"八(栏|个面板)", text), f"{rel} 的栏数还是旧的"
         assert "链路 trace" in text, f"{rel} 没写上第 7 栏"
+        assert "音乐" in text, f"{rel} 没写上第 8 栏"
 
     source = _read("yixiang/web/static/app.js")
     block = source.split("const PANELS = [", 1)[1].split("\n];", 1)[0]
     ids = re.findall(r'^\s+id: "([a-z]+)"', block, re.MULTILINE)
-    assert ids == ["chat", "history", "persona", "config", "prompt", "qq", "traces"]
+    assert ids == ["chat", "history", "persona", "config", "prompt", "qq", "traces", "music"]
 
 
 def test_tech_design_no_longer_claims_the_code_is_missing() -> None:

@@ -730,7 +730,7 @@ def serve(
         out(f"  {settings.describe()}")
         out(
             "  只绑本机回环地址；测试用前端共"
-            "「对话 / 历史 / 人设与记忆 / 模型配置 / 提示词 / QQ 设置 / 链路 trace」七栏"
+            "「对话 / 历史 / 人设与记忆 / 模型配置 / 提示词 / QQ 设置 / 链路 trace / 音乐」八栏"
         )
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:

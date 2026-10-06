@@ -91,7 +91,7 @@ flowchart TB
 |---|---|---|---|
 | 业务适配 | `web/console.py` | 把请求翻译成对 `App` 与 `data/` 的调用（人设 / 记忆 / 配置 / QQ / 上传 / 对话） | 不认识 HTTP，不写 JSON，不管 SSE 字节 |
 | 协议 | `web/server.py` | 路由、JSON、SSE、静态文件、multipart 解析 | 不做业务判断——"能不能改 / 超没超上限"全在 `console.py` |
-| 前端 | `web/static/`（手写 js/css） | 七栏面板（第 7 栏 = 链路 trace）、逐字渲染 SSE、hash 深链接 | 无构建、无 CDN、不用 `innerHTML` 拼数据 |
+| 前端 | `web/static/`（手写 js/css） | 八栏面板（第 7 栏 = 链路 trace、第 8 栏 = 音乐）、逐字渲染 SSE、hash 深链接 | 无构建、无 CDN、不用 `innerHTML` 拼数据 |
 
 三条与主链路同源的纪律：
 
@@ -154,7 +154,7 @@ sequenceDiagram
 
 | 支柱 | 代码 | 管什么 | 明确不管什么 |
 |---|---|---|---|
-| **入口** | `gateway/cli.py`、`gateway/qq.py`（OneBot v11 反向 WS）、`web/`（本机控制台） | 读一行、打流式输出、斜杠命令（`/new` `/history` `/tools` `/trace` `/cost`）；Web 侧还有七栏测试面板与上传件落盘；QQ 侧走白名单 + 幂等 | 不含任何业务判断；换入口不改业务 |
+| **入口** | `gateway/cli.py`、`gateway/qq.py`（OneBot v11 反向 WS）、`web/`（本机控制台） | 读一行、打流式输出、斜杠命令（`/new` `/history` `/tools` `/trace` `/cost`）；Web 侧还有八栏测试面板（含音乐）与上传件落盘；QQ 侧走白名单 + 幂等 | 不含任何业务判断；换入口不改业务 |
 | **Loop** | `loop/agent.py`、`loop/guard.py` | 迭代上限、防绕圈、工具调用编排、`finish_reason=length` 与坏 JSON 的失败路径 | 不认识"记忆"和"语料"这两个概念 |
 | **记忆** | `memory/` | 三文件核心记忆（原子写 + 上限校验）、三支柱检索（facts / episodes / skills）、检索门控、巩固与 watermark、人机共治、三方对账 | 不做影视语料的入库与推荐 |
 | **RAG 语料** | `rag/` | `source_id` 幂等入库、中文混合检索（FTS5 + 向量 + RRF）、硬过滤 + 口味软加权、7 天去重、golden 回归 | 不写长期记忆（推荐历史写 `recommend_log`，不是 `facts`） |

@@ -213,7 +213,7 @@ $ python -m pytest evals/deterministic -o addopts= -q -m "not live" -rs
 |---|---|---|
 | `test_retrieval.py` | 32 | 入库幂等、FTS 分词、RRF、硬过滤、口味加权、降级、注入包裹 |
 | `test_provider.py` | 31 | 流式解析、超时、`finish_reason=length`、关思考开关（名单 / 单次请求）、坏 JSON、用量记账、多模态附图（越界 / 超大 / 单张坏图不拖垮整轮） |
-| `test_web.py` | 36 | 七栏控制台：配置/人设/记忆读写、multipart 上传（30MB）、上传件列表 / 删除 / 清空 / 原图、`read_file` 越界、SSE 分帧、链路 trace 面板、Web 新会话固定落 `web:` 命名空间 |
+| `test_web.py` | 36 | 八栏控制台：配置/人设/记忆读写、multipart 上传（30MB）、上传件列表 / 删除 / 清空 / 原图、`read_file` 越界、SSE 分帧、链路 trace 面板、音乐面板（状态 / 控制 / 曲库 / 搜索 / 歌词舞台宿主）、Web 新会话固定落 `web:` 命名空间 |
 | `test_tools_memo.py` | 27 | 备忘的幂等键 / 到期 / 去重 / 改期（严格解日 + 拒绝瞎猜） |
 | `test_bangumi_collections.py` | 16 | Bangumi 收藏 → 口味画像（假 client，不出网） |
 | `test_gate.py` | 16 | 门控规则层、模型层、fail-open、标注集指标 |

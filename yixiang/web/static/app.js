@@ -13,6 +13,7 @@
 // Markdown 渲染器是独立模块（`markdown.mjs`），解析与建节点分开：
 // 它只往 textContent / createTextNode 写数据，第 5 行的那条约束照样成立。
 import { renderMarkdown } from "./markdown.mjs";
+import { chooseMode, findLineIndex, formatTime, pollDelay, stageMessage, visibleLineIndexes } from "./music.mjs";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -59,6 +60,12 @@ const PANELS = [
     icon: "activity",
     desc: "每轮一行：门控做了什么、调了哪些工具、花了多少 token 与钱——面试时照这里讲。",
   },
+  {
+    id: "music",
+    label: "音乐",
+    icon: "music",
+    desc: "读系统「正在播放」、反向控制播放器、放本机曲库与歌词舞台——音频只在这台机器上放。",
+  },
 ];
 
 const ICONS = {
@@ -90,6 +97,15 @@ const ICONS = {
   ],
   book: ["M4 19.5A2.5 2.5 0 0 1 6.5 17H20", "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"],
   spark: ["M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"],
+  music: [
+    "M9 18V5l12-2v13",
+    "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+    "M18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  ],
+  play: ["M6 4l14 8-14 8z"],
+  pause: ["M8 4v16", "M16 4v16"],
+  prev: ["M19 5 9 12l10 7z", "M6 5v14"],
+  next: ["M5 5l10 7-10 7z", "M18 5v14"],
 };
 
 /* ------------------------------------------------------------------ DOM */
@@ -266,6 +282,17 @@ const store = {
   // 用户刚按过「停止」：读流已经断了，收尾要靠它把 chip 补上
   stopped: false,
   loading: new Set(),
+  // 音乐面板（Task 8）：状态 / 曲库 / 搜索结果 / 选中的平台与关键词，
+  // 以及**活过一次重画**的两样东西——本机 `<audio>` 元素与"舞台开着没"。
+  // audio 必须挂在 store 上：render() 整块换掉 #main，挂在 DOM 上等于一刷新就从头播。
+  music: null,
+  musicLibrary: null,
+  musicResults: null,
+  musicProvider: "",
+  musicQuery: "",
+  musicStage: false,
+  musicAudio: null,
+  musicSong: null,
 };
 
 const $main = document.getElementById("main");
@@ -365,6 +392,7 @@ function renderNav() {
     history: store.sessions ? `${store.sessions.sessions.length}` : "",
     config: store.summary ? `${store.summary.counters.tools} 工具` : "",
     qq: store.summary && store.summary.qq.fields.qq_enabled ? "已开" : "",
+    music: store.music && store.music.track ? "在放" : "",
   };
   list.replaceChildren(
     ...PANELS.map((panel) =>
@@ -2124,6 +2152,574 @@ async function renderQQ() {
   ];
 }
 
+/* ------------------------------------------------------------------ 音乐 */
+
+/* 面板上有两条**不相干**的播放通道，别混在一起：
+
+   A.「系统正在播放」（Windows SMTC）：只读状态 + 控制按钮（play / pause / next /
+      previous / seek）→ `POST /api/music/control`，动的是**别的**播放器。
+   B.「本机播放」（本地曲库 / 在线直链）：页面自己的 `<audio>`，由浏览器直接放，
+      音频字节从不经过 yixiang、也从不进模型上下文（用户口径 10）。
+
+   两块各自标清是哪一个：合成一块的话，"我按的暂停到底暂停了谁"就成了玄学。
+   歌词舞台（Task 9 的 iframe）跟的是 A 的状态 JSON——它要跟系统里那首歌滚。 */
+
+const MUSIC_PROVIDERS = [
+  { name: "qq", label: "QQ" },
+  { name: "netease", label: "网易云" },
+  { name: "kugou", label: "酷狗" },
+];
+
+const MUSIC_ACTION_LABELS = {
+  play: "播放",
+  pause: "暂停",
+  next: "下一首",
+  previous: "上一首",
+  seek: "定位",
+};
+
+const MUSIC_CONNECTION_LABELS = {
+  disabled: "音乐没开",
+  offline: "没找到正在播放",
+  local: "本机播放",
+  connected: "系统正在播放",
+};
+
+let musicPollTimer = null;
+
+/** 离开音乐面板就别再问了：一次多余的请求也是请求。 */
+function stopMusicPolling() {
+  if (musicPollTimer === null) return;
+  clearTimeout(musicPollTimer);
+  musicPollTimer = null;
+}
+
+/** 只有"看得见的变化"才值得重画一整块面板；进度每秒都在变，但不重画。 */
+function musicFingerprint(state) {
+  if (!state) return "none";
+  const track = state.track || {};
+  const playback = state.playback || {};
+  const lyrics = state.lyrics || {};
+  return [
+    state.connection,
+    state.source,
+    state.note || "",
+    track.id,
+    track.title,
+    track.artist,
+    playback.isPlaying,
+    lyrics.status,
+    Array.isArray(lyrics.lines) ? lyrics.lines.length : 0,
+  ].join("|");
+}
+
+async function refreshMusicState() {
+  const before = musicFingerprint(store.music);
+  try {
+    store.music = await api("/api/music/state");
+  } catch (error) {
+    // 服务没起来 / 接口报错：把话说清楚，别让面板停在"加载中"骗人
+    store.music = {
+      ok: false,
+      connection: "offline",
+      source: "",
+      track: null,
+      playback: { isPlaying: false, positionMs: 0, controls: [] },
+      lyrics: { status: "empty", source: "", lines: [] },
+      note: error.message || String(error),
+    };
+  }
+  syncMediaSession();
+  if (musicFingerprint(store.music) !== before) render();
+  scheduleMusicPoll();
+}
+
+function scheduleMusicPoll() {
+  stopMusicPolling();
+  if (store.panel !== "music") return;
+  musicPollTimer = setTimeout(() => {
+    void refreshMusicState();
+  }, pollDelay(store.music));
+}
+
+/* ------------------------------------------------------- 通道 B：本机播放 */
+function ensureMusicAudio() {
+  if (store.musicAudio) return store.musicAudio;
+  const audio = h("audio", {
+    id: "music-audio",
+    class: "music-audio",
+    controls: true,
+    preload: "metadata",
+  });
+  // src 只会被设成 /api/audio/<name> 或在线直链，两处都由浏览器自己拉，
+  // 服务端不代理音频——这一页本身就是播放器。
+  audio.addEventListener("play", () => syncMediaSession());
+  audio.addEventListener("pause", () => syncMediaSession());
+  audio.addEventListener("ended", () => syncMediaSession());
+  store.musicAudio = audio;
+  return audio;
+}
+
+function playMusicSource({ url, title = "", artist = "", album = "", artworkUrl = "" }) {
+  if (!url) return;
+  const audio = ensureMusicAudio();
+  store.musicSong = { url, title, artist, album, artworkUrl };
+  audio.src = url;
+  audio.play().catch((error) => {
+    // 浏览器拦自动播放是常见事：说清楚"自己点一下播放键"，别静默失败
+    toast(`浏览器没让播（${error.message || error}）：点下面的播放键试试`, "bad");
+  });
+  syncMediaSession();
+  render();
+}
+
+/** Media Session 只属于通道 B——系统媒体键控的就是页面里这个 `<audio>`。 */
+function syncMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const now = store.musicSong;
+  if (typeof MediaMetadata === "function") {
+    navigator.mediaSession.metadata = now
+      ? new MediaMetadata({
+          title: now.title || "未知歌曲",
+          artist: now.artist || "未知歌手",
+          album: now.album || "",
+          artwork: now.artworkUrl ? [{ src: now.artworkUrl }] : [],
+        })
+      : null;
+  }
+  const playing = Boolean(store.musicAudio) && !store.musicAudio.paused;
+  navigator.mediaSession.playbackState = playing ? "playing" : now ? "paused" : "none";
+}
+
+function bindMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const handlers = {
+    play: () => {
+      if (store.musicAudio) void store.musicAudio.play();
+    },
+    pause: () => {
+      if (store.musicAudio) store.musicAudio.pause();
+    },
+    stop: () => {
+      if (!store.musicAudio) return;
+      store.musicAudio.pause();
+      store.musicAudio.currentTime = 0;
+    },
+  };
+  for (const [action, handler] of Object.entries(handlers)) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // 这个浏览器不认这个动作：跳过它，别为了一个媒体键把整个面板拖挂
+    }
+  }
+}
+
+/* ------------------------------------------------------- 通道 A：系统播放 */
+async function sendMusicControl(action, positionMs = 0) {
+  const payload = { action };
+  if (action === "seek") payload.positionMs = Math.max(0, Math.round(positionMs));
+  try {
+    const result = await api("/api/music/control", { method: "POST", body: payload });
+    if (result && result.applied === false) {
+      // 200 但没生效（比如这台播放器不认 seek）：如实说，不假装成功
+      toast(result.reason || `播放器没接受「${MUSIC_ACTION_LABELS[action] || action}」`, "bad");
+    } else {
+      toast(`已发送：${MUSIC_ACTION_LABELS[action] || action}`, "ok");
+    }
+    return result;
+  } catch (error) {
+    toast(error.message || String(error), "bad");
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ 画 */
+async function renderMusic() {
+  if (!store.music) {
+    await load("music", async () => {
+      store.music = await api("/api/music/state");
+    });
+  }
+  if (pending(store.music)) return [panelHead("音乐", PANELS[7].desc), skeleton()];
+
+  bindMediaSession();
+  scheduleMusicPoll();
+  const state = store.music;
+  if (state.connection === "disabled") {
+    return [panelHead("音乐", PANELS[7].desc), musicDisabledCard(state)];
+  }
+  const [library, search] = await Promise.all([musicLibraryCard(), musicSearchCard()]);
+  return [
+    panelHead(
+      "音乐",
+      PANELS[7].desc,
+      button("立刻刷新", {
+        iconName: "refresh",
+        className: "ghost",
+        onClick: () => {
+          store.music = null;
+          render();
+        },
+      })
+    ),
+    musicNowCard(state),
+    library,
+    search,
+    musicStageCard(state),
+  ];
+}
+
+function musicDisabledCard(state) {
+  return h(
+    "section",
+    { class: "card" },
+    h(
+      "div",
+      { class: "card-head" },
+      h("h3", { text: "音乐没开" }),
+      badge(MUSIC_CONNECTION_LABELS.disabled)
+    ),
+    h("p", {
+      class: "empty",
+      text: "把 .env 里的 YIXIANG_MUSIC_ENABLED 改成 1，再刷新这一页就能读系统「正在播放」了。",
+    }),
+    h("p", {
+      class: "card-note",
+      text: state.note || "开着也不影响别的：音乐链路不注册工具、不写 chat_log、不进模型上下文。",
+    })
+  );
+}
+
+function musicNowCard(state) {
+  const track = state.track;
+  const playback = state.playback || {};
+  const lyrics = state.lyrics || {};
+  const label = MUSIC_CONNECTION_LABELS[state.connection] || state.connection || "未知";
+  const head = (extra) =>
+    h("div", { class: "card-head" }, h("h3", { text: "系统正在播放" }), badge(label), extra || null);
+
+  if (!track) {
+    return h(
+      "section",
+      { class: "card" },
+      head(null),
+      h("p", {
+        class: "empty",
+        text: "没听到正在放的歌：在任意播放器（QQ 音乐 / 网易云 / 浏览器 / 播放器本体）里点播放，这里会自己跟上。",
+      }),
+      h("p", {
+        class: "card-note",
+        text: state.note || "读的是 Windows「正在播放」（SMTC）：不挑播放器，也不挑会员。",
+      })
+    );
+  }
+
+  const durationMs = Number(track.durationMs || 0);
+  const positionMs = Number(playback.positionMs || 0);
+  const allowed =
+    Array.isArray(playback.controls) && playback.controls.length
+      ? playback.controls
+      : ["play", "pause", "next", "previous"];
+  const can = (action) => allowed.includes(action);
+
+  const seek = h("input", {
+    type: "range",
+    id: "music-seek",
+    class: "music-seek",
+    min: "0",
+    max: String(Math.max(durationMs, 1000)),
+    step: "1000",
+    value: String(Math.min(Math.max(positionMs, 0), Math.max(durationMs, 1000))),
+    "aria-label": "播放位置",
+  });
+  seek.addEventListener("change", () => {
+    void sendMusicControl("seek", Number(seek.value));
+  });
+
+  const control = (action, iconName, className) =>
+    button(MUSIC_ACTION_LABELS[action], {
+      iconName,
+      className,
+      disabled: !can(action),
+      onClick: () => {
+        void sendMusicControl(action).then(() => refreshMusicState());
+      },
+    });
+
+  const lines = Array.isArray(lyrics.lines) ? lyrics.lines : [];
+  const current = findLineIndex(lines, positionMs);
+  let lyricNode = null;
+  if (!lines.length) {
+    lyricNode = h("p", {
+      class: "empty",
+      text:
+        lyrics.note ||
+        (lyrics.status === "loading"
+          ? "正在找歌词…"
+          : "这首歌没找到歌词：把 .lrc 放进 music_lyrics_dir，或让 LRCLib 试试。"),
+    });
+  } else {
+    const list = h("ol", { class: "music-lines" });
+    for (const index of visibleLineIndexes(current, lines.length)) {
+      list.append(
+        h("li", {
+          class: `music-line${index === current ? " current" : ""}`,
+          text: lines[index].text || "♪",
+        })
+      );
+    }
+    lyricNode = list;
+  }
+
+  return h(
+    "section",
+    { class: "card" },
+    head(badge(playback.isPlaying ? "在放" : "暂停", playback.isPlaying ? "ok" : "")),
+    h(
+      "div",
+      { class: "music-track" },
+      h("p", { class: "music-title", text: track.title || "未知歌曲" }),
+      h("p", {
+        class: "card-note",
+        text: [track.artist || "未知歌手", track.album || ""].filter(Boolean).join(" · "),
+      })
+    ),
+    h(
+      "div",
+      { class: "music-transport" },
+      control("previous", "prev", "ghost"),
+      playback.isPlaying ? control("pause", "pause", "primary") : control("play", "play", "primary"),
+      control("next", "next", "ghost")
+    ),
+    h(
+      "div",
+      { class: "music-progress" },
+      h("span", { class: "card-note", text: formatTime(positionMs) }),
+      seek,
+      h("span", { class: "card-note", text: formatTime(durationMs) })
+    ),
+    h("p", {
+      class: "card-note",
+      text: `歌词来源：${lyrics.source || "无"}。这几个按钮动的是系统里那个播放器，不是这一页。`,
+    }),
+    lyricNode
+  );
+}
+
+async function musicLibraryCard() {
+  if (!store.musicLibrary) {
+    await load("music-library", async () => {
+      store.musicLibrary = await api("/api/music/library");
+    });
+  }
+  if (pending(store.musicLibrary)) return skeleton(2);
+
+  const items = store.musicLibrary.items || [];
+  const list = h("div", { class: "music-library" });
+  if (!items.length) {
+    list.append(
+      h("p", {
+        class: "empty",
+        text: "曲库是空的：把音频放进 music_audio_dir（默认 data/music/audio/）再刷新。",
+      })
+    );
+  }
+  for (const item of items) {
+    list.append(
+      h(
+        "div",
+        { class: "row" },
+        h("span", { class: "music-library-name", text: item.name }),
+        h("span", { class: "card-note", text: fmtBytes(item.sizeBytes) }),
+        button("播放", {
+          iconName: "play",
+          className: "ghost",
+          onClick: () => playMusicSource({ url: item.url, title: item.name }),
+        })
+      )
+    );
+  }
+  return h(
+    "section",
+    { class: "card" },
+    h("div", { class: "card-head" }, h("h3", { text: "本机播放" })),
+    h("p", {
+      class: "card-note",
+      text: "这一块放的是你自己盘里的音频：字节只从本机服务流到这台浏览器，谁都不经过。",
+    }),
+    ensureMusicAudio(),
+    list
+  );
+}
+
+function musicSearchCard() {
+  const select = h(
+    "select",
+    { id: "music-provider", class: "music-provider" },
+    MUSIC_PROVIDERS.map((item) => h("option", { value: item.name, text: item.label }))
+  );
+  select.value = store.musicProvider || MUSIC_PROVIDERS[0].name;
+  select.addEventListener("change", () => {
+    store.musicProvider = select.value;
+  });
+
+  const keyword = h("input", {
+    type: "search",
+    id: "music-query",
+    spellcheck: "false",
+    placeholder: "歌名 / 歌手",
+  });
+  keyword.value = store.musicQuery || "";
+  keyword.addEventListener("change", () => {
+    store.musicQuery = keyword.value.trim();
+  });
+
+  const results = h("div", { class: "music-results" });
+  for (const song of store.musicResults || []) {
+    results.append(
+      h(
+        "div",
+        { class: "row" },
+        h("span", {
+          class: "music-result-title",
+          text: `${song.title} — ${song.artist || "未知歌手"}`,
+        }),
+        badge(song.playable ? "可播" : "要会员", song.playable ? "ok" : "warn"),
+        button("看看", {
+          iconName: "search",
+          className: "ghost",
+          onClick: () => {
+            void openOnlineSong(select.value, song.id);
+          },
+        })
+      )
+    );
+  }
+  if (store.musicResults && !store.musicResults.length) {
+    results.append(h("p", { class: "empty", text: "没搜到：换个关键词，或者换一家平台。" }));
+  }
+
+  const run = button("搜歌", {
+    iconName: "search",
+    className: "primary",
+    onClick: () => {
+      void searchOnlineMusic(select.value, keyword.value.trim());
+    },
+  });
+
+  return h(
+    "section",
+    { class: "card" },
+    h(
+      "div",
+      { class: "card-head" },
+      h("h3", { text: "在线搜歌" }),
+      badge("直链交给浏览器")
+    ),
+    h("p", {
+      class: "card-note",
+      text:
+        "平台走自建 API（YIXIANG_NETEASE_API_BASE / KUGOU / QQ）：搜到的直链由浏览器自己拉，" +
+        "yixiang 不代理音频，也不把搜过什么记进任何对话。",
+    }),
+    h(
+      "div",
+      { class: "row" },
+      h("div", { class: "field" }, h("label", { for: "music-provider", text: "平台" }), select),
+      h("div", { class: "field" }, h("label", { for: "music-query", text: "关键词" }), keyword),
+      run
+    ),
+    results
+  );
+}
+
+async function searchOnlineMusic(provider, keyword) {
+  if (!keyword) {
+    toast("先写个歌名", "bad");
+    return;
+  }
+  store.musicProvider = provider;
+  store.musicQuery = keyword;
+  await load("music-search", async () => {
+    const query = `provider=${encodeURIComponent(provider)}&q=${encodeURIComponent(keyword)}`;
+    const payload = await api(`/api/music/search?${query}`);
+    store.musicResults = payload.items || [];
+  });
+  render();
+}
+
+async function openOnlineSong(provider, songId) {
+  await load("music-song", async () => {
+    const query = `provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(songId)}`;
+    const payload = await api(`/api/music/song?${query}`);
+    const song = payload.song || {};
+    playMusicSource({
+      url: payload.audioUrl,
+      title: song.title || "",
+      artist: song.artist || "",
+      album: song.album || "",
+      artworkUrl: song.artworkUrl || "",
+    });
+  });
+}
+
+function musicStageCard(state) {
+  const mode = chooseMode(state.track);
+  const toggle = button(store.musicStage ? "收起歌词舞台" : "打开歌词舞台", {
+    iconName: "layers",
+    className: store.musicStage ? "ghost" : "primary",
+    onClick: () => {
+      store.musicStage = !store.musicStage;
+      render();
+    },
+  });
+  let body = h("p", {
+    class: "empty",
+    text: "点「打开歌词舞台」，它会在这一页里开一块画布，跟着系统里那首歌滚。",
+  });
+  if (store.musicStage) {
+    const frame = h("iframe", {
+      class: "music-stage-frame",
+      title: "歌词舞台",
+      loading: "lazy",
+      src: "/lyrics-stage/original/index.html",
+    });
+    frame.addEventListener("load", () => pushStageState(frame, store.music, mode));
+    body = frame;
+  }
+  return h(
+    "section",
+    { class: "card" },
+    h("div", { class: "card-head" }, h("h3", { text: "歌词舞台" }), badge(mode), toggle),
+    h("p", {
+      class: "card-note",
+      text:
+        "移植自参考项目 MIT 的 original 渲染器（6 个模式、逐句高亮）——用哪个模式由歌名算出来，" +
+        "同一首歌永远是同一个。",
+    }),
+    body
+  );
+}
+
+function pushStageState(frame, state, mode) {
+  if (!frame.contentWindow || !state) return;
+  frame.contentWindow.postMessage(stageMessage(state, mode), window.location.origin);
+}
+
+// 舞台加载完会回一条 midori-lyrics-ready：等它自报家门之后父页再补送一次状态，
+// 免得"iframe 还没挂上监听"的那一次 postMessage 白发。
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin) return;
+  const data = event.data;
+  if (!data || data.type !== "midori-lyrics-ready" || data.engine !== "original") return;
+  if (!store.musicStage || !store.music) return;
+  const frame = document.querySelector(".music-stage-frame");
+  if (frame && frame.contentWindow === event.source) {
+    pushStageState(frame, store.music, chooseMode(store.music.track));
+  }
+});
+
 /* ------------------------------------------------------------------ 渲染 */
 const RENDERERS = {
   chat: renderChat,
@@ -2133,12 +2729,14 @@ const RENDERERS = {
   prompt: renderPrompt,
   qq: renderQQ,
   traces: renderTraces,
+  music: renderMusic,
 };
 
 let renderToken = 0;
 
 async function render() {
   const token = ++renderToken;
+  if (store.panel !== "music") stopMusicPolling();
   route();
   renderNav();
   renderStatus();

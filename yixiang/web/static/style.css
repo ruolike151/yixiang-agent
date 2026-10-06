@@ -1099,3 +1099,93 @@ code,
   background: var(--color-surface-2);
   color: var(--color-warn);
 }
+
+/* ------------------------------------------------------------------ 音乐 */
+/* 规则按面板里出现的顺序排：播放器 → 曲目 → 传输 → 进度 → 歌词 → 曲库 → 搜索 → 舞台 */
+
+.music-audio {
+  width: 100%;
+  margin-top: var(--space-3);
+}
+
+.music-track {
+  margin: var(--space-3) 0 var(--space-2);
+}
+
+.music-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--color-fg);
+}
+
+.music-transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+
+.music-progress {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.music-seek {
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+.music-lines {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.music-line {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-fg-mute);
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.music-line.current {
+  color: var(--color-fg);
+  background: var(--color-accent-soft);
+  font-weight: 600;
+}
+
+.music-library,
+.music-results {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.music-library-name,
+.music-result-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-provider {
+  min-width: 8rem;
+}
+
+.music-stage-frame {
+  display: block;
+  width: 100%;
+  height: 480px;
+  margin-top: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  /* 舞台自己有底：深色主题下先铺一层近黑，省掉 iframe 加载时的白闪 */
+  background: #05070d;
+}

@@ -6,7 +6,7 @@
 
 ## 0. 一分钟现状
 
-**能跑的**：`yixiang chat`（CLI 流式）/ `yixiang web`（本机七栏控制台，含链路 trace）/ `yixiang rag eval`（检索回归）/
+**能跑的**：`yixiang chat`（CLI 流式）/ `yixiang web`（本机八栏控制台，含链路 trace 与音乐）/ `yixiang rag eval`（检索回归）/
 `yixiang doctor`（八项自检）/ `yixiang serve`（QQ 网关 + 调度器，默认关）/ `yixiang backup` + 恢复演练。四个 PART 的验收项都在。
 
 **门禁**（当前实测）：
@@ -297,7 +297,7 @@ main 长期难以本地化。
 | `docs/TECH-DESIGN.md` §10.2 | "`gateway/qq.py` **骨架留在目录里**" | "**没有落盘**——空文件证明不了入口可插拔"，改为指向 `YIXIANG_QQ_*` 配置位 / `doctor` 白名单自检 / `brief_job` 接口预留；§1.4 目录树的两行也标了"设计位，尚未落盘" |
 | `docs/TECH-DESIGN.md` §10.3 | "`sinks.py` 定义 `Sink` 协议…P1 只落协议与 cli / file" | 改成"表是**设计**、`sinks.py` 尚未落盘"，并说明按需形态只需 `tools/brief.py` 直接写 `data/briefs/` |
 | `scripts/demo-week4.md` | `162 passed … in 4.51s`（3 处）+ 门禁块 `162 passed / 0 failed` + 成本 `¥0.0000` | `185 passed, 2 skipped, 1 deselected in 6.51s`、`185 passed / 0 failed`、成本行换成实测 `¥0.0150 / 今天 2 轮 ¥0.0236` |
-| `scripts/demo-week4.md` | 全篇没有 Web 控制台一节 | 新增第 10 节**加演**（面板动作表 + 上传路径 + 讲点），开头标明**不计入 3 分钟**；后来前端扩到七栏，表里补了"链路 trace"一行 |
+| `scripts/demo-week4.md` | 全篇没有 Web 控制台一节 | 新增第 10 节**加演**（面板动作表 + 上传路径 + 讲点），开头标明**不计入 3 分钟**；后来前端扩到八栏，表里补了"链路 trace"与"音乐"两行 |
 | `docs/PRODUCT.md` §14.2-3、`docs/TECH-DESIGN.md` §17.2-3、N-5 | 同源的"不做 Web dashboard" / "保留 qq.py 骨架" | 都补了"已偏离 / 未落盘"的更正，三处口径与上面一致 |
 
 > 后续进展（2026-09-23）：上表点名的"未落盘 / 骨架"**都已落盘**——`gateway/qq.py`（OneBot v11

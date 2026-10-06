@@ -1,26 +1,40 @@
-/* 以湘控制台 · 深色 OLED 主题（design system: Dark Mode (OLED) + Inter 字族）
-   颜色只走 token：改主题只改这一块，不改各处硬编码。
-   对比度按 WCAG AA 校过：正文 ≥ 12:1、次要文字 ≥ 5:1、按钮文字 ≥ 7:1。 */
+/* 以湘控制台 · 深色渐变主题
+   （design system: Dark Mode (OLED) + Music Streaming 调色板，多套 skin 可切）
+
+   规则：颜色只走 token，组件里不许写死色值。切换色调 = 换 `<html data-skin="…">`，
+   下面每个 skin 只覆盖 token，所以主界面、卡片、按钮、舞台外壳会一起换色。
+   对比度按 WCAG AA 逐套校过（脚本核过）：正文 ≥ 15:1、次要文字 ≥ 6:1、
+   主按钮文字 ≥ 6:1、链接/accent 在底色上 ≥ 7:1。 */
 
 :root {
   color-scheme: dark;
 
-  --color-bg: #0f172a;
-  --color-surface: #1e293b;
-  --color-surface-2: #272f42;
-  --color-secondary: #334155;
-  --color-border: #334155;
-  --color-border-strong: #475569;
-  --color-fg: #f8fafc;
-  --color-fg-dim: #a3b0c2;
-  --color-fg-mute: #8b9ab0;
-  --color-accent: #22c55e;
-  --color-accent-ink: #052e16;
-  --color-accent-soft: #14361f;
+  /* 默认 skin 就是 aurora（极光）。其它 skin 见下面 :root[data-skin="…"]。 */
+  --color-bg: #06121a;
+  --color-surface: #0e1d28;
+  --color-surface-2: #162834;
+  --color-secondary: #1d3442;
+  --color-border: #2a4150;
+  --color-border-strong: #3d5a6b;
+  --color-fg: #f1f7fa;
+  --color-fg-dim: #a8bcc9;
+  --color-fg-mute: #8ba0ad;
+  --color-accent: #2dd4bf;
+  --color-accent-2: #38bdf8;
+  --color-accent-ink: #04231f;
+  --color-accent-soft: #0d3b34;
   --color-danger: #ef4444;
   --color-danger-soft: #3a1618;
   --color-warn: #f59e0b;
   --color-info: #60a5fa;
+
+  /* 页面背景的三团光晕：只在大面积底色上用，别拿它们当文字色 */
+  --skin-glow-1: rgba(45, 212, 191, 0.16);
+  --skin-glow-2: rgba(56, 189, 248, 0.14);
+  --skin-glow-3: rgba(99, 102, 241, 0.12);
+  /* 顶栏/侧栏/卡片那层"玻璃"的混色比例 */
+  --glass-top: color-mix(in srgb, var(--color-bg) 72%, transparent);
+  --glass-side: color-mix(in srgb, var(--color-bg) 78%, transparent);
 
   --radius-sm: 6px;
   --radius: 10px;
@@ -46,6 +60,86 @@
   --mono: "JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
 }
 
+/* skin 2 · violet：霓虹紫（音乐流媒体的主色，紫底 + 亮紫按钮） */
+:root[data-skin="violet"] {
+  --color-bg: #0b0a1c;
+  --color-surface: #16142e;
+  --color-surface-2: #1e1b3d;
+  --color-secondary: #272250;
+  --color-border: #322b63;
+  --color-border-strong: #4a4088;
+  --color-fg: #f4f2ff;
+  --color-fg-dim: #b6b0d6;
+  --color-fg-mute: #9c96bf;
+  --color-accent: #a78bfa;
+  --color-accent-2: #6366f1;
+  --color-accent-ink: #221046;
+  --color-accent-soft: #2b2160;
+  --skin-glow-1: rgba(167, 139, 250, 0.2);
+  --skin-glow-2: rgba(99, 102, 241, 0.16);
+  --skin-glow-3: rgba(236, 72, 153, 0.12);
+}
+
+/* skin 3 · sunset：落日（暖调玫瑰，适合长时间挂着当氛围背景） */
+:root[data-skin="sunset"] {
+  --color-bg: #180c12;
+  --color-surface: #26141c;
+  --color-surface-2: #331b25;
+  --color-secondary: #40222e;
+  --color-border: #4d2b38;
+  --color-border-strong: #6d3f50;
+  --color-fg: #fdf2f5;
+  --color-fg-dim: #d3aeb9;
+  --color-fg-mute: #b8949f;
+  --color-accent: #fb7185;
+  --color-accent-2: #f59e0b;
+  --color-accent-ink: #43091a;
+  --color-accent-soft: #4a1626;
+  --skin-glow-1: rgba(251, 113, 133, 0.2);
+  --skin-glow-2: rgba(245, 158, 11, 0.14);
+  --skin-glow-3: rgba(168, 85, 247, 0.12);
+}
+
+/* skin 4 · ocean：深海（冷蓝，和 folia 那套青蓝舞台最贴） */
+:root[data-skin="ocean"] {
+  --color-bg: #04121c;
+  --color-surface: #0b2030;
+  --color-surface-2: #102b3f;
+  --color-secondary: #16374f;
+  --color-border: #1f4761;
+  --color-border-strong: #2f6384;
+  --color-fg: #eef7fc;
+  --color-fg-dim: #a3bece;
+  --color-fg-mute: #87a3b3;
+  --color-accent: #38bdf8;
+  --color-accent-2: #818cf8;
+  --color-accent-ink: #05283c;
+  --color-accent-soft: #0c3348;
+  --skin-glow-1: rgba(56, 189, 248, 0.18);
+  --skin-glow-2: rgba(129, 140, 248, 0.15);
+  --skin-glow-3: rgba(45, 212, 191, 0.12);
+}
+
+/* skin 5 · graphite：石墨（无彩度，想把注意力全留给歌词舞台时用） */
+:root[data-skin="graphite"] {
+  --color-bg: #0c0c10;
+  --color-surface: #17171d;
+  --color-surface-2: #1f1f27;
+  --color-secondary: #282830;
+  --color-border: #33333d;
+  --color-border-strong: #4a4a57;
+  --color-fg: #f4f4f7;
+  --color-fg-dim: #b3b3bd;
+  --color-fg-mute: #9a9aa5;
+  --color-accent: #cbd5e1;
+  --color-accent-2: #94a3b8;
+  --color-accent-ink: #0b0b0f;
+  --color-accent-soft: #2a2f3a;
+  --skin-glow-1: rgba(203, 213, 225, 0.1);
+  --skin-glow-2: rgba(148, 163, 184, 0.08);
+  --skin-glow-3: rgba(100, 116, 139, 0.08);
+}
+
 *,
 *::before,
 *::after {
@@ -63,8 +157,23 @@ body {
   height: 100%;
 }
 
+/* 底色不是一块死黑：三团同色系光晕铺在渐变上，卡片浮在其上才有纵深。
+   光晕只走 --skin-glow-*，换 skin 时整套背景跟着换。 */
+html {
+  background-color: var(--color-bg);
+}
+
 body {
-  background: var(--color-bg);
+  background-color: var(--color-bg);
+  background-image: radial-gradient(
+      1100px 640px at 8% -10%,
+      var(--skin-glow-1),
+      transparent 62%
+    ),
+    radial-gradient(980px 600px at 92% 2%, var(--skin-glow-2), transparent 60%),
+    radial-gradient(900px 900px at 50% 118%, var(--skin-glow-3), transparent 66%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
   color: var(--color-fg);
   font-family: var(--font);
   font-size: 15px;
@@ -156,17 +265,37 @@ a {
   gap: var(--space-5);
   flex-wrap: wrap;
   padding: var(--space-3) var(--space-5);
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
+  /* 顶栏是玻璃而不是实心板：底下的光晕透出来一点，才不会"上面一条、下面一条" */
+  background: var(--glass-top);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--color-border) 70%, transparent);
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
+}
+
+/* 顶栏底边那条渐隐的 accent 线：一条 hairline 就能把"呆板"救回来 */
+.topbar::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-accent) 55%, transparent),
+    transparent
+  );
+  pointer-events: none;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  min-width: 0;
 }
 
 .brand-mark {
@@ -174,10 +303,17 @@ a {
   place-items: center;
   width: 36px;
   height: 36px;
+  flex: none;
   border-radius: var(--radius);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border-strong);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--color-accent) 26%, var(--color-surface)),
+    var(--color-surface-2)
+  );
+  border: 1px solid color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
   color: var(--color-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 12%, transparent),
+    0 6px 18px -10px color-mix(in srgb, var(--color-accent) 70%, transparent);
 }
 
 .brand-text {
@@ -218,6 +354,76 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* -------------------------------------------------------------- 色调切换 */
+/* 五套皮肤各一枚渐变圆片：点一下换 <html data-skin>，只改 token，不重渲染面板。
+   会话内生效、不落盘——和歌词舞台的模式一样，刷新回到默认。 */
+.topbar-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.skin-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-surface) 55%, transparent);
+}
+
+.skin-picker-label {
+  font-size: 12px;
+  color: var(--color-fg-mute);
+  white-space: nowrap;
+}
+
+.skin-chip {
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--color-fg) 26%, transparent);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-bg) 70%, transparent);
+  transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+
+.skin-chip:hover {
+  transform: scale(1.12);
+}
+
+.skin-chip[aria-pressed="true"] {
+  border-color: var(--color-fg);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-bg) 70%, transparent),
+    0 0 0 2px color-mix(in srgb, var(--color-accent) 70%, transparent);
+}
+
+/* 每一枚的渐变色就是它代表的皮肤本身，别用文字解释 */
+.skin-chip[data-skin-id="aurora"] {
+  background: linear-gradient(135deg, #2dd4bf, #38bdf8 55%, #6366f1);
+}
+
+.skin-chip[data-skin-id="violet"] {
+  background: linear-gradient(135deg, #a78bfa, #6366f1 60%, #ec4899);
+}
+
+.skin-chip[data-skin-id="sunset"] {
+  background: linear-gradient(135deg, #fb7185, #f59e0b 60%, #a855f7);
+}
+
+.skin-chip[data-skin-id="ocean"] {
+  background: linear-gradient(135deg, #38bdf8, #818cf8 60%, #2dd4bf);
+}
+
+.skin-chip[data-skin-id="graphite"] {
+  background: linear-gradient(135deg, #e2e8f0, #94a3b8 60%, #475569);
+}
+
 /* ---------------------------------------------------------------- 侧边栏 */
 .sidebar {
   display: flex;
@@ -225,7 +431,9 @@ a {
   justify-content: space-between;
   gap: var(--space-4);
   padding: var(--space-4) var(--space-3);
-  background: color-mix(in srgb, var(--color-bg) 70%, var(--color-surface));
+  background: var(--glass-side);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-right: 1px solid var(--color-border);
   position: sticky;
   top: 61px;
@@ -244,6 +452,7 @@ a {
 }
 
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -256,19 +465,42 @@ a {
   font-size: 14px;
   cursor: pointer;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
-    border-color var(--dur) var(--ease);
+    border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 
 .nav-item:hover {
-  background: var(--color-surface);
+  background: color-mix(in srgb, var(--color-surface) 78%, transparent);
+  border-color: color-mix(in srgb, var(--color-border-strong) 60%, transparent);
   color: var(--color-fg);
+  transform: translateX(2px);
 }
 
 .nav-item[aria-current="page"] {
-  background: var(--color-surface);
-  border-color: var(--color-border-strong);
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--color-accent) 18%, var(--color-surface)),
+    color-mix(in srgb, var(--color-accent) 4%, var(--color-surface))
+  );
+  border-color: color-mix(in srgb, var(--color-accent) 34%, var(--color-border));
   color: var(--color-fg);
   font-weight: 600;
+}
+
+/* 选中项左边那道 accent 竖条：比整块变色更安静，也更像"定位"而不是"警告" */
+.nav-item[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  border-radius: 999px;
+  background: linear-gradient(var(--color-accent), var(--color-accent-2));
+}
+
+.nav-item[aria-current="page"] svg {
+  color: var(--color-accent);
 }
 
 .nav-item svg {
@@ -318,13 +550,28 @@ a {
 }
 
 .panel-head h2 {
-  font-size: 19px;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+/* 标题前一小段渐变竖条：整页唯一一处"标题装饰"，多了就吵 */
+.panel-head h2::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 0.82em;
+  margin-right: var(--space-2);
+  border-radius: 999px;
+  vertical-align: -0.06em;
+  background: linear-gradient(var(--color-accent), var(--color-accent-2));
 }
 
 .panel-head p {
   color: var(--color-fg-mute);
   font-size: 13px;
   max-width: 72ch;
+  margin-top: var(--space-1);
 }
 
 .row {
@@ -346,14 +593,28 @@ a {
 }
 
 .card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  /* 卡片：一层"上亮下暗"的玻璃 + 内高光。暗色界面的纵深全靠这两笔。 */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-surface) 92%, var(--color-fg)),
+    var(--color-surface)
+  );
+  border: 1px solid color-mix(in srgb, var(--color-border) 82%, var(--color-fg));
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-fg) 6%, transparent),
+    0 18px 40px -30px rgba(0, 0, 0, 0.9);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.card:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 22%, var(--color-border));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-fg) 7%, transparent),
+    0 22px 48px -30px rgba(0, 0, 0, 0.95);
 }
 
 .card-head {
@@ -391,8 +652,8 @@ button,
   min-height: var(--tap);
   padding: 0 var(--space-4);
   border-radius: var(--radius);
-  border: 1px solid var(--color-border-strong);
-  background: var(--color-surface-2);
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 78%, transparent);
+  background: color-mix(in srgb, var(--color-surface-2) 88%, transparent);
   color: var(--color-fg);
   font: inherit;
   font-size: 14px;
@@ -403,12 +664,12 @@ button,
 
 button:hover:not(:disabled),
 .button:hover {
-  background: var(--color-secondary);
-  border-color: var(--color-fg-mute);
+  background: color-mix(in srgb, var(--color-secondary) 88%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border-strong));
 }
 
 button:active:not(:disabled) {
-  transform: translateY(1px);
+  transform: translateY(1px) scale(0.99);
 }
 
 button:disabled {
@@ -417,20 +678,36 @@ button:disabled {
 }
 
 button.primary {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+  /* 主按钮是唯一带"光"的元素：渐变 + 外发光，一屏只该有一两枚 */
+  background: linear-gradient(
+    135deg,
+    var(--color-accent),
+    color-mix(in srgb, var(--color-accent) 55%, var(--color-accent-2))
+  );
+  border-color: color-mix(in srgb, var(--color-accent) 70%, var(--color-accent-2));
   color: var(--color-accent-ink);
   font-weight: 600;
+  box-shadow: 0 10px 24px -14px color-mix(in srgb, var(--color-accent) 85%, transparent);
 }
 
 button.primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-accent) 84%, white);
-  border-color: var(--color-accent);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-accent) 88%, white),
+    color-mix(in srgb, var(--color-accent) 48%, var(--color-accent-2))
+  );
+  border-color: color-mix(in srgb, var(--color-accent) 80%, var(--color-accent-2));
+  box-shadow: 0 14px 30px -14px color-mix(in srgb, var(--color-accent) 95%, transparent);
 }
 
 button.ghost {
-  background: transparent;
-  border-color: var(--color-border);
+  background: color-mix(in srgb, var(--color-surface-2) 34%, transparent);
+  border-color: color-mix(in srgb, var(--color-border-strong) 62%, transparent);
+  color: var(--color-fg-dim);
+}
+
+button.ghost:hover:not(:disabled) {
+  color: var(--color-fg);
 }
 
 button.danger {
@@ -889,26 +1166,29 @@ code,
   align-items: center;
   gap: var(--space-1);
   padding: 2px var(--space-2);
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   font-size: 12px;
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border-strong);
+  background: color-mix(in srgb, var(--color-surface-2) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 70%, transparent);
   color: var(--color-fg-dim);
 }
 
 .badge.ok {
   color: var(--color-accent);
   border-color: color-mix(in srgb, var(--color-accent) 50%, var(--color-border));
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 }
 
 .badge.bad {
   color: var(--color-danger);
   border-color: color-mix(in srgb, var(--color-danger) 50%, var(--color-border));
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
 }
 
 .badge.warn {
   color: var(--color-warn);
   border-color: color-mix(in srgb, var(--color-warn) 50%, var(--color-border));
+  background: color-mix(in srgb, var(--color-warn) 12%, transparent);
 }
 
 .notice {
@@ -997,9 +1277,11 @@ code,
 .toast {
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
-  border: 1px solid var(--color-border-strong);
-  background: var(--color-surface);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 82%, transparent);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 18px 44px -18px rgb(0 0 0 / 75%);
   font-size: 13px;
   animation: rise 200ms var(--ease);
 }
@@ -1058,6 +1340,28 @@ code,
   .chat-scroll {
     max-height: none;
   }
+  /* 手机上全屏舞台不留大边距，横向的引擎条要能滑 */
+  .music-stage-card.is-fullscreen {
+    padding: var(--space-3);
+  }
+  .music-stage-card.is-fullscreen .music-stage-engines {
+    overflow-x: auto;
+  }
+  .topbar-tools {
+    margin-left: 0;
+  }
+}
+
+/* 触屏：小圆片按到 44px 才好点（鼠标下 26px 就够，不必占那么大） */
+@media (pointer: coarse) {
+  .skin-chip {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+  .music-stage-engines .music-stage-mode select {
+    min-height: var(--tap);
+  }
 }
 
 @media (max-width: 420px) {
@@ -1069,6 +1373,9 @@ code,
   }
   .status-strip {
     gap: var(--space-1) var(--space-3);
+  }
+  .skin-picker-label {
+    display: none;
   }
 }
 
@@ -1184,10 +1491,11 @@ code,
   width: 100%;
   height: 480px;
   margin-top: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--color-border) 80%, var(--color-fg));
+  border-radius: var(--radius-lg);
   /* 舞台自己有底：深色主题下先铺一层近黑，省掉 iframe 加载时的白闪 */
   background: #05070d;
+  box-shadow: 0 24px 60px -34px rgba(0, 0, 0, 0.95);
 }
 
 /* —— Task 10：歌词舞台的引擎切换条 —— */
@@ -1201,6 +1509,93 @@ code,
 
 .music-stage-engines .music-stage-mode {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--color-fg-mute);
   font-size: 12px;
+}
+
+/* 全局那条 `select { width: 100% }` 是给表单用的；这里在切换条里只要它够宽放得下模式名。 */
+.music-stage-engines .music-stage-mode select {
+  width: auto;
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------- 歌词舞台 · 全屏（P0） */
+/* 全屏是**加类名**，不是把 iframe 搬去别处：iframe 一挪就会重载，
+   台上那份歌词进度、K 歌逐字全没了。所以卡片原地变成一层 fixed 覆盖层。 */
+.music-stage-card.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  gap: var(--space-3);
+  overflow: hidden;
+  background-color: var(--color-bg);
+  background-image: radial-gradient(
+      900px 520px at 12% -12%,
+      var(--skin-glow-1),
+      transparent 62%
+    ),
+    radial-gradient(820px 520px at 88% 0%, var(--skin-glow-2), transparent 60%),
+    radial-gradient(760px 760px at 50% 118%, var(--skin-glow-3), transparent 66%);
+  animation: stage-enter 200ms var(--ease);
+}
+
+@keyframes stage-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.995);
+  }
+}
+
+/* 全屏里那张说明卡就不留了：屏幕每一寸都给歌词。 */
+.music-stage-card.is-fullscreen .card-note,
+.music-stage-card.is-fullscreen .empty {
+  display: none;
+}
+
+.music-stage-card.is-fullscreen > .card-head {
+  flex: none;
+}
+
+/* 中间那段"引擎条 + iframe"要撑满，靠这条 flex 链，别用固定高度 */
+.music-stage-card.is-fullscreen .music-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.music-stage-card.is-fullscreen .music-stage-engines {
+  flex: none;
+  margin-bottom: var(--space-3);
+}
+
+.music-stage-card.is-fullscreen .music-stage-frame {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  margin-top: 0;
+}
+
+/* 「Esc 退出」只在全屏里出现，平时不占位置 */
+.stage-fullscreen-hint {
+  display: none;
+  font-size: 12px;
+  color: var(--color-fg-mute);
+}
+
+.music-stage-card.is-fullscreen .stage-fullscreen-hint {
+  display: inline;
+}
+
+body.stage-fullscreen {
+  overflow: hidden;
 }

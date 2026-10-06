@@ -16,6 +16,8 @@ import {
   formatTime,
   hashText,
   lyricLinesToLrc,
+  modeChangeRequiresReload,
+  modeOptions,
   pollDelay,
   stageMessage,
   stateToFoliaEvents,
@@ -199,6 +201,33 @@ test("chooseMode 按引擎分池：folia 的自动池排除 tempera，显式请�
   // 引擎不认识 / 没传 → 退回 original 的 6 个，行为与 Task 8 逐字一致。
   assert.ok(["luminous", "blueprint", "cinema", "pixel", "cloud", "mindscape"]
     .includes(chooseMode({ id: "smtc:QQMusic.exe", title: "One Last Kiss" })));
+});
+
+test("modeOptions 第一项是「自动（<自动挑到的>）」，后面按引擎池的顺序列全", () => {
+  const options = modeOptions("original", "cinema");
+  assert.equal(options.length, 1 + ORIGINAL_MODES.length);
+  assert.deepEqual(options[0], { value: "", label: "自动（cinema）" });
+  assert.deepEqual(options.slice(1).map((item) => item.value), ORIGINAL_MODES);
+});
+
+test("modeOptions 给 folia 列全 13 项：tempera 不进自动池，但手动要选得到", () => {
+  const options = modeOptions("folia", "classic");
+  assert.equal(options.length, 1 + FOLIA_MODES.length);
+  assert.deepEqual(options.slice(1).map((item) => item.value), FOLIA_MODES);
+  assert.ok(options.some((item) => item.value === "tempera"), "tempera 是 opt-in，手动选得到才算数");
+  assert.ok(options.every((item) => item.label), "每一项都要有可读的名字，不能是空标签");
+});
+
+test("modeOptions 引擎不认识时退回 original 的 6 个；自动项没模式可显示就只写「自动」", () => {
+  assert.deepEqual(modeOptions("nope", "luminous").slice(1).map((item) => item.value), ORIGINAL_MODES);
+  assert.deepEqual(modeOptions(undefined, "")[0], { value: "", label: "自动" });
+});
+
+test("folia 的模式在 URL 查询串里，换模式必须重载 iframe；original 走 postMessage 不重载", () => {
+  assert.equal(modeChangeRequiresReload("folia"), true);
+  assert.equal(modeChangeRequiresReload("original"), false);
+  // 引擎名不认识时按 original 对待（与 chooseMode 的回落口径一致）
+  assert.equal(modeChangeRequiresReload("nope"), false);
 });
 
 test("formatLrcTimestamp 是 [mm:ss.cc]（厘秒，不是毫秒）", () => {

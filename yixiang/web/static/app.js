@@ -13,7 +13,7 @@
 // Markdown 渲染器是独立模块（`markdown.mjs`），解析与建节点分开：
 // 它只往 textContent / createTextNode 写数据，第 5 行的那条约束照样成立。
 import { renderMarkdown } from "./markdown.mjs";
-import { chooseMode, DEFAULT_THEME, findLineIndex, formatTime, pollDelay, stateToFoliaEvents, stageMessage, visibleLineIndexes } from "./music.mjs";
+import { chooseMode, DEFAULT_THEME, findLineIndex, formatTime, modeChangeRequiresReload, modeOptions, pollDelay, stateToFoliaEvents, stageMessage, visibleLineIndexes } from "./music.mjs";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -106,6 +106,19 @@ const ICONS = {
   pause: ["M8 4v16", "M16 4v16"],
   prev: ["M19 5 9 12l10 7z", "M6 5v14"],
   next: ["M5 5l10 7-10 7z", "M18 5v14"],
+  /* 全屏一对：expand 是"撑开"，collapse 是"收回来" */
+  expand: [
+    "M8 3H5a2 2 0 0 0-2 2v3",
+    "M16 3h3a2 2 0 0 1 2 2v3",
+    "M8 21H5a2 2 0 0 1-2-2v-3",
+    "M16 21h3a2 2 0 0 0 2-2v-3",
+  ],
+  collapse: [
+    "M3 8h3a2 2 0 0 0 2-2V3",
+    "M21 8h-3a2 2 0 0 1-2-2V3",
+    "M3 16h3a2 2 0 0 1 2 2v3",
+    "M21 16h-3a2 2 0 0 0-2 2v3",
+  ],
 };
 
 /* ------------------------------------------------------------------ DOM */
@@ -246,6 +259,16 @@ async function copyText(text) {
 }
 
 /* ------------------------------------------------------------------ 状态 */
+/* 五套色调（skin）：只换 CSS 变量，不动 DOM 结构，也不落盘——
+   和歌词舞台的模式一样，会话内切换、刷新回到默认。 */
+const SKINS = [
+  { id: "aurora", label: "极光" },
+  { id: "violet", label: "霓虹紫" },
+  { id: "sunset", label: "落日" },
+  { id: "ocean", label: "深海" },
+  { id: "graphite", label: "石墨" },
+];
+
 const store = {
   panel: "chat",
   arg: "",
@@ -291,9 +314,12 @@ const store = {
   musicProvider: "",
   musicQuery: "",
   musicStage: false,
+  musicStageFullscreen: false,   // P0：歌词舞台全屏（只改类名，绝不搬 iframe）
   musicEngine: "original",   // Task 10：'original'（MIT，Task 9）| 'folia'（AGPL，Task 10）
+  musicMode: "",             // 空串 = 自动（照歌名哈希挑）；填了就是用户在舞台里点名的那个模式
   musicAudio: null,
   musicSong: null,
+  skin: "aurora",
 };
 
 const $main = document.getElementById("main");
@@ -446,6 +472,48 @@ function renderStatus() {
 function renderBrandMark() {
   const mark = document.getElementById("brand-mark");
   mark.replaceChildren(icon("spark", 20));
+}
+
+/* --------------------------------------------------------------- 色调切换 */
+/** 只改 `<html data-skin>`：所有颜色都是 token，这一下等于换了整套色板。 */
+function applySkin(id) {
+  const skin = SKINS.find((item) => item.id === id) || SKINS[0];
+  store.skin = skin.id;
+  if (store.skin === "aurora") delete document.documentElement.dataset.skin;
+  else document.documentElement.dataset.skin = skin.id;
+  const picker = document.getElementById("skin-picker");
+  if (!picker) return;
+  for (const chip of picker.querySelectorAll(".skin-chip")) {
+    const active = chip.dataset.skinId === store.skin;
+    chip.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+function renderSkinPicker() {
+  const host = document.getElementById("topbar-tools");
+  if (!host) return;
+  const picker = h(
+    "div",
+    {
+      class: "skin-picker",
+      id: "skin-picker",
+      role: "group",
+      "aria-label": "界面色调",
+    },
+    h("span", { class: "skin-picker-label", text: "色调" }),
+    ...SKINS.map((skin) =>
+      h("button", {
+        type: "button",
+        class: "skin-chip",
+        "data-skin-id": skin.id,
+        title: skin.label,
+        "aria-label": skin.label,
+        "aria-pressed": store.skin === skin.id ? "true" : "false",
+        onclick: () => applySkin(skin.id),
+      })
+    )
+  );
+  host.replaceChildren(picker);
 }
 
 /* ------------------------------------------------------------------ 对话 */
@@ -2458,7 +2526,7 @@ function musicNowCard(state) {
         lyrics.note ||
         (lyrics.status === "loading"
           ? "正在找歌词…"
-          : "这首歌没找到歌词：把 .lrc 放进 music_lyrics_dir，或让 LRCLib 试试。"),
+          : "这首歌没找到歌词：已问过 QQ 音乐和 LRCLib，也可以把 .lrc 放进 music_lyrics_dir。"),
     });
   } else {
     const list = h("ol", { class: "music-lines" });
@@ -2697,7 +2765,17 @@ function foliaServiceWorkerReset() {
     .catch(() => {});
 }
 
-function musicStageEngineBar(mode) {
+// 舞台这一秒该用哪个模式：`store.musicMode` 点名优先，空串就照歌名哈希自动挑。
+function stageMode() {
+  return chooseMode(store.music && store.music.track, store.musicMode, store.musicEngine);
+}
+
+// 徽章上除了模式名，还要看得出来这是不是手动点的——不然"怎么这首歌不是自动那个模式"没人解释。
+function stageModeLabel(mode) {
+  return store.musicMode ? `${mode} · 手动` : mode;
+}
+
+function musicStageEngineBar() {
   const bar = document.createElement("div");
   bar.className = "music-stage-engines";
   for (const engine of LYRIC_ENGINES) {
@@ -2706,9 +2784,22 @@ function musicStageEngineBar(mode) {
       onClick: () => switchLyricEngine(engine.engine),
     }));
   }
-  const label = document.createElement("span");
+
+  // 模式下拉框：模式池跟着引擎走（original 6 / folia 12，含手动才选得到的 tempera）。
+  // 第一项是"自动（<自动会挑到的那个>）"，选中它 = 回到按歌名算。
+  const options = modeOptions(store.musicEngine, chooseMode(store.music && store.music.track, "", store.musicEngine));
+  const known = options.some((option) => option.value === store.musicMode);
+  if (!known) store.musicMode = "";   // 换引擎带过来的残留值：当场清掉，别让下拉框空着
+
+  const label = document.createElement("label");
   label.className = "music-stage-mode";
-  label.textContent = `当前模式：${mode}`;
+  label.append(document.createTextNode("模式"));
+  const select = document.createElement("select");
+  select.id = "music-stage-mode-select";
+  for (const option of options) select.append(new Option(option.label, option.value));
+  select.value = store.musicMode;
+  select.addEventListener("change", () => switchLyricStageMode(select.value));
+  label.append(select);
   bar.append(label);
   return bar;
 }
@@ -2716,54 +2807,194 @@ function musicStageEngineBar(mode) {
 function switchLyricEngine(engine) {
   if (engine === store.musicEngine) return;
   store.musicEngine = engine;
-  const frame = document.querySelector(".music-stage-frame");
-  if (frame) {
-    // 顺序有讲究（上游 spotify-lyrics-stage.js:375-379）：
-    // 先把 iframe 甩到 about:blank 断开旧引擎，复位 service worker，再赋真 src。
-    // 直接换 src 会命中旧 SW 的缓存，表现为"切过去了但还是旧引擎的画面"。
-    frame.src = "about:blank";
-    foliaServiceWorkerReset().then(() => {
-      frame.src = frameUrlFor(store.musicEngine, chooseMode(store.music.track, "", store.musicEngine));
-    });
-  }
+  store.musicMode = "";   // 模式池换了，回到"自动"，别把上一个引擎点名的模式带过去
+  reloadLyricStageFrame();
   render();
 }
 
+// folia 的模式只从 URL 查询串读（`?visualizer=…`），换模式不重载就是"选了没反应"；
+// original 的模式走 postMessage，原地换掉即可，重载反而会白屏一下。
+function switchLyricStageMode(mode) {
+  if (mode === store.musicMode) return;
+  store.musicMode = mode;
+  if (modeChangeRequiresReload(store.musicEngine)) {
+    reloadLyricStageFrame();
+  } else {
+    const frame = document.querySelector(".music-stage-frame");
+    if (frame) postStateToFrame(frame, store.music, stageMode());
+  }
+  const badgeNode = document.getElementById("music-stage-mode-badge");
+  if (badgeNode) badgeNode.textContent = stageModeLabel(stageMode());
+}
+
+function reloadLyricStageFrame() {
+  const frame = document.querySelector(".music-stage-frame");
+  if (!frame) return;
+  // 顺序有讲究（上游 spotify-lyrics-stage.js:375-379）：
+  // 先把 iframe 甩到 about:blank 断开旧引擎，复位 service worker，再赋真 src。
+  // 直接换 src 会命中旧 SW 的缓存，表现为"切过去了但还是旧引擎的画面"。
+  frame.src = "about:blank";
+  foliaServiceWorkerReset().then(() => {
+    frame.src = frameUrlFor(store.musicEngine, stageMode());
+  });
+}
+
+/* ------------------------------------------------- 歌词舞台 · 全屏（P0） */
+// 全屏靠"给卡片加一个类名"实现（样式见 style.css 的 `.music-stage-card.is-fullscreen`）：
+// **不把 iframe 挪进别的容器**——DOM 一挪 iframe 就重载，台上那份歌词进度与逐字动画全没了。
+// 所以这里只做三件事：改类名、换按钮文案、把焦点送到该在的位置。
+function stageFullscreenActive() {
+  return Boolean(store.musicStageFullscreen && store.musicStage && store.panel === "music");
+}
+
+function setStageFullscreenButton(active) {
+  const node = document.getElementById("music-stage-fullscreen");
+  if (!node) return;
+  node.replaceChildren(
+    icon(active ? "collapse" : "expand", 16),
+    h("span", { text: active ? "退出全屏" : "全屏播放" })
+  );
+  node.title = active ? "退出全屏（Esc）" : "全屏播放歌词舞台";
+  node.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
+/** 把 store 上的全屏状态刷到 DOM：类名 + 按钮文案。不重渲染 = iframe 不重载。 */
+function syncStageFullscreenDom() {
+  const active = stageFullscreenActive();
+  document.body.classList.toggle("stage-fullscreen", active);
+  const card = document.querySelector(".music-stage-card");
+  if (card) card.classList.toggle("is-fullscreen", active);
+  setStageFullscreenButton(active);
+}
+
+// 浏览器那层真全屏是"锦上添花"：拿不到（不给权限 / 旧浏览器）也没关系，
+// CSS 覆盖层已经把画面铺满了。两个都失败才是真问题，那时按钮文案仍然是对的。
+function requestNativeStageFullscreen() {
+  const card = document.querySelector(".music-stage-card");
+  if (!card || typeof card.requestFullscreen !== "function") return;
+  try {
+    const result = card.requestFullscreen();
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch {
+    // 忽略：覆盖层已经生效
+  }
+}
+
+function releaseNativeStageFullscreen() {
+  if (!document.fullscreenElement) return;
+  try {
+    const result = document.exitFullscreen();
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch {
+    // 忽略
+  }
+}
+
+function setStageFullscreen(on) {
+  const next = Boolean(on);
+  if (next === store.musicStageFullscreen) {
+    syncStageFullscreenDom();
+    return;
+  }
+  store.musicStageFullscreen = next;
+  syncStageFullscreenDom();
+  if (next) {
+    requestNativeStageFullscreen();
+  } else {
+    releaseNativeStageFullscreen();
+  }
+  // 焦点跟着按钮走：进全屏时坐在「退出全屏」上（一按 Esc / 回车就能回来），
+  // 退出来还回「全屏播放」——键盘用户不会掉到页首。
+  const toggle = document.getElementById("music-stage-fullscreen");
+  if (toggle) toggle.focus();
+}
+
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !store.musicStageFullscreen) return;
+  setStageFullscreen(false);
+});
+
+// 浏览器用 Esc 关掉它那层全屏时，这里同步收掉覆盖层，别留一屏黑在那儿。
+document.addEventListener("fullscreenchange", () => {
+  if (document.fullscreenElement || !stageFullscreenActive()) return;
+  store.musicStageFullscreen = false;
+  syncStageFullscreenDom();
+  const toggle = document.getElementById("music-stage-fullscreen");
+  if (toggle) toggle.focus();
+});
+
 function musicStageCard(state) {
-  const mode = chooseMode(state.track, "", store.musicEngine);
+  const mode = chooseMode(state.track, store.musicMode, store.musicEngine);
   const toggle = button(store.musicStage ? "收起歌词舞台" : "打开歌词舞台", {
     iconName: "layers",
     className: store.musicStage ? "ghost" : "primary",
     onClick: () => {
       store.musicStage = !store.musicStage;
+      // 收起舞台就等于退出全屏：不然下次点开会"直接跳进全屏"，像是坏了
+      if (!store.musicStage) store.musicStageFullscreen = false;
       render();
     },
   });
+  const fullscreen = button("全屏播放", {
+    iconName: "expand",
+    className: "ghost",
+    title: "全屏播放歌词舞台",
+    onClick: () => setStageFullscreen(!stageFullscreenActive()),
+  });
+  fullscreen.id = "music-stage-fullscreen";
+  fullscreen.setAttribute("aria-pressed", "false");
   let body = h("p", {
     class: "empty",
     text: "点「打开歌词舞台」，它会在这一页里开一块画布，跟着系统里那首歌滚。",
   });
   if (store.musicStage) {
-    const engineBar = musicStageEngineBar(mode);
+    const engineBar = musicStageEngineBar();
     const frame = h("iframe", {
       class: "music-stage-frame",
       title: "歌词舞台",
       loading: "lazy",
+      allowfullscreen: true,
       src: frameUrlFor(store.musicEngine, mode),
     });
-    frame.addEventListener("load", () => postStateToFrame(frame, store.music, mode));
+    // 用 stageMode() 现取而不是捕获 mode：换模式不重渲染，靠的就是这条回调送新模式。
+    frame.addEventListener("load", () => postStateToFrame(frame, store.music, stageMode()));
     body = h("div", { class: "music-stage" }, engineBar, frame);
   }
+  const modeBadge = badge(stageModeLabel(mode));
+  modeBadge.id = "music-stage-mode-badge";   // 换模式时原地改这一枚，不整页重渲染
   return h(
     "section",
-    { class: "card" },
-    h("div", { class: "card-head" }, h("h3", { text: "歌词舞台" }), badge(mode), toggle),
+    {
+      class: `card music-stage-card${stageFullscreenActive() ? " is-fullscreen" : ""}`,
+    },
+    h(
+      "div",
+      { class: "card-head" },
+      h("div", { class: "row" }, h("h3", { text: "歌词舞台" }), modeBadge),
+      h(
+        "div",
+        { class: "row" },
+        h("span", { class: "stage-fullscreen-hint", text: "Esc 退出全屏" }),
+        toggle,
+        store.musicStage ? fullscreen : null
+      )
+    ),
     h("p", {
       class: "card-note",
       text:
         "两套渲染器可切：original（MIT，6 个模式、逐句高亮）与 Folia（AGPL，12 个模式、卡拉 OK 逐字）" +
-        "——用哪个模式由歌名算出来，同一首歌永远同一个。",
+        "。模式默认照歌名算（同一首歌永远同一个），右边下拉框可以手动点名；换引擎会回到自动。",
     }),
+    // 嵌入模式下 Folia 自己的界面是收起来的（上游就是这么写的）：舞台只认父页推过去的曲目。
+    // 不写这一句，用户会以为"按钮坏了"。换歌走上面那张「在线搜歌」卡片。
+    store.musicEngine === "folia"
+      ? h("p", {
+          class: "card-note",
+          text:
+            "Folia 走的是嵌入模式（?lyricStage=1），它自带的搜索与设置按钮在这一页里收起来了，" +
+            "点了不会有反应。换歌请用上面的「在线搜歌」卡片：搜到之后点播放，曲目就会推给舞台。",
+        })
+      : null,
     body
   );
 }
@@ -2795,7 +3026,7 @@ window.addEventListener("message", (event) => {
   if (!store.musicStage || !store.music) return;
   const frame = document.querySelector(".music-stage-frame");
   if (frame && frame.contentWindow === event.source) {
-    postStateToFrame(frame, store.music, chooseMode(store.music.track, "", store.musicEngine));
+    postStateToFrame(frame, store.music, stageMode());
   }
 });
 
@@ -2815,13 +3046,19 @@ let renderToken = 0;
 
 async function render() {
   const token = ++renderToken;
-  if (store.panel !== "music") stopMusicPolling();
+  if (store.panel !== "music") {
+    stopMusicPolling();
+    // 换面板就退出全屏：覆盖层是整页 fixed，跟着走到别的面板会挡住人
+    store.musicStageFullscreen = false;
+  }
   route();
   renderNav();
   renderStatus();
   const nodes = await RENDERERS[store.panel]();
   if (token !== renderToken) return; // 渲染期间用户又切了面板：这一份丢掉
   $main.replaceChildren(...nodes.filter(Boolean));
+  // 重渲染会把全屏类名一并刷掉（iframe 是新建的），这里按 store 补回来
+  syncStageFullscreenDom();
   document.title = `${PANELS.find((item) => item.id === store.panel).label} · 以湘控制台`;
 }
 
@@ -2830,6 +3067,7 @@ async function boot() {
   document.addEventListener("dragover", (event) => event.preventDefault());
   document.addEventListener("drop", (event) => event.preventDefault());
   renderBrandMark();
+  renderSkinPicker();
   try {
     await refreshSummary();
   } catch (error) {

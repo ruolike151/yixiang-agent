@@ -183,6 +183,30 @@ export const AUTOMATIC_LYRIC_MODES = Object.freeze(
   LYRIC_MODES.filter((mode) => mode !== "tempera"),
 );
 
+/**
+ * 舞台模式下拉框的选项表：第一项永远是"自动"（`value` 为空串 = 不点名，照歌名哈希挑），
+ * 后面按 `MODES_BY_ENGINE[engine]` 的顺序把该引擎的每个模式都列出来。
+ *
+ * `tempera` 是 opt-in（不进自动轮换池），但它**必须**在这一列里——它存在的意义就是手动选。
+ * 引擎名不认识时退回 original 的 6 个，与 `chooseMode` 同一个口径。
+ */
+export function modeOptions(engine, autoMode = "") {
+  const pool = MODES_BY_ENGINE[engine] || ORIGINAL_MODES;
+  const auto = String(autoMode || "");
+  return [
+    { value: "", label: auto ? `自动（${auto}）` : "自动" },
+    ...pool.map((mode) => ({ value: mode, label: mode })),
+  ];
+}
+
+/**
+ * 换模式要不要重载 iframe：folia 的 visualizer 只从 URL 查询串读（`?visualizer=…`），
+ * 不重载就是"选了没反应"；original 的模式走 postMessage，重载反而会白屏一下。
+ */
+export function modeChangeRequiresReload(engine) {
+  return engine === "folia";
+}
+
 // 上游的时间戳**自带方括号**：`[mm:ss.cc]`（**厘秒**，不是毫秒）。整首 LRC 是
 // 行与行 join("\n")、**没有尾换行**。方括号在这一层，`lyricLinesToLrc` 里**不再包**。
 export function formatLrcTimestamp(timeMs) {

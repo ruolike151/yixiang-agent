@@ -24,6 +24,12 @@ from typing import Any
 
 from yixiang.app import App
 from yixiang.config import ENV_PREFIX, Settings, parse_env_text
+from yixiang.media.service import (
+    AUDIO_SUFFIXES,
+    MusicService,
+    lyrics_json,
+    track_from_query,
+)
 from yixiang.memory import core_files, procedural, sync
 from yixiang.memory.core_files import CHAR_LIMITS, MEMORY_MAX_LINES, LimitExceeded
 from yixiang.ops.tracing import find_trace, read_traces
@@ -133,6 +139,7 @@ class ConsoleAPI:
         *,
         app: App | None = None,
         app_factory: Callable[[Settings], App] | None = None,
+        music_factory: Callable[[Settings], MusicService] | None = None,
         env_file: Path | str | None = None,
     ) -> None:
         self.settings = settings
@@ -143,6 +150,10 @@ class ConsoleAPI:
         # 想换装配方式（用例注入假 Provider）就换这个工厂，而不是在外面先建好 App：
         # App 里的 sqlite 连接归**建它的那条线程**所有，谁建谁用。
         self.app_factory = app_factory or (lambda current: App.from_settings(current))
+        # 音乐同理，但理由完全不同：它是为了让用例注入假 SMTC / 假 LRCLib
+        # （`MusicService` 里没有 sqlite，跨线程本来就没问题）。
+        self.music_factory = music_factory or (lambda current: MusicService(current))
+        self._music: MusicService | None = None
         self._entered = False
 
     # ------------------------------------------------------------------ 装配
@@ -165,6 +176,82 @@ class ConsoleAPI:
             )
             self._entered = True
         return self._app
+
+    # ------------------------------------------------------------------ 音乐
+    @property
+    def music(self) -> MusicService:
+        """懒装配：与 ``app`` 同理，谁先用到就在哪个线程建。
+
+        音乐链路只读 ``Settings``（没有 sqlite、没有 chat_log、不进 ToolRegistry），
+        所以既不需要 ``sqlite3`` 那条纪律，也**不该**排进 ``_SerialRunner`` 的唯一
+        工作线程——一次 LRCLib 外呼可能好几秒。
+        """
+
+        if self._music is None:
+            self._music = self.music_factory(self.settings)
+        return self._music
+
+    def music_state(self) -> dict[str, Any]:
+        """当前在放什么（系统"正在播放"）+ 歌词 + 四档轮询间隔，一次给全。"""
+
+        return self.music.state()
+
+    def music_control(self, action: str, *, position_ms: int = 0) -> dict[str, Any]:
+        """把播放控制写回系统播放器；"按不动"不是错误，是 ``applied: false``。"""
+
+        try:
+            return self.music.control(action, position_ms=max(0, int(position_ms)))
+        except ValueError as exc:
+            raise ConsoleError(
+                str(exc), code="bad_action", payload={"action": action}
+            ) from exc
+
+    def music_lyrics(
+        self, title: str, artist: str = "", album: str = "", duration_ms: int = 0
+    ) -> dict[str, Any]:
+        """按"歌名 / 歌手"取词（本机 ``.lrc`` 优先、LRCLib 兜底）。"""
+
+        name = title.strip()
+        if not name:
+            raise ConsoleError("取词需要一个歌名（title 不能为空）。", code="bad_query")
+        track = track_from_query(
+            name, artist.strip(), album.strip(), max(0, int(duration_ms))
+        )
+        return lyrics_json(self.music.resolve_lyrics(track))
+
+    def music_library(self) -> dict[str, Any]:
+        """本机曲库：``music_audio_dir`` 下的音频文件（关掉音乐就是空列表）。"""
+
+        return self.music.library()
+
+    def audio_path(self, name: str) -> Path:
+        """``/api/audio/<name>`` 的文件解析：只认 ``music_audio_dir`` 的**直接子文件**。
+
+        三道门：名字里不能有路径分隔符；``resolve()`` 之后 ``parent`` 必须还是那个
+        目录（软链接也逃不出去）；后缀必须在 ``AUDIO_SUFFIXES`` 里。``_dispatch``
+        已经在路由前 ``unquote`` 过一次，所以 ``%2e%2e%2f`` 到这里是明文 ``../``，
+        照样被拦（`test_audio_route_cannot_escape_the_audio_dir` 两条都打）。
+        """
+
+        if not self.settings.music_enabled:
+            raise ConsoleError(
+                "音乐没开（YIXIANG_MUSIC_ENABLED=0）：不提供本机曲库。",
+                status=404,
+                code="music_disabled",
+            )
+        if not name or "/" in name or "\\" in name:
+            raise ConsoleError(f"没有这个音频：{name}", status=404, code="not_found")
+        root = Path(self.settings.music_audio_dir).resolve()
+        candidate = (root / name).resolve()
+        if candidate.parent != root or not candidate.is_file():
+            raise ConsoleError(f"没有这个音频：{name}", status=404, code="not_found")
+        if candidate.suffix.lower() not in AUDIO_SUFFIXES:
+            raise ConsoleError(
+                f"不是认得的声音文件（{'/'.join(AUDIO_SUFFIXES)}）：{name}",
+                status=404,
+                code="not_found",
+            )
+        return candidate
 
     # ------------------------------------------------------------------ 总览
     def state(self) -> dict[str, Any]:

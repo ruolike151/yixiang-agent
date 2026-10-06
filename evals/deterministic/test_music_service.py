@@ -79,7 +79,13 @@ def test_state_maps_the_smtc_session_into_the_contract(tmp_path: Path, repo_root
     assert state["playback"]["isPlaying"] is True
     assert state["playback"]["positionMs"] == 30_000
     assert state["playback"]["sampledAtMs"] == 1_786_000_000_000
-    assert state["playback"]["controls"] == ["play", "pause", "next", "previous"]
+    assert state["playback"]["controls"] == [
+        "play",
+        "pause",
+        "next",
+        "previous",
+        "seek",
+    ]
     assert state["lyrics"] == {
         "status": "empty",
         "source": "lrclib",

@@ -120,7 +120,12 @@ class FakeSession:
 
 
 def playing(**overrides: Any) -> FakeSession:
-    """一首正在放的歌：QQ 音乐 / 告别前要跳舞 / 30 秒处 / 四个按钮都亮。"""
+    """一首正在放的歌：QQ 音乐 / 告别前要跳舞 / 30 秒处 / 五个按钮都亮。
+
+    "五个"含 ``is_playback_position_enabled``（拖进度条）：Task 4 的假会话就是这么
+    写的，QQ 音乐真机也是这个形状。少这一个，``control("seek")`` 会静默回
+    ``applied=False``（"这个 app 没这个按钮"），HTTP 那条链路的 seek 用例就过不去。
+    """
 
     options: dict[str, Any] = {
         "controls": FakeControls(
@@ -128,6 +133,7 @@ def playing(**overrides: Any) -> FakeSession:
             is_pause_enabled=True,
             is_next_enabled=True,
             is_previous_enabled=True,
+            is_playback_position_enabled=True,
         )
     }
     options.update(overrides)

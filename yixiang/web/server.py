@@ -51,7 +51,51 @@ MIME_TYPES = {
     ".png": "image/png",
     ".ico": "image/x-icon",
     ".webmanifest": "application/manifest+json",
+    # 音频与本机歌词：`<audio src="/api/audio/xx.mp3">` 靠这张表拿真类型。
+    # 少了它 `.mp3` 会退成 `application/octet-stream`，Chrome 直接拒绝播放。
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".lrc": "text/plain; charset=utf-8",
 }
+
+# Range 头只认这一种形状：`bytes=<start>-<end>`，两头都可以省一头（`bytes=500-` /
+# `bytes=-100`）。多段（`bytes=0-1,5-6`）要拼 multipart/byteranges，本机播放器用不到。
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def parse_byte_range(header: str, size: int) -> tuple[int, int] | None:
+    """单条 Range → 闭区间 ``(start, end)``；``None`` = 不可满足（上层回 416）。
+
+    ``size <= 0`` 一律 ``None``：空文件没有可满足的区间，硬算出来的 ``(0, -1)``
+    会让上层发一个 ``Content-Length: 0`` 的 206——前端会拿它当"续传成功"，
+    然后放着空字节流等一首歌。
+    """
+
+    if size <= 0:
+        return None
+    match = _RANGE_RE.match(header.strip())
+    if match is None:
+        return None
+    raw_start, raw_end = match.group(1), match.group(2)
+    if not raw_start and not raw_end:
+        return None
+    if not raw_start:  # bytes=-500：最后 500 字节
+        suffix = int(raw_end)
+        if suffix == 0:
+            return None
+        return max(0, size - suffix), size - 1
+    start = int(raw_start)
+    if start >= size:
+        return None
+    if not raw_end:
+        return start, size - 1
+    end = int(raw_end)
+    if end < start:
+        return None
+    return start, min(end, size - 1)
 
 
 # --------------------------------------------------------------------- 工作线程
@@ -276,6 +320,28 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/trace/"):
                 turn_id = path[len("/api/trace/") :]
                 return self._send_json(runner.call(api.trace, turn_id))
+            if path == "/api/music/state":
+                # 音乐链路不走 runner：它不碰 App / sqlite，也不该占那条唯一的工作
+                # 线程——一次 LRCLib 外呼好几秒，排进去就是"取词的时候对话卡住"。
+                return self._send_json(api.music_state())
+            if path == "/api/music/lyrics":
+                return self._send_json(
+                    api.music_lyrics(
+                        _one(query, "title"),
+                        _one(query, "artist"),
+                        _one(query, "album"),
+                        _int(query, "duration_ms", 0),
+                    )
+                )
+            if path == "/api/music/library":
+                return self._send_json(api.music_library())
+            if path.startswith("/api/audio/"):
+                name = path[len("/api/audio/") :]
+                return self._send_file(
+                    api.audio_path(name),
+                    range_header=self.headers.get("Range"),
+                    head=method == "HEAD",
+                )
 
         if method == "POST":
             if path.startswith("/api/chat/") and path.endswith("/cancel"):
@@ -317,6 +383,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return self._send_json(runner.call(api.clear_uploads))
             if path == "/api/chat":
                 return self._stream_chat()
+            if path == "/api/music/control":
+                body = self._json_body()
+                try:
+                    position_ms = int(body.get("positionMs") or 0)
+                except (TypeError, ValueError) as exc:
+                    raise ConsoleError(
+                        f"positionMs 得是毫秒数：{body.get('positionMs')!r}",
+                        code="bad_position",
+                    ) from exc
+                return self._send_json(
+                    api.music_control(
+                        str(body.get("action") or ""), position_ms=position_ms
+                    )
+                )
             if path == "/api/upload":
                 return self._upload()
 
@@ -478,6 +558,56 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             target.suffix.lower(), "application/octet-stream"
         )
         self._send_bytes(target.read_bytes(), content_type=content_type, head=head)
+
+    def _send_file(
+        self, path: Path, *, range_header: str | None = None, head: bool = False
+    ) -> None:
+        """发一个磁盘文件；带 ``Range`` 就回 206（拖进度条全靠它）。
+
+        不塞进 ``_send_bytes``：那个方法的语义是"我手里有一整块字节"，
+        ``Content-Length`` 永远等于 ``len(data)``；206 需要"长度 ≠ 文件大小"。
+        """
+
+        size = path.stat().st_size
+        content_type = MIME_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        start, end, status = 0, size - 1, 200
+        if range_header is not None:
+            span = parse_byte_range(range_header, size)
+            if span is None:
+                return self._send_unsatisfiable(size, content_type)
+            start, end, status = span[0], span[1], 206
+        if self._responded:
+            return
+        self._responded = True
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if head:
+            return
+        with path.open("rb") as handle:
+            handle.seek(start)
+            self.wfile.write(handle.read(end - start + 1))
+
+    def _send_unsatisfiable(self, size: int, content_type: str) -> None:
+        """Range 不可满足：416 + ``bytes */<size>``（前端据此知道文件到底多大）。"""
+
+        if self._responded:
+            return
+        self._responded = True
+        self.send_response(416)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Range", f"bytes */{size}")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
 
     # ------------------------------------------------------------- 请求体
     def _body_bytes(self, *, limit: int | None = None) -> bytes:
@@ -671,4 +801,10 @@ def _int(query: dict[str, list[str]], key: str, default: int) -> int:
         return default
 
 
-__all__ = ["ConsoleServer", "build_server", "parse_multipart", "serve"]
+__all__ = [
+    "ConsoleServer",
+    "build_server",
+    "parse_byte_range",
+    "parse_multipart",
+    "serve",
+]

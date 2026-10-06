@@ -22,9 +22,13 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from yixiang.app import App
 from yixiang.config import ENV_PREFIX, Settings, parse_env_text
+from yixiang.media import proxy
 from yixiang.media.providers.base import OnlineProvider, ProviderError, Song
+from yixiang.media.providers.qq import QqProvider
 from yixiang.media.providers.registry import build_providers, get_provider
 from yixiang.media.service import (
     AUDIO_SUFFIXES,
@@ -164,6 +168,29 @@ def _audio_source_or_blank(target: OnlineProvider, song: Song) -> str:
         return ""
 
 
+def build_music_service(
+    settings: Settings, *, qq: QqProvider | None = None
+) -> MusicService:
+    """生产装配：给"系统正在播放"那条链路接上 QQ 取词。
+
+    ``MusicService`` 本身不认识任何一家平台（它只收一个 ``Track -> LyricsOutcome``
+    的回调），把"谁去取词"留在这一层，是因为这里本来就同时认识 ``MusicService``
+    与三家适配器。QQ 排在 LRCLib 前面——中文歌它命中率最高。
+
+    ``qq`` 是给用例的注入口（塞一个假适配器就能把"接了没有 / 失败了退不退"钉死）；
+    不传就按 ``Settings`` 现建一个。QQ 的搜索与取词都不走 ``qq_api_base``（那台自建
+    服务只管直链），所以这里没配 base 也照样能取词。
+    """
+
+    provider = qq if qq is not None else QqProvider(settings.qq_api_base)
+    return MusicService(
+        settings,
+        online_lyrics=lambda track: online_lyrics_outcome(
+            "qq", provider.lyrics_for_track(track)
+        ),
+    )
+
+
 class ConsoleAPI:
     """控制台的唯一业务入口。一个进程一个实例（内部持有唯一的 App 与连接）。"""
 
@@ -175,6 +202,7 @@ class ConsoleAPI:
         app_factory: Callable[[Settings], App] | None = None,
         music_factory: Callable[[Settings], MusicService] | None = None,
         provider_factory: Callable[[Settings], dict[str, OnlineProvider]] | None = None,
+        proxy_client: httpx.Client | None = None,
         env_file: Path | str | None = None,
     ) -> None:
         self.settings = settings
@@ -186,13 +214,17 @@ class ConsoleAPI:
         # App 里的 sqlite 连接归**建它的那条线程**所有，谁建谁用。
         self.app_factory = app_factory or (lambda current: App.from_settings(current))
         # 音乐同理，但理由完全不同：它是为了让用例注入假 SMTC / 假 LRCLib
-        # （`MusicService` 里没有 sqlite，跨线程本来就没问题）。
-        self.music_factory = music_factory or (lambda current: MusicService(current))
+        # （`MusicService` 里没有 sqlite，跨线程本来就没问题）。默认那份要接 QQ 取词，
+        # 见 `build_music_service()`。
+        self.music_factory = music_factory or build_music_service
         # 在线平台同理，注入的是"三家适配器"这一层：用例塞假 httpx client，
         # 生产代码照 `Settings` 里那三个 base 现建。
         self.provider_factory = provider_factory or (
             lambda current: build_providers(current)
         )
+        # 歌词舞台的同源转发（`/api/lyric-proxy`）也要一个外呼客户端；用例塞
+        # `httpx.MockTransport` 就能把"发给谁、回了什么"整条钉死，一个字节不出网。
+        self.proxy_client = proxy_client
         self._music: MusicService | None = None
         self._providers: dict[str, OnlineProvider] | None = None
         self._entered = False
@@ -244,6 +276,11 @@ class ConsoleAPI:
         """当前在放什么（系统"正在播放"）+ 歌词 + 四档轮询间隔，一次给全。"""
 
         return self.music.state()
+
+    def music_progress_ms(self) -> int:
+        """放到哪了（毫秒）。歌词舞台在嵌入模式下按秒级轮询的就是这一个数。"""
+
+        return self.music.progress_ms()
 
     def music_control(self, action: str, *, position_ms: int = 0) -> dict[str, Any]:
         """把播放控制写回系统播放器；"按不动"不是错误，是 ``applied: false``。"""
@@ -316,6 +353,32 @@ class ConsoleAPI:
             "audioUrl": audio_url,
             "lyrics": lyrics_json(online_lyrics_outcome(provider, lyrics)),
         }
+
+    def lyric_proxy(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        body: bytes = b"",
+        content_type: str = "",
+    ) -> tuple[int, bytes, str]:
+        """歌词舞台要的同源转发：``(状态码, 字节, Content-Type)``。
+
+        这是全项目**唯一**一处"服务端替页面外呼"的接口，所以白名单与"只转发不解析"
+        的纪律都写在 ``yixiang.media.proxy`` 里（连同它的用例），这里只把它的错误
+        翻成 ``ConsoleError``——HTTP 层的错号与业务口径由这一处统一。
+        """
+
+        try:
+            return proxy.fetch(
+                url,
+                method=method,
+                body=body,
+                content_type=content_type,
+                client=self.proxy_client,
+            )
+        except proxy.ProxyError as exc:
+            raise ConsoleError(exc.message, status=exc.status, code=exc.code) from exc
 
     def audio_path(self, name: str) -> Path:
         """``/api/audio/<name>`` 的文件解析：只认 ``music_audio_dir`` 的**直接子文件**。

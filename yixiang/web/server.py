@@ -36,6 +36,8 @@ JSON_TYPE = "application/json; charset=utf-8"
 SSE_TYPE = "text/event-stream; charset=utf-8"
 # JSON 请求体的上限（人设 / 记忆全文也在这个量级，够了）
 JSON_BODY_LIMIT = 400_000
+# `/api/lyric-proxy` 转发的请求体上限：QQ 的 musicu.fcg 是个几百字节的 JSON。
+PROXY_BODY_LIMIT = 64 * 1024
 # multipart 的分隔行 / 头部开销：真正的上限在 console.upload 里按文件字节数把
 MULTIPART_SLACK = 64 * 1024
 DEFAULT_HOST = "127.0.0.1"
@@ -242,6 +244,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if len(path) > 1 and path.endswith("/"):
             path = path.rstrip("/") or "/"
         self._responded = False
+        # 每一条请求都重新判一次"体还没有人读"：`_body_bytes` 读过之后会把它置 True，
+        # 而**从没调用过** `_body_bytes` 的路由（"没有这个接口"就是典型）就保持 False。
+        # 处理器实例是**按连接**复用的，所以这个初值必须写在每一轮的开头。
+        self._body_consumed = not self._body_pending()
         try:
             if path == "/api" or path.startswith("/api/"):
                 self._route_api(method, path, parse_qs(parsed.query))
@@ -254,6 +260,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     code="method_not_allowed",
                 )
         except ConsoleError as exc:
+            # 请求体没被读过就早退（"没这个接口"就是典型）：那些字节还在 socket 上，
+            # 复用这条连接会把**下一个请求行**解析成 body 的残片——浏览器看到的是
+            # 400 Bad request syntax 顶着一截 JSON，而真正的原因是上一条路由不存在。
+            # 回完这一条就断开，让客户端换一条新连接（见 `_connection_header`）。
+            if not self._body_consumed:
+                self.close_connection = True
             self._send_error(exc)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
@@ -357,6 +369,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     range_header=self.headers.get("Range"),
                     head=method == "HEAD",
                 )
+            if path == "/api/spotify/progress" and method == "GET":
+                # 名字是歌词舞台（Folia 构建产物）写死的：它在嵌入模式下就认这一条。
+                # 回的是"放到哪了"的毫秒数，形状照上游 `NowPlayingProgress` 抄。
+                return self._send_json({"progress": api.music_progress_ms()})
+            if path == "/api/lyric-proxy" and method == "GET":
+                return self._lyric_proxy("GET", query)
 
         if method == "POST":
             if path.startswith("/api/chat/") and path.endswith("/cancel"):
@@ -396,6 +414,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             # "删掉一个叫 clear 的文件"
             if path == "/api/uploads/clear":
                 return self._send_json(runner.call(api.clear_uploads))
+            if path == "/api/lyric-proxy":
+                return self._lyric_proxy("POST", query)
             if path == "/api/chat":
                 return self._stream_chat()
             if path == "/api/music/control":
@@ -552,9 +572,41 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self._connection_header()
         self.end_headers()
         if not head:
             self.wfile.write(data)
+
+    def _connection_header(self) -> None:
+        """这一条响应之后要断开的话就明说一句。
+
+        HTTP/1.1 默认是长连接，只说 ``close_connection = True`` 而不发这个头，客户端
+        会以为还能接着用，然后在下一条请求上撞一个"连接被关掉"。明说之后浏览器会
+        自己换一条新连接重来——之前那条 400 Bad request syntax 就是这么来的。
+        """
+
+        if self.close_connection:
+            self.send_header("Connection", "close")
+
+    def _lyric_proxy(self, method: str, query: dict[str, list[str]]) -> None:
+        """歌词舞台的同源转发：``/api/lyric-proxy?url=…``（GET / POST）。
+
+        与 ``/api/music/*`` 同一条纪律：**不走 runner**。外呼一次好几秒，排在唯一
+        的工作线程上就是把对话卡住。白名单在 ``yixiang.media.proxy`` 里。
+        """
+
+        body = self._body_bytes(limit=PROXY_BODY_LIMIT) if method == "POST" else b""
+        status, payload, content_type = self.server.api.lyric_proxy(
+            _one(query, "url"),
+            method=method,
+            body=body,
+            content_type=self.headers.get("Content-Type", ""),
+        )
+        self._send_bytes(
+            payload,
+            content_type=content_type or "application/octet-stream",
+            status=status,
+        )
 
     def _send_error(self, exc: ConsoleError) -> None:
         if self._responded:  # SSE 已经开流：错误走事件，不再发 HTTP 状态码
@@ -602,6 +654,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self._connection_header()
         self.end_headers()
         if head:
             return
@@ -622,10 +675,29 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self._connection_header()
         self.end_headers()
 
     # ------------------------------------------------------------- 请求体
+    def _body_pending(self) -> bool:
+        """这条请求声明了体、而体还没人读 —— 早退时必须断开这条连接。
+
+        ``Content-Length`` 不是数字（`_body_bytes` 会回 400）与 chunked（回 411）都算
+        "有体"：这两种情况下有多少字节躺在那儿谁都说不准，别拿这条连接赌。
+        """
+
+        if self.headers.get("Transfer-Encoding"):
+            return True
+        try:
+            return int(self.headers.get("Content-Length") or 0) > 0
+        except ValueError:
+            return True
+
     def _body_bytes(self, *, limit: int | None = None) -> bytes:
+        # 只有**读到**了才算"这一条请求的体我处理过了"：早退路径（"没这个接口"、
+        # 411、413）据此决定这条连接还能不能复用（见 `_dispatch` 里那条
+        # `close_connection`）。
+        self._body_consumed = False
         # chunked 请求没有 Content-Length，而本机控制台只按 Content-Length 读体。
         # 与其让 multipart 解析器报"没有带文件名的字段"（把调用方引向错误的方向），
         # 不如在这里就说清楚：换浏览器或 curl -F 再传。
@@ -638,6 +710,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             )
         raw_length = self.headers.get("Content-Length")
         if not raw_length:
+            self._body_consumed = True  # 没有体，也就没有要读的东西
             return b""
         try:
             size = int(raw_length)
@@ -651,7 +724,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 code="too_large",
                 payload={"limit": limit, "actual": size},
             )
-        return self.rfile.read(size) if size > 0 else b""
+        data = self.rfile.read(size) if size > 0 else b""
+        self._body_consumed = True
+        return data
 
     def _json_body(self) -> dict[str, Any]:
         raw = self._body_bytes(limit=JSON_BODY_LIMIT)

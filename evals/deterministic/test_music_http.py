@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import threading
 import urllib.error
@@ -62,6 +63,7 @@ def _api(
     session: Any = None,
     lyrics: httpx.Client | None = None,
     app_factory: Any = None,
+    proxy_client: httpx.Client | None = None,
 ) -> ConsoleAPI:
     """一个控制台：音乐那一半全用假的（假 SMTC 会话 + 假 LRCLib + 钉死的时钟）。"""
 
@@ -74,6 +76,8 @@ def _api(
     kwargs: dict[str, Any] = {"music_factory": lambda current: service}
     if app_factory is not None:
         kwargs["app_factory"] = app_factory
+    if proxy_client is not None:
+        kwargs["proxy_client"] = proxy_client
     return ConsoleAPI(settings, **kwargs)
 
 
@@ -438,3 +442,118 @@ def test_audio_route_is_off_when_music_is_disabled(tmp_path: Path, repo_root: Pa
         status, _, _ = _request(server.url + "api/audio/hit.mp3")
 
     assert status == 404
+
+
+# --------------------------------------------------------------- 歌词舞台的两条
+def _proxy_client(handler: Any) -> httpx.Client:
+    """假外呼：一次都不出网，"发给谁、回了什么"全在 `handler` 里钉死。"""
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _no_outbound(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"这条用例不该有任何外呼：{request.url}")
+
+
+def test_the_stage_can_ask_where_the_song_is(tmp_path: Path, repo_root: Path):
+    """``/api/spotify/progress`` 这个名字是 Folia 构建产物写死的：回一个毫秒整数。"""
+
+    api = _api(_settings(tmp_path, repo_root))
+
+    with _running(api) as server:
+        # 与真机同一个顺序：面板先问一次 ``state``，舞台之后按秒级问进度。
+        _request(server.url + "api/music/state")
+        status, _, body = _request(server.url + "api/spotify/progress")
+
+    assert status == 200
+    assert json.loads(body) == {"progress": 30_000}
+
+
+def test_the_proxy_refuses_a_host_outside_the_whitelist(
+    tmp_path: Path, repo_root: Path
+):
+    """``url`` 是页面递进来的：不在白名单上的域名要在出网**之前**就被挡回。"""
+
+    api = _api(_settings(tmp_path, repo_root), proxy_client=_proxy_client(_no_outbound))
+    target = "api/lyric-proxy?" + urllib.parse.urlencode({"url": "https://example.com/x"})
+
+    with _running(api) as server:
+        status, _, body = _request(server.url + target)
+
+    assert status == 400
+    assert json.loads(body)["error"] == "host_not_allowed"
+
+
+def test_a_proxied_post_reads_its_body_and_the_connection_survives(
+    tmp_path: Path, repo_root: Path
+):
+    """转发一条带体的 POST 之后，同一条连接还能接着用。"""
+
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["body"] = request.content
+        seen["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"code": 0})
+
+    api = _api(_settings(tmp_path, repo_root), proxy_client=_proxy_client(handler))
+    payload = json.dumps({"comm": {"ct": 11, "cv": "1003006"}}).encode("utf-8")
+    target = "/api/lyric-proxy?" + urllib.parse.urlencode(
+        {"url": "https://u.y.qq.com/cgi-bin/musicu.fcg"}
+    )
+
+    with _running(api) as server:
+        conn = http.client.HTTPConnection(*server.server_address, timeout=10)
+        try:
+            conn.request("POST", target, body=payload, headers={"Content-Type": "application/json"})
+            first = conn.getresponse()
+            first_body = first.read()
+            # 同一条连接上的下一条请求：不许被断掉，更不许变成一个 400
+            conn.request("GET", "/api/music/library")
+            second = conn.getresponse()
+            second.read()
+        finally:
+            conn.close()
+
+    assert first.status == 200
+    assert json.loads(first_body) == {"code": 0}
+    assert second.status == 200
+    assert seen["url"] == "https://u.y.qq.com/cgi-bin/musicu.fcg"
+    assert seen["body"] == payload
+    assert seen["headers"]["cookie"] == "tmeLoginType=-1;"  # 页面自己设不了的那个头
+
+
+def test_an_unknown_route_with_a_body_closes_the_connection(
+    tmp_path: Path, repo_root: Path
+):
+    """用户看到的 ``400 Bad request syntax ('{"comm":…')GET /…`` 的回归钉子。
+
+    路由不存在时没人读请求体，那些字节还躺在 socket 上；同一条连接上紧接着发的
+    下一条请求会被服务端拿**请求体的残片**当请求行去解析，于是回一个 400。
+    修复后这条响应会明确 ``Connection: close``，客户端自己换一条新连接重来。
+    """
+
+    api = _api(_settings(tmp_path, repo_root))
+    body = json.dumps({"comm": {"ct": 11, "method": "DoSearchForQQMusicLite"}}).encode()
+
+    with _running(api) as server:
+        conn = http.client.HTTPConnection(*server.server_address, timeout=10)
+        try:
+            conn.request(
+                "POST",
+                "/api/there-is-no-such-route",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            first = conn.getresponse()
+            first.read()
+            conn.request("GET", "/api/music/library")
+            second = conn.getresponse()
+            second.read()
+        finally:
+            conn.close()
+
+    assert first.status == 404
+    assert first.getheader("Connection") == "close"
+    assert second.status == 200

@@ -1,22 +1,31 @@
 """QQ 音乐适配器（Task 7）。
 
 详情与直链走本机自建的 ``VITE_QQ_API_BASE``（典型值 ``http://127.0.0.1:3300``）；
-**搜索不在这里**——QQ 的 Lite 搜索（``DoSearchForQQMusicLite``）没有自建服务能替，
-参考项目也是浏览器直连，所以这条路径照抄：``POST https://u.y.qq.com/cgi-bin/musicu.fcg``。
+**搜索与取词不在这里**——它们没有自建服务能替，参考项目也是浏览器直连，所以自己走公网：
 
-歌词走 **QRC 逐字**（取舍 5）：还是这条 musicu 入口，换成
-``music.musichallSong.PlayLyricInfo``；拿回来的 ``lyric`` 是 base64 密文，
-``providers/qrc.py`` 用 3DES-ECB + raw inflate 解开，整串原文落进 ``karaoke_lyric``
-（Folia 引擎 task-10 直接吃它）。解不开就老实降级成空词 + ``note``，不假装有词。
+  * 搜索：``GET https://c.y.qq.com/soso/fcgi-bin/client_search_cp``。原来是 musicu 的
+    ``DoSearchForQQMusicLite``，那个入口**已经废了**：HTTP 200、``code=0``，但
+    ``request.code=2001``、``item_song`` 是空数组（面板表现就是"怎么搜都搜不出来"）。
+    soso 这个老入口还活着，字段名（``mid`` / ``name`` / ``singer`` / ``album`` /
+    ``interval``）与 musicu 那份一模一样，所以 ``_song_from_row`` 一行都不用改。
+  * 取词：``POST https://u.y.qq.com/cgi-bin/musicu.fcg`` 的
+    ``music.musichallSong.PlayLyricInfo``。**同一个入口要两次能拿到两级词**：
+    ``qrc=1`` 的 ``lyric`` 是 QRC 密文（逐字，``providers/qrc.py`` 解），
+    ``qrc=0`` 的同一个字段是 base64 的普通 LRC（逐句，**根本不用解密**）。
+    所以"QRC 解不开"不是终点：再要一次 ``qrc=0``，逐句照样有词（Folia 退到逐句渲染）。
+
+``lyrics_for_track()`` 是给"系统正在播放"那条链路用的：SMTC 只给歌名 / 歌手（没有
+QQ 的 songmid），所以先搜一次拿 mid、按歌名 + 歌手 + 时长挑候选，再走 :meth:`get_lyrics`。
 """
 
 from __future__ import annotations
 
 import base64
-import time
+import binascii
+import re
 from typing import Any
 
-from yixiang.media.lyrics import parse_lrc
+from yixiang.media.lyrics import Track, parse_lrc
 from yixiang.media.providers.base import (
     HttpProvider,
     ProviderError,
@@ -31,7 +40,7 @@ from yixiang.media.providers.base import (
 )
 from yixiang.media.providers.qrc import QrcError, parse_qrc, qrc_decrypt
 
-# 参考项目 utils/lyrics/providers/qqLyricProvider.ts 同一条路：浏览器直连 musicu。
+# 取词那条路：参考项目 utils/lyrics/providers/qqLyricProvider.ts 同一条路，浏览器直连 musicu。
 MUSICU_SEARCH_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
 # 匿名会话：``tmeLoginType=-1`` + okhttp UA 是参考项目用的那套，不落任何账号凭据。
 SEARCH_HEADERS = {
@@ -40,9 +49,26 @@ SEARCH_HEADERS = {
     "User-Agent": "okhttp/3.14.9",
 }
 
+# 搜索那条路：musicu 的 Lite 入口已废（``request.code=2001``），soso 这个 GET 还活着。
+# 它认的是浏览器 UA + ``Referer: https://y.qq.com/``（匿名，不带任何账号凭据）。
+LEGACY_SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
+LEGACY_SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://y.qq.com/",
+}
+
 # 同一条 musicu 入口的歌词方法：``qrc: 1`` 时 ``lyric`` 是 QRC 密文，否则是 base64 LRC。
 LYRIC_MODULE = "music.musichallSong.PlayLyricInfo"
 LYRIC_METHOD = "GetPlayLyricInfo"
+
+# "系统正在播放"没有 songmid，只能靠搜一次再认。搜太宽会认错、认错比没词更糟，
+# 所以只取前几条按下面的三条规则卡（歌名 / 歌手 / 时长），宁可不认也不认错。
+MATCH_LIMIT = 10
+# 时长的容忍度：现场版 / 伴奏 / 串烧与录音室的差通常远大于这个数，卡住正好把它们挡掉。
+MATCH_DURATION_SLACK_MS = 8_000
 
 
 def _song_from_row(raw: Any) -> Song:
@@ -72,6 +98,45 @@ def _song_from_row(raw: Any) -> Song:
     )
 
 
+def _key(value: str) -> str:
+    """归一化：小写、去掉空格 / 标点 / 括号之类的装饰（``晴天 (Live)`` → ``晴天live``）。"""
+
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", (value or "").lower())
+
+
+def _names(value: str) -> set[str]:
+    """``"周杰伦/费玉清"`` 这种多歌手串 → 归一化后的名字集合。"""
+
+    parts = re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", value or "")
+    return {_key(part) for part in parts if _key(part)}
+
+
+def _same_song(want: Track, got: Song) -> bool:
+    """歌名 + 歌手 + 时长三条同时对上才算同一首（某一条是空的就不拿它卡人）。
+
+    歌名用"互相包含"而不是相等：SMTC 给的常常是 ``晴天 (Live)`` / ``晴天 - Live``，
+    去掉装饰之后两边都归成 ``晴天live``，正好对上。
+    """
+
+    mine, theirs = _key(want.title), _key(got.title)
+    if not mine or not theirs or not (mine == theirs or mine in theirs or theirs in mine):
+        return False
+    if want.artist and got.artist and not (_names(want.artist) & _names(got.artist)):
+        return False
+    if want.duration_ms > 0 and got.duration_ms > 0:
+        return abs(want.duration_ms - got.duration_ms) <= MATCH_DURATION_SLACK_MS
+    return True
+
+
+def _best_match(items: tuple[Song, ...], track: Track) -> Song | None:
+    """搜索结果按相关度排，取**第一个**对得上的；一条都对不上就 ``None``。"""
+
+    for song in items:
+        if _same_song(track, song):
+            return song
+    return None
+
+
 class QqProvider(HttpProvider):
     name = "qq"
     display_name = "QQ 音乐"
@@ -81,51 +146,29 @@ class QqProvider(HttpProvider):
     ) -> ProviderPage:
         size = max(1, min(int(limit), 100))
         start = max(0, int(offset))
-        body = {
-            "comm": {
-                "ct": 11,
-                "cv": "1003006",
-                "v": "1003006",
-                "os_ver": "15",
-                "phonetype": "24122RKC7C",
-                "rom": "MIUI_13",
-                "tmeAppID": "qqmusiclight",
-                "nettype": "NETWORK_WIFI",
-                "udid": "0",
-                "uid": "0",
+        payload = self._fetch(
+            "GET",
+            LEGACY_SEARCH_URL,
+            params={
+                "w": keyword,
+                "format": "json",
+                "p": start // size + 1,
+                "n": size,
+                "cr": 1,
+                "new_json": 1,
+                "t": 0,
+                "aggr": 1,
             },
-            "request": {
-                "method": "DoSearchForQQMusicLite",
-                "module": "music.search.SearchCgiService",
-                "param": {
-                    "search_id": str(int(time.time() * 1000)),
-                    "remoteplace": "search.android.keyboard",
-                    "query": keyword,
-                    "search_type": 0,
-                    "num_per_page": size,
-                    "page_num": start // size + 1,
-                    "highlight": 0,
-                    "nqc_flag": 0,
-                    "page_id": 1,
-                    "grp": 1,
-                },
-            },
-        }
-        payload = self.post_json(MUSICU_SEARCH_URL, body, headers=SEARCH_HEADERS)
+            headers=LEGACY_SEARCH_HEADERS,
+        )
         root = as_dict(payload)
-        request_node = as_dict(root.get("request"))
-        if (
-            to_int(root.get("code"), default=-1) != 0
-            or to_int(request_node.get("code"), default=-1) != 0
-        ):
+        if to_int(root.get("code"), default=-1) != 0:
             raise ProviderError(
                 "invalid-response", "QQ 音乐搜索没通过（code 不是 0）。", self.name
             )
-        data = as_dict(as_dict(request_node.get("data")).get("body"))
-        items = tuple(
-            _song_from_row(raw) for raw in as_list(pick(data, "item_song", "song"))
-        )
-        total = to_int(pick(data, "total"), default=start + len(items))
+        data = as_dict(as_dict(root.get("data")).get("song"))
+        items = tuple(_song_from_row(raw) for raw in as_list(data.get("list")))
+        total = to_int(pick(data, "totalnum", "total"), default=start + len(items))
         next_offset = start + len(items)
         return ProviderPage(
             items=items,
@@ -166,7 +209,73 @@ class QqProvider(HttpProvider):
         )
 
     def get_lyrics(self, song: Song) -> ProviderLyrics | None:
-        """QQ 的歌：**能走 QRC 就走 QRC**（逐字），否则退 base64 LRC（逐句）。"""
+        """QQ 的歌：**逐字优先**（QRC），解不开就退成逐句（``qrc=0`` 的普通 LRC）。
+
+        ``qrc=1`` 拿到的 ``lyric`` 是 QRC 密文——解不开是常态（上游换过算法），但那**不是**
+        "这首歌没词"：同一个字段在 ``qrc=0`` 里是 base64 的明文 LRC。所以这里多要一次，
+        逐句照样有词，歌词舞台退到逐句渲染。
+        """
+
+        word_level = self._word_level_lyrics(song.id)
+        return word_level if word_level is not None else self._line_level_lyrics(song.id)
+
+    def lyrics_for_track(self, track: Track) -> ProviderLyrics | None:
+        """"系统正在播放"那条链路：只有歌名 / 歌手，先搜一次拿 mid 再取词。
+
+        **任何取不到的原因都回 ``None``**（搜不到、对不上、网络炸）：调用方
+        （``MusicService``）接着会去问 LRCLib，不能让 QQ 的一次失败把别的来源一起带走。
+        """
+
+        keyword = " ".join(
+            part.strip() for part in (track.title, track.artist) if part.strip()
+        )
+        if not keyword:
+            return None
+        try:
+            page = self.search_songs(keyword, limit=MATCH_LIMIT)
+        except ProviderError:
+            return None
+        best = _best_match(page.items, track)
+        if best is None:
+            return None
+        try:
+            return self.get_lyrics(best)
+        except ProviderError:
+            return None
+
+    # ---- 内部：两级词
+    def _word_level_lyrics(self, song_id: str) -> ProviderLyrics | None:
+        """QRC 逐字；解不开 / 这首歌没有 QRC 就回 ``None``（交给逐句那条线）。"""
+
+        data = self._lyric_data(song_id, qrc=1)
+        blob = str(pick(data, "lyric") or "")
+        if to_int(data.get("qrc")) != 1 or not blob:
+            return None
+        try:
+            plain = qrc_decrypt(blob)
+        except QrcError:
+            return None
+        lines, karaoke = parse_qrc(plain)
+        if not lines:
+            return None
+        return ProviderLyrics(lines=lines, word_by_word=True, karaoke_lyric=karaoke)
+
+    def _line_level_lyrics(self, song_id: str) -> ProviderLyrics:
+        """``qrc=0`` 的逐句 LRC（base64 明文，不涉及解密）。没词就是空词，不抛。"""
+
+        data = self._lyric_data(song_id, qrc=0)
+        blob = str(pick(data, "lyric") or "")
+        if not blob:
+            return ProviderLyrics(note="QQ 没给这首歌的词。")
+        try:
+            text = base64.b64decode(blob).decode("utf-8", "replace")
+        except (binascii.Error, ValueError):
+            return ProviderLyrics(note="QQ 给的歌词不是 base64，认不出。")
+        lines = parse_lrc(text)
+        return ProviderLyrics(lines=lines, note="" if lines else "QQ 只给了空 LRC。")
+
+    def _lyric_data(self, song_id: str, *, qrc: int) -> dict[str, Any]:
+        """走一次 ``GetPlayLyricInfo``，只取 ``req_1.data`` 那一层。"""
 
         payload = self.post_json(
             MUSICU_SEARCH_URL,
@@ -174,26 +283,9 @@ class QqProvider(HttpProvider):
                 "req_1": {
                     "module": LYRIC_MODULE,
                     "method": LYRIC_METHOD,
-                    "param": {"format": "json", "songMID": song.id, "qrc": 1},
+                    "param": {"format": "json", "songMID": song_id, "qrc": qrc},
                 }
             },
             headers=SEARCH_HEADERS,
         )
-        data = as_dict(as_dict(as_dict(payload).get("req_1")).get("data"))
-        blob = str(pick(data, "lyric") or "")
-        if not blob:
-            return None
-        if to_int(data.get("qrc")) == 1:
-            try:
-                plain = qrc_decrypt(blob)
-            except QrcError as exc:
-                # 密文坏了 / 上游换算法：降级成空词 + 说明，不假装有词。
-                return ProviderLyrics(note=f"QQ 的 QRC 解不开（{exc}）——先只报空。")
-            lines, karaoke = parse_qrc(plain)
-            if not lines:
-                return ProviderLyrics(note="QQ 的 QRC 解开了，但里面没有行。")
-            return ProviderLyrics(lines=lines, word_by_word=True, karaoke_lyric=karaoke)
-        # 没 QRC 的歌（纯音乐 / 版权）：``lyric`` 是 base64 的 LRC，退回逐句。
-        text = base64.b64decode(blob).decode("utf-8", "replace")
-        lines = parse_lrc(text)
-        return ProviderLyrics(lines=lines, note="" if lines else "QQ 只给了空 LRC。")
+        return as_dict(as_dict(as_dict(payload).get("req_1")).get("data"))

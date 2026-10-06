@@ -52,6 +52,15 @@ MIN_POLL_MS = 250
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".flac", ".ogg", ".wav")
 AUDIO_URL_PREFIX = "/api/audio/"
 
+# 一次读不到 SMTC **不算**"没在放"：QQ 音乐切歌、窗口最小化、会话重建的那一两秒里
+# ``get_current_session()`` 会短暂回 None。这段窗口内继续回上一份状态，面板与歌词
+# 舞台就一格都不闪；用户看到的"歌放到一半突然消失"正是闪的那一下。
+HOLD_MS = 8_000
+
+# 取词失败也缓存，但**不是永远**：LRCLib 一次握手超时（真机上见过 ``_ssl.c:993``）
+# 不该让这首歌在这次进程里再也问不出词来。过了这个窗口，下一次 ``state()`` 重问。
+LYRICS_ERROR_RETRY_MS = 60_000
+
 # 能被反向写回播放器的动作；不在这张表里的词是调用方写错代码，直接 ValueError。
 ACTIONS = ("play", "pause", "next", "previous", "seek")
 
@@ -154,15 +163,24 @@ class MusicService:
         *,
         session_factory: Callable[[], Any] | None = None,
         lyrics_client: httpx.Client | None = None,
+        online_lyrics: Callable[[Track], LyricsOutcome] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
         self._lyrics_client = lyrics_client
+        self._online_lyrics = online_lyrics
         self._clock = clock
-        # 按 track.id 存"这首歌问过什么"：ready / empty / error 一律缓存。
+        # 按 track.id 存"这首歌问过什么"与**什么时候问的**：ready / empty 一律命中，
+        # error 只认 ``LYRICS_ERROR_RETRY_MS`` 之内的那一次（见上面那个常量的注释）。
         # 切歌换 id 自然失效；磁盘缓存（Task 2）只管已查到的好结果。
-        self._lyrics_memory: dict[str, LyricsOutcome] = {}
+        self._lyrics_memory: dict[str, tuple[LyricsOutcome, int]] = {}
+        # 上一份"读到了"的完整状态（``None`` = 这个进程还没读到过）。
+        # 有两个用处：SMTC 短暂读不到时把它顶上去；舞台问进度时从它往前推。
+        self._last: dict[str, Any] | None = None
+        # ``(positionMs, sampledAtMs, isPlaying)``：舞台的 ``/api/spotify/progress``
+        # 按秒级轮询，每次去问一遍 winrt 太重，用上一次的快照往前推就够。
+        self._last_progress: tuple[int, int, bool] = (0, 0, False)
 
     # ------------------------------------------------------------------ 状态
     def state(self, *, track: Track | None = None) -> dict[str, Any]:
@@ -195,16 +213,23 @@ class MusicService:
         try:
             snapshot = read_current(session_factory=self._session_factory)
         except SmtcUnavailable as exc:
-            payload = self._blank("offline", now_ms, poll)
-            payload["note"] = f"SMTC 读取失败：{exc}"
-            return payload
+            return self._hold_or_blank(now_ms, poll, note=f"SMTC 读取失败：{exc}")
+        except Exception as exc:  # noqa: BLE001 - 会话失效时 winrt 抛的类型随版本变，一律当"这次没读到"
+            return self._hold_or_blank(now_ms, poll, note=f"SMTC 读取异常：{exc}")
         if snapshot is None:
-            return self._blank("offline", now_ms, poll)
+            return self._hold_or_blank(now_ms, poll)
+        if not snapshot.track.title.strip():
+            # QQ 音乐切歌 / 最小化那一两秒里，SMTC 有时会回一条"有会话、没元数据"的空壳：
+            # 歌名一空，面板与歌词舞台就都不知道放的是哪一首（用户看到的"无法识别"）。
+            # 与"没有会话"一样当缺口处理：先顶上一首，窗口过了才承认读不到。
+            return self._hold_or_blank(
+                now_ms, poll, note="SMTC 只回了空标题：这一秒读不出是哪一首。"
+            )
 
         position = snapshot.position_ms
         if snapshot.duration_ms > 0:
             position = min(position, snapshot.duration_ms)
-        return {
+        payload = {
             "ok": True,
             "connection": "connected",
             "source": "smtc",
@@ -218,6 +243,23 @@ class MusicService:
             "lyrics": lyrics_json(self.resolve_lyrics(snapshot.track)),
             "pollMs": poll,
         }
+        self._last = payload
+        self._last_progress = (position, now_ms, payload["playback"]["isPlaying"])
+        return payload
+
+    def progress_ms(self) -> int:
+        """现在大概放到哪了（毫秒）。
+
+        歌词舞台在嵌入模式下按秒级打 ``/api/spotify/progress``；那个接口**不能**每次
+        都去问一遍 SMTC（一次 winrt 往返几十毫秒，还全排在同一条路上），所以拿上一次
+        ``state()`` 的快照按流逝往前推。暂停时就是那个位置本身。
+        """
+
+        position, sampled_at, playing = self._last_progress
+        if not playing:
+            return max(0, position)
+        elapsed = max(0, int(self._clock() * 1000) - sampled_at)
+        return max(0, position + elapsed)
 
     # ------------------------------------------------------------------ 控制
     def control(self, action: str, *, position_ms: int = 0) -> dict[str, Any]:
@@ -250,13 +292,22 @@ class MusicService:
 
     # ------------------------------------------------------------------ 取词
     def resolve_lyrics(self, track: Track) -> LyricsOutcome:
-        """三级降级：本地 ``.lrc`` → 磁盘缓存 → LRCLib。同一首歌只算一次。"""
+        """四级降级：本地 ``.lrc`` → 磁盘缓存 → 在线平台 → LRCLib。同一首歌只算一次。
 
+        "只算一次"对 ``error`` 有个例外：那次失败可能只是握了个超时，隔一分钟重试。
+        否则一次 SSL 超时会让这首歌在这次进程里**永远**没词——而 ``state()`` 每次都
+        会调到这里。
+        """
+
+        now_ms = int(self._clock() * 1000)
         cached = self._lyrics_memory.get(track.id)
         if cached is not None:
-            return cached
+            outcome, at_ms = cached
+            # 命中的条件：好结果永远命中；``error`` 只在窗口**内**命中（窗口一过就要重问）。
+            if outcome.status != "error" or now_ms - at_ms < LYRICS_ERROR_RETRY_MS:
+                return outcome
         outcome = self._load_lyrics(track)
-        self._lyrics_memory[track.id] = outcome
+        self._lyrics_memory[track.id] = (outcome, now_ms)
         return outcome
 
     def _load_lyrics(self, track: Track) -> LyricsOutcome:
@@ -268,6 +319,14 @@ class MusicService:
         cached = read_cache(path)
         if cached is not None:
             return LyricsOutcome(status="ready", source=cached.source, lines=cached.lines)
+
+        # 在线平台（生产装的是 QQ）放在 LRCLib 前面：中文歌在 QQ 上基本都有带时间轴的词，
+        # 而 LRCLib 对中文歌既查得慢（真机上见过 ``_ssl.c:993`` 握手超时）又经常查不到。
+        # **失败/查不到一律继续往下问**——在线这条线只是加分项，不该把 LRCLib 顶掉。
+        if self._online_lyrics is not None:
+            online = self._online_lyrics(track)
+            if online.status == "ready":
+                return online
 
         try:
             fetched = fetch_lrclib(track, client=self._lyrics_client)
@@ -301,6 +360,25 @@ class MusicService:
         return {"items": items}
 
     # ------------------------------------------------------------------ 内部
+    def _hold_or_blank(
+        self, now_ms: int, poll: dict[str, int], *, note: str = ""
+    ) -> dict[str, Any]:
+        """这一秒没读到 SMTC：窗口内把上一份原样顶上去，窗口外才说"没在放"。
+
+        "原样"是字面意思——连 ``sampledAtMs`` 都不动，所以前端按"位置 + 流逝"算出来
+        的进度条会照常往前走，界面连一格都不闪。宽限窗口过了再回空骨架，并把
+        ``note``（SMTC 报了什么错）带上，免得"读不了"和"没在放"长一个样。
+        """
+
+        held = self._last
+        if held is not None and now_ms - int(held["playback"]["sampledAtMs"]) <= HOLD_MS:
+            return dict(held)  # 浅拷贝：调用方改不动我们这份
+        self._last = None
+        payload = self._blank("offline", now_ms, poll)
+        if note:
+            payload["note"] = note
+        return payload
+
     def _poll(self) -> dict[str, int]:
         settings = self._settings
         return {

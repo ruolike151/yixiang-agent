@@ -5,12 +5,13 @@
   * 适配器层只测"这家 JSON → ``Song`` / ``ProviderLyrics``"的翻译，以及错误映射；
   * 路由层起一台真 ``ConsoleServer``，测前端真正会打的那两个 URL 与状态码。
 
-QQ 的搜索打在 ``u.y.qq.com`` 上（与参考项目同一条路），所以假 transport 是**唯一**
-能让这组用例离线跑起来的东西。真机对照见任务文档 Step 5。
+QQ 的搜索打在 ``c.y.qq.com``、取词打在 ``u.y.qq.com`` 上（都是浏览器直连那条路），
+所以假 transport 是**唯一**能让这组用例离线跑起来的东西。真机对照见任务文档 Step 5。
 """
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import threading
@@ -26,14 +27,15 @@ import pytest
 from conftest import make_settings
 from music_fakes import playing, session_factory
 
-from yixiang.media.providers.base import ProviderError, Song
+from yixiang.media.lyrics import LyricLine, Track
+from yixiang.media.providers.base import ProviderError, ProviderLyrics, Song
 from yixiang.media.providers.kugou import KugouProvider
 from yixiang.media.providers.netease import NeteaseProvider
 from yixiang.media.providers.qq import QqProvider
 from yixiang.media.providers.qrc import qrc_encrypt
 from yixiang.media.providers.registry import build_providers, get_provider
 from yixiang.media.service import MusicService
-from yixiang.web.console import ConsoleAPI
+from yixiang.web.console import ConsoleAPI, build_music_service
 from yixiang.web.server import ConsoleServer
 
 NETEASE = "http://netease.test"
@@ -302,27 +304,29 @@ def test_kugou_lyrics_walk_search_then_song():
 # --------------------------------------------------------------------- QQ
 QQ_SEARCH = {
     "code": 0,
-    "request": {
-        "code": 0,
-        "data": {
-            "body": {
-                "item_song": [
-                    {
-                        "mid": "0039MnYb0qxYhV",
-                        "id": 123456,
-                        "title": "告别前要跳舞",
-                        "singer": [{"id": 1, "name": "汪苏泷"}],
-                        "album": {"id": 2, "mid": "002fRO0N4FftzY", "name": "告别前要跳舞"},
-                        "interval": 240,
-                    }
-                ]
-            }
-        },
+    "data": {
+        "song": {
+            "totalnum": 1,
+            "curnum": 1,
+            "list": [
+                {
+                    "mid": "0039MnYb0qxYhV",
+                    "id": 123456,
+                    "title": "告别前要跳舞",
+                    "singer": [{"id": 1, "name": "汪苏泷"}],
+                    "album": {"id": 2, "mid": "002fRO0N4FftzY", "name": "告别前要跳舞"},
+                    "interval": 240,
+                }
+            ],
+        }
     },
 }
 
 
-def test_qq_search_reads_musicu():
+def test_qq_search_reads_the_legacy_soso_endpoint():
+    """`DoSearchForQQMusicLite` 已废（``request.code=2001``、``item_song`` 是空列表），
+    所以搜索换成 ``c.y.qq.com`` 的老入口——字段名一样，翻译层一行没改。"""
+
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -333,14 +337,18 @@ def test_qq_search_reads_musicu():
 
     page = provider.search_songs("告别前", limit=20, offset=0)
 
-    assert seen[0].method == "POST"
-    assert seen[0].url.host == "u.y.qq.com"
-    assert b"DoSearchForQQMusicLite" in seen[0].content
+    assert seen[0].method == "GET"
+    assert seen[0].url.host == "c.y.qq.com"
+    assert seen[0].url.path == "/soso/fcgi-bin/client_search_cp"
+    assert seen[0].url.params["w"] == "告别前"
+    assert seen[0].headers["referer"] == "https://y.qq.com/"
     song = page.items[0]
     assert song.id == "0039MnYb0qxYhV"
     assert song.artist == "汪苏泷"
     assert song.album == "告别前要跳舞"
     assert song.duration_ms == 240_000
+    assert page.total == 1
+    assert page.has_more is False
     assert (
         song.artwork_url
         == "https://y.gtimg.cn/music/photo_new/T002R300x300M000002fRO0N4FftzY.jpg"
@@ -403,7 +411,8 @@ def test_qq_lyrics_use_qrc_word_by_word():
     # 逐字原文原样带出，Folia（task-10）直接吃这串。
     assert result.karaoke_lyric == plain
 
-    # 密文坏了 / 上游换算法：空词 + 说明，不假装有词（取舍 5 的降级口径）。
+    # 密文坏了 / 上游换算法：这会儿会再去要一次 qrc=0（见下一条用例）；这里连
+    # qrc=0 也是同一份坏响应，所以最终空词 + 说明，不假装有词（取舍 5 的降级口径）。
     def broken(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"code": 0, "req_1": {"data": {"qrc": 1, "lyric": "AAAA"}}}
@@ -415,7 +424,165 @@ def test_qq_lyrics_use_qrc_word_by_word():
 
     assert degraded is not None
     assert degraded.lines == ()
-    assert "QRC" in degraded.note
+    assert "空 LRC" in degraded.note
+
+
+def test_qq_lyrics_fall_back_to_plain_lrc_when_qrc_is_broken():
+    """QRC 解不开**不是**"这首歌没词"：同一个接口 ``qrc=0`` 给的是 base64 明文 LRC。
+
+    真机上 ``qrc=1`` 回来的密文根本不是 8 的整数倍（7356 % 8 = 4），3DES 连门都进不去，
+    所以这条降级是**主路径**——逐字没了，逐句照样有。
+    """
+
+    lrc = "[ti:晴天]\n[ar:周杰伦]\n[00:01.00]第一行\n[00:12.50]第二行\n"
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        qrc = json.loads(request.content)["req_1"]["param"]["qrc"]
+        seen.append(qrc)
+        if qrc == 1:
+            return httpx.Response(
+                200, json={"code": 0, "req_1": {"data": {"qrc": 1, "lyric": "AAAA"}}}
+            )
+        blob = base64.b64encode(lrc.encode("utf-8")).decode("ascii")
+        return httpx.Response(
+            200, json={"code": 0, "req_1": {"data": {"qrc": 0, "lyric": blob}}}
+        )
+
+    provider = QqProvider(QQ, client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    result = provider.get_lyrics(Song(provider="qq", id="0039MnYb0qxYhV", title="x"))
+
+    assert seen == [1, 0]  # 先试逐字，解不开再要逐句
+    assert result is not None
+    assert result.word_by_word is False
+    assert result.karaoke_lyric == ""
+    assert result.note == ""
+    assert [(line.time_ms, line.text) for line in result.lines] == [
+        (1000, "第一行"),
+        (12500, "第二行"),
+    ]
+
+
+# SMTC 只给歌名 / 歌手，没有 songmid：`lyrics_for_track` 先搜一次再认。
+QQ_TRACK_SEARCH = {
+    "code": 0,
+    "data": {
+        "song": {
+            "totalnum": 2,
+            "curnum": 2,
+            "list": [
+                {  # 同名不同歌手：歌名对得上，歌手对不上，必须跳过
+                    "mid": "000WRONGWRONG",
+                    "title": "告别前要跳舞",
+                    "singer": [{"name": "别人"}],
+                    "album": {"mid": "000album000", "name": "别人的专辑"},
+                    "interval": 240,
+                },
+                {
+                    "mid": "0039MnYb0qxYhV",
+                    "title": "告别前要跳舞 (Live)",
+                    "singer": [{"name": "汪苏泷"}],
+                    "album": {"mid": "002fRO0N4FftzY", "name": "告别前要跳舞"},
+                    "interval": 241,
+                },
+            ],
+        }
+    },
+}
+
+
+def test_qq_lyrics_for_track_searches_then_picks_the_same_song():
+    seen: list[httpx.Request] = []
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "c.y.qq.com":
+            return httpx.Response(200, json=QQ_TRACK_SEARCH)
+        asked.append(json.loads(request.content)["req_1"]["param"]["songMID"])
+        return httpx.Response(
+            200, json={"code": 0, "req_1": {"data": {"qrc": 0, "lyric": ""}}}
+        )
+
+    provider = QqProvider(QQ, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    track = Track(
+        id="smtc:QQMusic|告别前要跳舞|汪苏泷",
+        title="告别前要跳舞",
+        artist="汪苏泷",
+        duration_ms=240_000,
+    )
+
+    provider.lyrics_for_track(track)
+
+    assert seen[0].url.params["w"] == "告别前要跳舞 汪苏泷"
+    assert set(asked) == {"0039MnYb0qxYhV"}  # 跳过了同名不同歌手那条
+
+
+def test_qq_lyrics_for_track_gives_up_rather_than_guessing():
+    """对不上就回 ``None``：认错比没词更糟——那会把别人的词贴上这首歌。
+
+    时长差得离谱（现场版 400 秒 vs 录音室 240 秒）也算对不上。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "song": {
+                        "totalnum": 1,
+                        "list": [
+                            {
+                                "mid": "000WRONGWRONG",
+                                "title": "告别前要跳舞",
+                                "singer": [{"name": "汪苏泷"}],
+                                "album": {"mid": "000album000", "name": "x"},
+                                "interval": 400,
+                            }
+                        ],
+                    }
+                },
+            },
+        )
+
+    provider = QqProvider(QQ, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    track = Track(id="x", title="告别前要跳舞", artist="汪苏泷", duration_ms=240_000)
+
+    assert provider.lyrics_for_track(track) is None
+    # 歌名都空的情况下连搜都不该搜（省一次外呼）
+    assert provider.lyrics_for_track(Track(id="y", title="   ")) is None
+
+
+def test_build_music_service_wires_qq_into_the_playing_now_path(
+    tmp_path: Path, repo_root: Path
+):
+    """"系统正在播放"那条链路原来只问本地 ``.lrc`` + LRCLib，所以中文歌常常一句词都没有。
+
+    默认装配（``ConsoleAPI`` 用的就是它）必须把 QQ 接进去；这里塞一个假适配器把
+    "接了没有 / 词有没有变成 ``qq``"整条钉死，一个字节不出网。
+    """
+
+    asked: list[str] = []
+
+    class _FakeQq:
+        def lyrics_for_track(self, track: Track) -> ProviderLyrics:
+            asked.append(track.title)
+            return ProviderLyrics(
+                lines=(LyricLine(time_ms=1000, text="晴天"),), word_by_word=False
+            )
+
+    service = build_music_service(_settings(tmp_path, repo_root), qq=_FakeQq())
+
+    outcome = service.resolve_lyrics(
+        Track(id="x", title="晴天", artist="周杰伦", duration_ms=269_000)
+    )
+
+    assert asked == ["晴天"]
+    assert outcome.status == "ready"
+    assert outcome.source == "qq"
+    assert [(line.time_ms, line.text) for line in outcome.lines] == [(1000, "晴天")]
 
 
 # --------------------------------------------------------------------- registry

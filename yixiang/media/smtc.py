@@ -23,6 +23,12 @@ from typing import Any
 
 from yixiang.media.lyrics import Track
 from yixiang.runtime import eventloop
+from yixiang.runtime.msvc_runtime import unify_msvc_runtime
+
+# 包 import 时已经对齐过一次（yixiang/__init__.py），这里再点一次是**故意的**：
+# 风险就在下面这三行——winrt 自带 14.29 的旧 MSVCP140，抢先加载会把整个进程的
+# 运行库钉死，后加载的 onnxruntime 随后 0xC0000005。把不变量写在出事的地方。
+unify_msvc_runtime()
 
 try:  # pragma: no cover - 没装 winrt 的机器只会走 except
     from winrt.windows.media.control import (
